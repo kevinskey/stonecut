@@ -1432,6 +1432,90 @@ function smoothPath(poly: Pt[], passes = 2): Pt[] {
   return pts
 }
 
+
+// Single fill rows phase-lock to the OUTLINE stones beside them: project the
+// wall stones onto the spine, cluster their beats, and place fill stones ON
+// the beats (grid) or BETWEEN them (brick) — the rung structure of a
+// hand-set template.
+function placePhaseLocked(
+  poly: Pt[],
+  walls: Pt[],
+  pitch: number,
+  rhythm: number,
+  idx: SpacingIndex,
+  brick: boolean,
+  closed = false,
+): Pt[] {
+  const path = makePath(poly, closed)
+  if (!path) return []
+  const fallback = (why: string) => {
+    dbg('fallback:' + why, [pointAt(path, path.total / 2)])
+    return closed
+      ? walkPoly(poly, true, pitch, idx, 5, rhythm)
+      : placeRun(path, 0, path.total, pitch, idx, undefined, rhythm)
+  }
+  if (!walls.length) return fallback('nowalls')
+  if (path.total < rhythm * 0.4) return fallback('short')
+  const step = 0.4
+  const n = Math.max(2, Math.ceil(path.total / step))
+  const samples: Pt[] = []
+  for (let i = 0; i <= n; i++) samples.push(pointAt(path, (i * path.total) / n))
+  const arcs: number[] = []
+  for (const w of walls) {
+    let bi = 0
+    let bd = 1e9
+    for (let i = 0; i <= n; i++) {
+      const d = Math.hypot(w.x - samples[i].x, w.y - samples[i].y)
+      if (d < bd) {
+        bd = d
+        bi = i
+      }
+    }
+    if (bd < rhythm * 2.4) arcs.push((bi * path.total) / n)
+  }
+  if (arcs.length < 2) return fallback('few-arcs')
+  arcs.sort((a, b) => a - b)
+  const clusters: number[] = []
+  let acc: number[] = [arcs[0]]
+  for (let i = 1; i < arcs.length; i++) {
+    if (arcs[i] - arcs[i - 1] < rhythm * 0.45) acc.push(arcs[i])
+    else {
+      clusters.push(acc.reduce((a2, b2) => a2 + b2, 0) / acc.length)
+      acc = [arcs[i]]
+    }
+  }
+  clusters.push(acc.reduce((a2, b2) => a2 + b2, 0) / acc.length)
+  const targets: number[] = []
+  if (clusters.length === 1) {
+    targets.push(
+      brick ? Math.min(path.total, clusters[0] + rhythm / 2) : clusters[0],
+    )
+  } else if (brick) {
+    for (let i = 1; i < clusters.length; i++) targets.push((clusters[i - 1] + clusters[i]) / 2)
+    if (closed && clusters.length >= 2)
+      targets.push(((clusters[clusters.length - 1] + clusters[0] + path.total) / 2) % path.total)
+  } else {
+    targets.push(...clusters)
+  }
+  const placed: Pt[] = []
+  for (const t of targets) {
+    for (const f of [0, 0.12, -0.12, 0.25, -0.25]) {
+      const p = pointAt(path, t + f * rhythm)
+      if (
+        idx.canPlace(p) &&
+        (!placed.length ||
+          Math.hypot(p.x - placed[placed.length - 1].x, p.y - placed[placed.length - 1].y) >= pitch)
+      ) {
+        idx.add(p)
+        placed.push(p)
+        break
+      }
+    }
+  }
+  if (placed.length) { dbg('lock', placed); return placed }
+  return fallback('none-placed')
+}
+
 // ---------------------------------------------------------------------------
 // Fill
 // ---------------------------------------------------------------------------
@@ -1446,7 +1530,6 @@ export function fillStones(
   rhythmMm?: number,
   brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
 ): Pt[] {
-  void fixedPts
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
   const pitch = holeMm + gapMm
@@ -1472,18 +1555,21 @@ export function fillStones(
       const paths = traceSkeleton(skel, w, h)
         .map((p) => smoothPath(p).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
+      for (const p of paths)
+        out.push(...placePhaseLocked(p, fixedPts, pitch, rhythm, idx, brick))
     }
 
     if (spanMm < pitch * 0.55) {
       // The pocket is so shallow that an iso-loop's two sides would collide:
       // place a single centerline row on the pocket's skeleton.
+      dbg(`skelcomp:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
       walkSkeleton(compMask)
     } else {
       // Multiple rows: stretch spacing so the block exactly spans the depth
       // band (equal padding both sides); cap the stretch and re-center if the
       // stretched spacing would look sparse.
       let n = Math.floor(spanMm / rowPitch) + 1
+      dbg(`ringcomp:n${n}:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
       let s = n > 1 ? spanMm / (n - 1) : 0
       let start = startInsetMm
       if (n > 1 && s > rowPitch * 1.35) {
@@ -1499,23 +1585,36 @@ export function fillStones(
         tMm = Math.max(tMm, startInsetMm)
         const tPx = tMm * pxPerMm + 0.01 // epsilon keeps levels off grid samples
         for (let i = 0; i < w * h; i++) levelMask[i] = compMask[i] && dt[i] >= tPx ? 1 : 0
-        if (tMm > maxD[lbl] / pxPerMm - pitch * 0.45) {
+        if (tMm > maxD[lbl] / pxPerMm - pitch * 0.8) {
           // Thin band near the ridge: an iso-loop here zigzags. Collapse the
           // row to the band's skeleton (spine for strokes, dot for blobs).
           walkSkeleton(levelMask)
           continue
         }
-        // LAW-COMPLIANT rings: each interior ring runs the full corner-aware,
-        // rhythm-harmonized pipeline — deterministic, no organic drift.
-        // Brick style half-offsets alternate rings.
+        // LAW-COMPLIANT rings: single rings phase-lock DIRECTLY to the wall
+        // stones (grid = on their beats, brick = between them); multi-ring
+        // areas run the corner pipeline with alternating brick phase.
         const rings = marchingSquares(levelMask, w, h)
           .map((c) => c.map(toMm))
           .sort((a, b) => b.length - a.length)
-        const phase = brick && k % 2 === 1 ? 0.5 : 0
-        for (const ring of rings) {
-          const info = analyzeContour(ring, pitch, rhythm)
-          placeContourCorners(info, pitch, idx, out, undefined, rhythm)
-          placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
+        if (n === 1) {
+          for (const ring of rings)
+            out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick, true))
+        } else {
+          const phase = brick && k % 2 === 0 ? 0.5 : 0
+          for (const ring of rings) {
+            const info = analyzeContour(ring, pitch, rhythm)
+            if (info.fallback) {
+              // cornerless (stadium) ring: phase-lock directly to the walls —
+              // even levels on the wall beats, odd brick levels between them
+              out.push(
+                ...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && k % 2 === 0, true),
+              )
+              continue
+            }
+            placeContourCorners(info, pitch, idx, out, undefined, rhythm)
+            placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
+          }
         }
       }
     }
