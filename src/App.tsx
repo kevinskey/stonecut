@@ -3,7 +3,7 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, debugSpans, debugStones, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, debugSpans, debugStones, echoRequirement, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
@@ -50,6 +50,9 @@ export default function App() {
   const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline'>('single')
   const [strokePolicy, setStrokePolicy] = useState<'auto' | 'walls'>('auto')
   const [uniformRhythm, setUniformRhythm] = useState(true)
+  const [canEcho, setCanEcho] = useState(true)
+  const [fillStyle, setFillStyle] = useState<'grid' | 'brick'>('brick')
+  const [echoUpsize, setEchoUpsize] = useState<number | null>(null)
   const outlineStyle: 'auto' | 'walls' | 'centerline' =
     outlineDesign === 'centerline' ? 'centerline' : strokePolicy
   const [zoom, setZoom] = useState(6) // px per mm
@@ -223,7 +226,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -237,6 +240,11 @@ export default function App() {
         const idx = new SpacingIndex(hole + hardGap)
         const pts: { x: number; y: number }[] = []
         const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
+        const req = echoRequirement(grid, hole + hardGap, rhythm)
+        setCanEcho(req.feasible)
+        setEchoUpsize(req.feasible ? null : Math.ceil(textHeight * req.scale * 1.03))
+        if (outlineDesign === 'double' && !req.feasible)
+          setStatus(`Double outline needs wider strokes at this size`)
         let outline: { x: number; y: number }[] = []
         if (textMode !== 'fill') {
           if (outlineDesign === 'ghost') {
@@ -250,7 +258,7 @@ export default function App() {
         pts.push(...outline)
         if (textMode !== 'outline') {
           const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
-          pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm))
+          pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm, fillStyle === 'brick'))
         }
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
@@ -262,7 +270,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -301,13 +309,13 @@ export default function App() {
     pts.push(...outline)
     if (textMode !== 'outline') {
       const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
-      pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm))
+      pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm, fillStyle === 'brick'))
     }
     const offsetY = stones.length ? bbox.maxY + 10 : 10
     addGenerated(pts, offsetY)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle])
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -332,7 +340,7 @@ export default function App() {
       pts.push(...outline)
       if (imgMode !== 'outline') {
         const inset = imgMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
-        pts.push(...fillStones(raster.grid, hole, hardGap, inset, idx, outline, rhythm))
+        pts.push(...fillStones(raster.grid, hole, hardGap, inset, idx, outline, rhythm, fillStyle === 'brick'))
       }
       const offsetY = stones.length ? bbox.maxY + 10 : 10
       addGenerated(pts, offsetY)
@@ -340,7 +348,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -621,13 +629,30 @@ export default function App() {
             <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
             Uniform rhythm — verticals match horizontals per letter
           </label>
+          {outlineDesign === 'double' && !canEcho && echoUpsize && (
+            <div className="sizeinfo warn">
+              Double outline doesn't fit at this size.
+              <div className="toolrow">
+                <button onClick={() => setTextHeight(echoUpsize)}>Upsize to {echoUpsize} mm</button>
+                <button onClick={() => setOutlineDesign('single')}>Use single outline</button>
+              </div>
+            </div>
+          )}
           <div className="grid2">
             <label>Outline design
               <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
                 <option value="single">Single outline</option>
-                <option value="double">Double — echo row inside</option>
+                <option value="double">
+                  {canEcho ? 'Double — echo row inside' : 'Double — needs upsize'}
+                </option>
                 <option value="ghost">Ghost — floats outside</option>
                 <option value="centerline">Single-line lettering</option>
+              </select>
+            </label>
+            <label>Fill style
+              <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
+                <option value="brick">Brick — offset rows</option>
+                <option value="grid">Grid — aligned rows</option>
               </select>
             </label>
             <label>Narrow strokes

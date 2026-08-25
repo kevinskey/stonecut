@@ -455,6 +455,7 @@ function placeBetweenAnchors(
   inside?: (p: Pt) => boolean,
   targetR?: number,
   chordE?: number,
+  phase = 0, // 0 = rows anchored to corners; 0.5 = half-offset (brick)
 ): Pt[] {
   void inside
   const E = bArc - aArc
@@ -467,9 +468,9 @@ function placeBetweenAnchors(
 
   // one full layout attempt at a given stone count; nothing committed
   const attempt = (m: number): { pt: Pt[]; ok: boolean; spread: number; why?: string } => {
-    const sp = E / (m + 1)
+    const sp = phase === 0 ? E / (m + 1) : E / m
     const s: number[] = []
-    for (let i = 0; i < m; i++) s.push(aArc + (i + 1) * sp)
+    for (let i = 0; i < m; i++) s.push(aArc + (phase === 0 ? (i + 1) * sp : (i + 0.5) * sp))
     const pt = s.map((v) => pointAt(path, v))
     // free blocked stones
     for (let i = 0; i < m; i++) {
@@ -565,8 +566,8 @@ function placeBetweenAnchors(
     return { pt, ok, spread: score, why }
   }
 
-  let m0 = Math.round(Lc / r) - 1
-  while (m0 > 0 && Lc / (m0 + 1) < need) m0--
+  let m0 = phase === 0 ? Math.round(Lc / r) - 1 : Math.round(Lc / r)
+  while (m0 > 0 && Lc / (m0 + (phase === 0 ? 1 : 0)) < need) m0--
   if (m0 <= 0) {
     for (const f of [0.5, 0.47, 0.53]) {
       const p = pointAt(path, aArc + f * E)
@@ -807,6 +808,7 @@ function placeContourEdges(
   banned?: (p: Pt) => boolean,
   rhythm?: number,
   uniform = false, // one shared beat for the whole contour (edges match)
+  phase = 0,
 ) {
   const target = rhythm ?? pitch * 1.15
   if (info.fallback || !info.path) {
@@ -868,7 +870,7 @@ function placeContourEdges(
     const { aArc, rawEnd, minSp, Lc, group } = segs[ci]
     const bestR = groupR.get(group) ?? target
     if (!banned) {
-      const got = placeBetweenAnchors(path, aArc, rawEnd, minSp, pitch, idx, inside, bestR, Lc)
+      const got = placeBetweenAnchors(path, aArc, rawEnd, minSp, pitch, idx, inside, bestR, Lc, phase)
       dbg('edge', got)
       out.push(...got)
       continue
@@ -1209,6 +1211,19 @@ export function offsetRows(
     for (let i = 0; i < w * h; i++) mask[i] = !bin[i] && dt[i] >= offPx ? 1 : 0
   } else {
     for (let i = 0; i < w * h; i++) mask[i] = bin[i] && dt[i] >= offPx ? 1 : 0
+    // a clean echo requires its ring's own two sides to clear the minimum:
+    // drop components where the remaining depth can't separate the loop —
+    // a thin-loop echo is zigzag garbage, and no echo beats a bad echo
+    const comp = labelComponents(mask, w, h)
+    if (comp.count) {
+      const cMax = new Float32Array(comp.count + 1)
+      for (let i = 0; i < w * h; i++)
+        if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
+      for (let i = 0; i < w * h; i++) {
+        const l = comp.labels[i]
+        if (l && 2 * (cMax[l] / pxPerMm - offsetMm) < pitch * 0.9) mask[i] = 0
+      }
+    }
   }
   const rings = marchingSquares(mask, w, h)
     // ghost mode: drop the grid-border frame contour
@@ -1222,6 +1237,61 @@ export function offsetRows(
     placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythmMm, uniform)
   }
   return out
+}
+
+
+// Can this design geometrically support a clean double-outline echo?
+// Returns feasibility plus the scale factor that WOULD make it work — the
+// standard design-software pattern: name the fix, don't just refuse.
+export function echoRequirement(
+  grid: Grid,
+  pitch: number,
+  offsetMm: number,
+): { feasible: boolean; scale: number } {
+  const { bin, w, h, pxPerMm } = grid
+  const dt = distanceTransform(grid)
+  const shape = labelComponents(bin, w, h)
+  const areas = new Float32Array(shape.count + 1)
+  const sMax = new Float32Array(shape.count + 1)
+  for (let i = 0; i < w * h; i++) {
+    const l = shape.labels[i]
+    if (!l) continue
+    areas[l]++
+    if (dt[i] > sMax[l]) sMax[l] = dt[i]
+  }
+  const minArea = (pitch * pxPerMm) ** 2
+  const widths: number[] = []
+  for (let l = 1; l <= shape.count; l++) if (areas[l] >= minArea) widths.push(sMax[l] / pxPerMm)
+  if (!widths.length) return { feasible: false, scale: 2 }
+  widths.sort((a, b) => a - b)
+  const med = widths[Math.floor(widths.length / 2)]
+  const required = offsetMm + pitch * 0.45 // from 2*(maxD - offset) >= 0.9*pitch
+  return { feasible: echoFeasible(grid, pitch, offsetMm), scale: Math.max(1, required / med) }
+}
+
+export function echoFeasible(grid: Grid, pitch: number, offsetMm: number): boolean {
+  const { bin, w, h, pxPerMm } = grid
+  const dt = distanceTransform(grid)
+  const offPx = offsetMm * pxPerMm
+  const mask = new Uint8Array(w * h)
+  let raw = 0
+  for (let i = 0; i < w * h; i++) {
+    mask[i] = bin[i] && dt[i] >= offPx ? 1 : 0
+    if (mask[i]) raw++
+  }
+  if (!raw) return false
+  const comp = labelComponents(mask, w, h)
+  const cMax = new Float32Array(comp.count + 1)
+  for (let i = 0; i < w * h; i++)
+    if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
+  let kept = 0
+  for (let i = 0; i < w * h; i++) {
+    const l = comp.labels[i]
+    if (l && 2 * (cMax[l] / pxPerMm - offsetMm) >= pitch * 0.9) kept++
+  }
+  // MOST of the echo territory must survive gating — a bulge here and there
+  // is not a double outline
+  return kept >= raw * 0.55
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,9 +1442,11 @@ export function fillStones(
   gapMm: number,
   startInsetMm: number,
   idx: SpacingIndex,
-  fixedPts: Pt[] = [], // outline stones — immovable during relaxation
+  fixedPts: Pt[] = [], // outline stones (already in idx)
   rhythmMm?: number,
+  brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
 ): Pt[] {
+  void fixedPts
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
   const pitch = holeMm + gapMm
@@ -1433,10 +1505,18 @@ export function fillStones(
           walkSkeleton(levelMask)
           continue
         }
+        // LAW-COMPLIANT rings: each interior ring runs the full corner-aware,
+        // rhythm-harmonized pipeline — deterministic, no organic drift.
+        // Brick style half-offsets alternate rings.
         const rings = marchingSquares(levelMask, w, h)
           .map((c) => c.map(toMm))
           .sort((a, b) => b.length - a.length)
-        for (const ring of rings) out.push(...walkPoly(ring, true, pitch, idx, 5, rhythm))
+        const phase = brick && k % 2 === 1 ? 0.5 : 0
+        for (const ring of rings) {
+          const info = analyzeContour(ring, pitch, rhythm)
+          placeContourCorners(info, pitch, idx, out, undefined, rhythm)
+          placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
+        }
       }
     }
   }
@@ -1468,179 +1548,8 @@ export function fillStones(
     }
   }
 
-  // The structured pattern (rows, spines, seeds) locks in exactly as first
-  // placed. Only gap-filler stones — inserted wherever space legally remains —
-  // relax, negotiating around the locked pattern to blend in.
-  const structured = out
-  const edgeMinPx = (holeMm / 2 + 0.05) * pxPerMm
-  const gapIdx = new SpacingIndex(rhythm)
-  for (const p of fixedPts) gapIdx.add(p)
-  for (const p of structured) gapIdx.add(p)
-  const step = Math.max(1, Math.round(pxPerMm / 2))
-  let extras: Pt[] = []
-  for (let y = 0; y < h; y += step) {
-    for (let x = 0; x < w; x += step) {
-      if (dt[y * w + x] < edgeMinPx) continue
-      const p = toMm({ x, y })
-      if (gapIdx.canPlace(p)) {
-        gapIdx.add(p)
-        extras.push(p)
-      }
-    }
-  }
-  if (extras.length > 0) {
-    extras = relax(extras, [...fixedPts, ...structured], grid, dt, holeMm, gapMm, 20)
-  }
-  return [...structured, ...extras]
-}
-
-// ---------------------------------------------------------------------------
-// Relaxation: fill stones negotiate for even padding. Each stone repels
-// neighbors toward a uniform target spacing while the distance field keeps it
-// inside the shape (and centered — both walls push equally). Outline stones
-// are fixed anchors. Ends with hard separation sweeps so no pair violates the
-// minimum center distance.
-// ---------------------------------------------------------------------------
-
-function relax(
-  pts: Pt[],
-  fixedPts: Pt[],
-  grid: Grid,
-  dt: Float32Array,
-  holeMm: number,
-  gapMm: number,
-  iters = 30,
-): Pt[] {
-  if (pts.length === 0) return pts
-  const { w, h, pxPerMm, padPx } = grid
-  const pitch = holeMm + gapMm
-  const target = pitch * 1.08 // aim slightly above minimum so gaps get shared
-  const reach = pitch * 1.35
-  const edgeMin = holeMm / 2 + 0.05 // hole must stay inside the shape
-  const maxStep = 0.35 // mm per iteration
-
-  const dtAt = (p: Pt): number => {
-    const x = p.x * pxPerMm + padPx
-    const y = p.y * pxPerMm + padPx
-    const xi = Math.max(0, Math.min(w - 2, Math.floor(x)))
-    const yi = Math.max(0, Math.min(h - 2, Math.floor(y)))
-    const fx = x - xi
-    const fy = y - yi
-    return (
-      (dt[yi * w + xi] * (1 - fx) + dt[yi * w + xi + 1] * fx) * (1 - fy) +
-      (dt[(yi + 1) * w + xi] * (1 - fx) + dt[(yi + 1) * w + xi + 1] * fx) * fy
-    ) / pxPerMm
-  }
-  const dtGrad = (p: Pt): Pt => {
-    const e = 0.25
-    const gx = dtAt({ x: p.x + e, y: p.y }) - dtAt({ x: p.x - e, y: p.y })
-    const gy = dtAt({ x: p.x, y: p.y + e }) - dtAt({ x: p.x, y: p.y - e })
-    const len = Math.hypot(gx, gy) || 1
-    return { x: gx / len, y: gy / len }
-  }
-
-  const cur = pts.map((p) => ({ ...p }))
-  const cell = reach
-  const hashKey = (x: number, y: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)}`
-  const buildHash = () => {
-    const map = new Map<string, { p: Pt; fixed: boolean }[]>()
-    const put = (p: Pt, fixed: boolean) => {
-      const k = hashKey(p.x, p.y)
-      const b = map.get(k)
-      if (b) b.push({ p, fixed })
-      else map.set(k, [{ p, fixed }])
-    }
-    for (const p of cur) put(p, false)
-    for (const p of fixedPts) put(p, true)
-    return map
-  }
-
-  for (let it = 0; it < iters; it++) {
-    const hash = buildHash()
-    const force = cur.map(() => ({ x: 0, y: 0 }))
-    for (let i = 0; i < cur.length; i++) {
-      const p = cur[i]
-      const cx = Math.floor(p.x / cell)
-      const cy = Math.floor(p.y / cell)
-      for (let gx = cx - 1; gx <= cx + 1; gx++)
-        for (let gy = cy - 1; gy <= cy + 1; gy++) {
-          const bucket = hash.get(`${gx},${gy}`)
-          if (!bucket) continue
-          for (const { p: o } of bucket) {
-            if (o === p) continue
-            const dx = p.x - o.x
-            const dy = p.y - o.y
-            const d = Math.hypot(dx, dy)
-            if (d >= target || d === 0) continue
-            const push = ((target - d) / d) * 0.35
-            force[i].x += dx * push
-            force[i].y += dy * push
-          }
-        }
-    }
-    for (let i = 0; i < cur.length; i++) {
-      let fx = force[i].x
-      let fy = force[i].y
-      const fl = Math.hypot(fx, fy)
-      if (fl > maxStep) {
-        fx = (fx / fl) * maxStep
-        fy = (fy / fl) * maxStep
-      }
-      const next = { x: cur[i].x + fx, y: cur[i].y + fy }
-      // stay inside the shape with full hole clearance
-      let d = dtAt(next)
-      if (d < edgeMin) {
-        const g = dtGrad(next)
-        const back = Math.min(edgeMin - d, maxStep)
-        next.x += g.x * back
-        next.y += g.y * back
-        d = dtAt(next)
-        if (d < edgeMin - 0.3) continue // would leave the shape — don't move
-      }
-      cur[i] = next
-    }
-  }
-
-  // Hard separation: guarantee min center distance after relaxation.
-  for (let sweep = 0; sweep < 8; sweep++) {
-    const hash = buildHash()
-    let moved = false
-    for (let i = 0; i < cur.length; i++) {
-      const p = cur[i]
-      const cx = Math.floor(p.x / cell)
-      const cy = Math.floor(p.y / cell)
-      for (let gx = cx - 1; gx <= cx + 1; gx++)
-        for (let gy = cy - 1; gy <= cy + 1; gy++) {
-          const bucket = hash.get(`${gx},${gy}`)
-          if (!bucket) continue
-          for (const { p: o, fixed } of bucket) {
-            if (o === p) continue
-            const dx = p.x - o.x
-            const dy = p.y - o.y
-            const d = Math.hypot(dx, dy)
-            if (d >= pitch || d === 0) continue
-            const push = (pitch - d) / d
-            const scale = fixed ? 1 : 0.5 // fixed stones don't move; take the full step
-            const next = { x: p.x + dx * push * scale, y: p.y + dy * push * scale }
-            if (dtAt(next) >= edgeMin - 0.15) {
-              cur[i] = next
-              moved = true
-            }
-          }
-        }
-    }
-    if (!moved) break
-  }
-
-  // Anything still violating the minimum after separation gets dropped (rare).
-  const finalIdx = new SpacingIndex(pitch * 0.95)
-  for (const p of fixedPts) finalIdx.add(p)
-  const out: Pt[] = []
-  for (const p of cur) {
-    if (finalIdx.canPlace(p)) {
-      finalIdx.add(p)
-      out.push(p)
-    }
-  }
+  // Law fill: everything placed deterministically above — no relaxation,
+  // no gap-insertion. What the laws place is what ships.
   return out
 }
+

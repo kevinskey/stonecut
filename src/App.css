@@ -268,3 +268,6 @@ button.primary:hover:not(:disabled) { background: #37b878; }
   color: #8b96ab;
 }
 .zoombar input[type="range"] { width: 180px; margin: 0; }
+
+.sizeinfo.warn { border-color: #8a6d2f; background: #241d10; color: #e8d5a0; }
+.sizeinfo.warn .toolrow { margin-top: 6px; }
