@@ -1890,16 +1890,14 @@ export function fillStones(
         const rings = marchingSquares(levelMask, w, h)
           .map((c) => c.map(toMm))
           .sort((a, b) => b.length - a.length)
-        const phase = brick && di % 2 === 0 ? 0.5 : 0
-        for (const ring of rings) {
-          const info = analyzeContour(ring, pitch, rhythm)
-          if (info.fallback) {
-            out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && di % 2 === 0, true))
-            continue
-          }
-          placeContourCorners(info, pitch, idx, out, undefined, rhythm)
-          placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
-        }
+        // PHASE-LOCK every interior row to the OUTLINE stones. Placing each
+        // ring through the corner pipeline quantises it on its own: an inner
+        // loop is shorter than the one outside it, so the two drift out of
+        // phase and one ends up gapped — the rows stop reading as rows.
+        // Locking to the wall stones makes the columns line up across the
+        // stroke (grid = on their beat, brick = between).
+        for (const ring of rings)
+          out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && di % 2 === 0, true))
       }
       if (medial) walkSkeleton(compMask)
     }
