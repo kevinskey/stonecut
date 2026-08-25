@@ -1272,15 +1272,23 @@ export function offsetRows(
   const ringMask = new Uint8Array(w * h)
   let anyRing = false
   for (let l = 1; l <= comp.count; l++) {
-    const ringCapable = !outside && 2 * (cMax[l] / pxPerMm - offsetMm) < pitch * 0.9 ? false : true
+    // TYPICAL width, not the fattest point. Judging by the max lets one
+    // junction declare the region ring-capable, and the ring then forms with
+    // its two sides ~3.7mm apart (below the 4.2mm minimum), which survives
+    // only by zig-zagging — the crowded 'double rows' look.
+    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
+    const skelW = skeletonize(cm, w, h)
+    const ws: number[] = []
+    for (let i = 0; i < w * h; i++) if (skelW[i]) ws.push(dt[i])
+    ws.sort((a, b) => a - b)
+    const typical = ws.length ? ws[Math.floor(ws.length / 2)] : cMax[l]
+    const ringCapable = outside || 2 * (typical / pxPerMm - offsetMm) >= pitch * 0.9
     if (ringCapable) {
       for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) ringMask[i] = 1
       anyRing = true
       continue
     }
-    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
-    const skel = skeletonize(cm, w, h)
-    const paths = traceSkeleton(skel, w, h)
+    const paths = traceSkeleton(skelW, w, h)
       .map((p) => smoothPath(p).map(toMm))
       .sort((a, b) => b.length - a.length)
     for (const p of paths) {
@@ -1720,8 +1728,20 @@ export function fillStones(
       const paths = traceSkeleton(skel, w, h)
         .map((p) => smoothPath(p).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths)
-        out.push(...placePhaseLocked(p, fixedPts, pitch, rhythm, idx, brick))
+      // A medial axis forks where strokes meet (a G's bar into its bowl).
+      // Those short branch stubs are not runs — stones placed along them land
+      // diagonally across the junction, belonging to neither row. Walk the
+      // substantial paths only; the longest always qualifies so a small
+      // isolated pocket still gets its row.
+      const arcLen = (p: Pt[]) => {
+        let L = 0
+        for (let k = 1; k < p.length; k++) L += Math.hypot(p[k].x - p[k - 1].x, p[k].y - p[k - 1].y)
+        return L
+      }
+      for (let i = 0; i < paths.length; i++) {
+        if (i > 0 && arcLen(paths[i]) < rhythm * 1.5) continue
+        out.push(...placePhaseLocked(paths[i], fixedPts, pitch, rhythm, idx, brick))
+      }
     }
 
     if (spanMm < pitch * 0.55) {
