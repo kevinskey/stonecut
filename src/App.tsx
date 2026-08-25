@@ -5,7 +5,7 @@ import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
 import { SpacingIndex, debugSpans, debugStones, echoRequirement, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
-import { imageToRaster } from './image'
+import { analyzeImage, imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
 import { sendToCutter } from './usb'
 import './App.css'
@@ -166,6 +166,7 @@ export default function App() {
   const [imgWidth, setImgWidth] = useState(100)
   const [imgThreshold, setImgThreshold] = useState(128)
   const [imgInvert, setImgInvert] = useState(false)
+  const [imgAlphaKey, setImgAlphaKey] = useState(false)
   const [imgMode, setImgMode] = useState<StoneMode>('both')
 
   // material
@@ -337,7 +338,7 @@ export default function App() {
     if (!imageFile) { setStatus('Choose an image first'); return }
     setStatus('Tracing image…')
     try {
-      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert)
+      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey)
       const hole = sizes[curSize]?.holeMm ?? 3
       const hardGap = hardGapOf(gap)
       const rhythm = hole + gap
@@ -366,11 +367,15 @@ export default function App() {
       }
       const offsetY = stones.length ? bbox.maxY + 10 : 10
       addGenerated(pts, offsetY)
-      setStatus(`Added ${pts.length} stones from image`)
+      setStatus(
+        pts.length
+          ? `Added ${pts.length} stones from image`
+          : 'No stones — the artwork read as background. Try the Invert box or move the Threshold slider.',
+      )
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -729,8 +734,24 @@ export default function App() {
             <input type="range" min={10} max={245} value={imgThreshold} onChange={(e) => setImgThreshold(+e.target.value)} />
           </label>
           <label className="row"><input type="checkbox" checked={imgInvert} onChange={(e) => setImgInvert(e.target.checked)} /> Invert (light areas get stones)</label>
-          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG)'}
-            <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
+          <label className="row"><input type="checkbox" checked={imgAlphaKey} onChange={(e) => setImgAlphaKey(e.target.checked)} /> Use transparency (opaque art = design)</label>
+          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
+            <input type="file" accept="image/*" onChange={async (e) => {
+              const f = e.target.files?.[0] ?? null
+              setImageFile(f)
+              if (!f) return
+              try {
+                // pick settings that make the artwork the design, so a light
+                // logo or transparent background doesn't silently yield nothing
+                const a = await analyzeImage(f)
+                setImgThreshold(a.threshold)
+                setImgInvert(a.invert)
+                setImgAlphaKey(a.alphaKey)
+                setStatus(`${f.name} — ${a.note}`)
+              } catch {
+                setStatus(`Could not read ${f.name}`)
+              }
+            }} />
           </label>
           <button onClick={generateImage}>Add image stones</button>
         </Section>
