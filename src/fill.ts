@@ -1771,7 +1771,6 @@ export function fillStones(
   const dt = distanceTransform(grid)
   const pitch = holeMm + gapMm
   const rhythm = rhythmMm ?? pitch * 1.15
-  const rowPitch = rhythm * 0.87
   const minPx = startInsetMm * pxPerMm
   const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
 
@@ -1817,88 +1816,45 @@ export function fillStones(
       // Multiple rows: stretch spacing so the block exactly spans the depth
       // band (equal padding both sides); cap the stretch and re-center if the
       // stretched spacing would look sparse.
-      let n = Math.floor(spanMm / rowPitch) + 1
-      if (n >= 3) {
-        // OPEN AREA: a regular lattice, not concentric rings
-        dbg(`lattice:n${n}:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
+      // EVEN SPACING ACROSS THE STROKE. Rows must divide the FULL width so
+      // every gap matches: wall -> row -> ... -> row -> wall. Offsetting a
+      // fixed distance from each edge instead makes the two inward rows land
+      // on top of each other in a medium stroke, and they knock each other
+      // out — the scattered fill.
+      const fullW = 2 * (maxD[lbl] / pxPerMm)
+      let k = Math.max(1, Math.round(fullW / rhythm))
+      while (k > 1 && fullW / k < idx.minDist) k--
+      const sGap = fullW / k
+      if (k >= 6) {
+        // open area: a lattice, not concentric rings
+        dbg(`lattice:k${k}`, [{ x: -1, y: -1 }])
         out.push(...latticeFill(compMask, dt, grid, minPx, pitch, rhythm, idx, brick))
         continue
       }
-      dbg(`ringcomp:n${n}:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
-      let s = n > 1 ? spanMm / (n - 1) : 0
-      let start = startInsetMm
-      if (n > 1 && s > rowPitch * 1.35) {
-        s = rowPitch
-        start = startInsetMm + (spanMm - (n - 1) * rowPitch) / 2
-      }
+      dbg(`rings:k${k}:gap${sGap.toFixed(2)}`, [{ x: -1, y: -1 }])
+      // depths of the interior rows, symmetric about the medial axis
+      const depths: number[] = []
+      for (let i = 1; i * sGap < maxD[lbl] / pxPerMm - 0.15; i++) depths.push(i * sGap)
+      const medial = k % 2 === 0 // even k puts one row exactly on the centre
       const levelMask = new Uint8Array(w * h)
-      for (let k = 0; k < n; k++) {
-        // n == 1: the single ring sits on the clearance line so BOTH walls of
-        // the pocket get a row (the loop's sides are >= pitch apart there).
-        let tMm = n > 1 ? start + k * s : startInsetMm
-        tMm = Math.min(tMm, maxD[lbl] / pxPerMm - 0.3)
-        tMm = Math.max(tMm, startInsetMm)
-        const tPx = tMm * pxPerMm + 0.01 // epsilon keeps levels off grid samples
+      for (let di = 0; di < depths.length; di++) {
+        const tPx = depths[di] * pxPerMm + 0.01
         for (let i = 0; i < w * h; i++) levelMask[i] = compMask[i] && dt[i] >= tPx ? 1 : 0
-        if (tMm > maxD[lbl] / pxPerMm - pitch * 0.8) {
-          // Thin band near the ridge: an iso-loop here zigzags. Collapse the
-          // row to the band's skeleton (spine for strokes, dot for blobs).
-          walkSkeleton(levelMask)
-          continue
-        }
-        // LAW-COMPLIANT rings: single rings phase-lock DIRECTLY to the wall
-        // stones (grid = on their beats, brick = between them); multi-ring
-        // areas run the corner pipeline with alternating brick phase.
         const rings = marchingSquares(levelMask, w, h)
           .map((c) => c.map(toMm))
           .sort((a, b) => b.length - a.length)
-        if (n === 1) {
-          for (const ring of rings)
-            out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick, true))
-        } else {
-          const phase = brick && k % 2 === 0 ? 0.5 : 0
-          for (const ring of rings) {
-            const info = analyzeContour(ring, pitch, rhythm)
-            if (info.fallback) {
-              // cornerless (stadium) ring: phase-lock directly to the walls —
-              // even levels on the wall beats, odd brick levels between them
-              out.push(
-                ...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && k % 2 === 0, true),
-              )
-              continue
-            }
-            placeContourCorners(info, pitch, idx, out, undefined, rhythm)
-            placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
+        const phase = brick && di % 2 === 0 ? 0.5 : 0
+        for (const ring of rings) {
+          const info = analyzeContour(ring, pitch, rhythm)
+          if (info.fallback) {
+            out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && di % 2 === 0, true))
+            continue
           }
+          placeContourCorners(info, pitch, idx, out, undefined, rhythm)
+          placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythm, false, phase)
         }
       }
-    }
-  }
-
-  // Peak seeding: deepest unfilled spots (i-dots, star tips, terminals).
-  const peaks: { p: Pt; d: number }[] = []
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x
-      if (!mask[i]) continue
-      const d = dt[i]
-      let isMax = true
-      for (let dy = -1; dy <= 1 && isMax; dy++)
-        for (let dx = -1; dx <= 1; dx++) {
-          if (!dx && !dy) continue
-          if (dt[(y + dy) * w + (x + dx)] > d) {
-            isMax = false
-            break
-          }
-        }
-      if (isMax) peaks.push({ p: toMm({ x, y }), d })
-    }
-  }
-  peaks.sort((a, b) => b.d - a.d)
-  for (const { p } of peaks) {
-    if (idx.canPlace(p)) {
-      idx.add(p)
-      out.push(p)
+      if (medial) walkSkeleton(compMask)
     }
   }
 
