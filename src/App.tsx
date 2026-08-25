@@ -54,8 +54,6 @@ export default function App() {
   const [fillStyle, setFillStyle] = useState<'grid' | 'brick'>('brick')
   const [fillSize, setFillSize] = useState('SS6')
   const [fillColor, setFillColor] = useState('#7ec8e3')
-  const [fillEdgeGap, setFillEdgeGap] = useState(1.0) // edge-to-edge from outline stones
-  const [fillSpacing, setFillSpacing] = useState(0.8) // fill-to-fill edge gap
   const [echoUpsize, setEchoUpsize] = useState<number | null>(null)
   const outlineStyle: 'auto' | 'walls' | 'centerline' =
     outlineDesign === 'centerline' ? 'centerline' : strokePolicy
@@ -232,7 +230,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -266,9 +264,13 @@ export default function App() {
         pts.push(...outline)
         if (textMode !== 'outline') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
-          const fGap = hardGapOf(fillSpacing)
-          const fRhythm = fHole + fillSpacing
-          const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
+          const fGap = hardGapOf(gap)
+          // EVEN SPACING FIRST: the fill continues the outline's rhythm, so a
+          // letter reads as one uniform field of stones rather than an outline
+          // with a differently-paced infill. The customer picks the fill STONE
+          // SIZE; the beat is shared.
+          const fRhythm = rhythm
+          const fInset = textMode === 'both' ? rhythm : fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -288,7 +290,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
@@ -315,9 +317,9 @@ export default function App() {
         pts.push(...outline)
         if (imgMode !== 'outline') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
-          const fGap = hardGapOf(fillSpacing)
-          const fRhythm = fHole + fillSpacing
-          const fInset = imgMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
+          const fGap = hardGapOf(gap)
+          const fRhythm = rhythm
+          const fInset = imgMode === 'both' ? rhythm : fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -332,7 +334,7 @@ export default function App() {
     }, 350)
     return () => window.clearTimeout(t)
   }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap,
-      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -371,9 +373,9 @@ export default function App() {
     pts.push(...outline)
     if (textMode !== 'outline') {
       const fHole = sizes[fillSize]?.holeMm ?? 2.5
-      const fGap = hardGapOf(fillSpacing)
-      const fRhythm = fHole + fillSpacing
-      const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
+      const fGap = hardGapOf(gap)
+      const fRhythm = rhythm
+      const fInset = textMode === 'both' ? rhythm : fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
       const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -383,7 +385,7 @@ export default function App() {
     addGenerated(pts, offsetY)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -408,9 +410,9 @@ export default function App() {
       pts.push(...outline)
       if (imgMode !== 'outline') {
         const fHole = sizes[fillSize]?.holeMm ?? 2.5
-        const fGap = hardGapOf(fillSpacing)
-        const fRhythm = fHole + fillSpacing
-        const fInset = imgMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
+        const fGap = hardGapOf(gap)
+        const fRhythm = rhythm
+        const fInset = imgMode === 'both' ? rhythm : fHole / 2 + 0.1
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
         for (const p of outline) fIdx.add(p, hole / 2)
         const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -427,7 +429,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -751,15 +753,10 @@ export default function App() {
               <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
             </label>
           </div>
-          <div className="grid2">
-            <label>From edge (mm)
-              <input type="number" step={0.1} min={0.4} max={15} value={fillEdgeGap}
-                onChange={(e) => setFillEdgeGap(+e.target.value)} />
-            </label>
-            <label>Between fills (mm)
-              <input type="number" step={0.1} min={0.4} max={15} value={fillSpacing}
-                onChange={(e) => setFillSpacing(+e.target.value)} />
-            </label>
+          <div className="sizeinfo">
+            Even spacing: fill shares the outline rhythm ·{' '}
+            <b>{((sizes[curSize]?.holeMm ?? 3) + gap).toFixed(1)} mm</b>
+            <span> — set it in Stones · Spacing</span>
           </div>
           <label>Fill style
             <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
