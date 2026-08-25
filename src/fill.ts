@@ -300,7 +300,6 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
   const path = makePath(poly, closed)
   if (!path) return []
   if (path.total < target * 1.2) {
-    // tiny path: try a single stone, midpoint first
     for (const s of [path.total / 2, 0, path.total]) {
       const p = pointAt(path, s)
       if (idx.canPlace(p)) {
@@ -310,14 +309,42 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
     }
     return []
   }
+
+  // CLOSED loop: divide the circumference into equal parts. Walking it
+  // greedily leaves the remainder at the seam — an O came out with 28 gaps
+  // of 4.54mm and one of 7.86mm.
+  if (closed) {
+    let m = Math.max(3, Math.round(path.total / target))
+    while (m > 3 && path.total / m < pitch) m--
+    const sp = path.total / m
+    let best: Pt[] = []
+    for (let ph = 0; ph < phases; ph++) {
+      const offset = (ph / phases) * sp
+      const placed: Pt[] = []
+      for (let i = 0; i < m; i++) {
+        const p = pointAt(path, offset + i * sp)
+        let ok = idx.canPlace(p)
+        if (ok)
+          for (const q of placed)
+            if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
+              ok = false
+              break
+            }
+        if (ok) placed.push(p)
+      }
+      if (placed.length > best.length) best = placed
+    }
+    for (const p of best) idx.add(p)
+    return best
+  }
+
   const ds = target / 12
   let best: Pt[] = []
   for (let ph = 0; ph < phases; ph++) {
     const offset = (ph / phases) * target
     const placed: Pt[] = []
-    let arcSince = target // allow immediate first placement
-    const end = closed ? offset + path.total : path.total
-    for (let s = offset; s < end; s += ds) {
+    let arcSince = target
+    for (let s = offset; s < path.total; s += ds) {
       if (arcSince < target) {
         arcSince += ds
         continue
@@ -1211,8 +1238,23 @@ export function outlineOrSpine(
   // corners FIRST across the entire design, then edges — corner anchors
   // never lose their spot to an edge stone from a neighboring contour
   const contourInfos = wallContours.map((c) => analyzeContour(c, pitch, rhythm))
-  for (const info of contourInfos) placeContourCorners(info, pitch, idx, out, bannedTest, rhythm)
-  for (const info of contourInfos) placeContourEdges(info, pitch, idx, out, insideTest, bannedTest, rhythm, uniformRhythm)
+  // MERGE THE SHAPES before stoning. Glyphs are drawn as overlapping
+  // contours, so a contour can run straight through the interior of the
+  // merged silhouette (an E's middle-arm bar crossing the stem). Stones
+  // belong on the silhouette only — 44 of 407 were landing on interior
+  // edges. A true boundary point has distance-to-edge ~0; interior segments
+  // sit deep inside, so the distance field separates them cleanly.
+  const interiorTest = (p: Pt): boolean => {
+    const px = Math.round(p.x * pxPerMm + padPx)
+    const py = Math.round(p.y * pxPerMm + padPx)
+    if (px < 0 || py < 0 || px >= w || py >= h) return false
+    return dt[py * w + px] / pxPerMm > 0.7
+  }
+  const gate: (p: Pt) => boolean = bannedTest
+    ? (p) => bannedTest(p) || interiorTest(p)
+    : interiorTest
+  for (const info of contourInfos) placeContourCorners(info, pitch, idx, out, gate, rhythm)
+  for (const info of contourInfos) placeContourEdges(info, pitch, idx, out, insideTest, gate, rhythm, uniformRhythm)
 
   if (narrowLbls.size) {
     const compMask = new Uint8Array(w * h)
