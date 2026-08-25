@@ -230,7 +230,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -262,7 +262,12 @@ export default function App() {
           }
         }
         pts.push(...outline)
-        if (textMode !== 'outline') {
+        // While the font picker is open you're comparing letterforms, and the
+        // fill is by far the most expensive stage — computing it on every
+        // arrow-key step blocked the main thread for over a second and made
+        // the app feel frozen. Show the outline while browsing; the full
+        // design lands the moment the picker closes.
+        if (textMode !== 'outline' && !fontOpen) {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
           const fGap = hardGapOf(gap)
           // EVEN SPACING FIRST: the fill continues the outline's rhythm, so a
@@ -290,7 +295,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add

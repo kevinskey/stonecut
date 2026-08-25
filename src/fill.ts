@@ -1014,22 +1014,8 @@ export function outlineOrSpine(
   // so using it declares the whole letter "wide" and leaves thin stems with
   // two wall rows crammed at the bare minimum. The median distance along the
   // medial axis is the real stroke half-width.
-  const typicalHalf = new Float32Array(count + 1)
-  {
-    const cm = new Uint8Array(w * h)
-    for (let lbl = 1; lbl <= count; lbl++) {
-      for (let i = 0; i < w * h; i++) cm[i] = labels[i] === lbl ? 1 : 0
-      const skel = skeletonize(cm, w, h)
-      const widths: number[] = []
-      for (let i = 0; i < w * h; i++) if (skel[i]) widths.push(dt[i])
-      if (!widths.length) {
-        typicalHalf[lbl] = maxD[lbl]
-        continue
-      }
-      widths.sort((a, b) => a - b)
-      typicalHalf[lbl] = widths[Math.floor(widths.length / 2)]
-    }
-  }
+  const typicalHalf = ridgeWidthsByLabel(labels, count, dt, w, h)
+  for (let lbl = 1; lbl <= count; lbl++) if (!typicalHalf[lbl]) typicalHalf[lbl] = maxD[lbl]
   // Two wall rows need room to READ as two rows. At ~1.05x pitch they are
   // legal but sit at the bare minimum — holes nearly touching, with a
   // fragile strip of template between them down the whole stroke. Below
@@ -1295,6 +1281,45 @@ export function straightenPath(p: Pt[]): Pt[] {
   return maxDev < Math.max(1.3, L * 0.07) ? [a, b] : p
 }
 
+
+
+// One pass for EVERY region at once. A per-region scan called in a loop
+// re-walks the whole grid N times — on a six-letter design that was ~6.6M
+// iterations of 8-neighbour tests, and the UI froze. Ridge pixels (local
+// maxima of the distance field) lie on the medial axis, so this gives each
+// region's typical stroke half-width without iterative thinning.
+function ridgeWidthsByLabel(
+  labels: Int32Array,
+  count: number,
+  dt: Float32Array,
+  w: number,
+  h: number,
+): Float32Array {
+  const buckets: number[][] = Array.from({ length: count + 1 }, () => [])
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      const l = labels[i]
+      if (!l) continue
+      const d = dt[i]
+      if (d <= 0) continue
+      if (
+        d >= dt[i - 1] && d >= dt[i + 1] && d >= dt[i - w] && d >= dt[i + w] &&
+        d >= dt[i - w - 1] && d >= dt[i - w + 1] && d >= dt[i + w - 1] && d >= dt[i + w + 1]
+      )
+        buckets[l].push(d)
+    }
+  }
+  const out = new Float32Array(count + 1)
+  for (let l = 1; l <= count; l++) {
+    const b = buckets[l]
+    if (!b.length) continue
+    b.sort((p, q) => p - q)
+    out[l] = b[Math.floor(b.length / 2)]
+  }
+  return out
+}
+
 export function offsetRows(
   grid: Grid,
   holeMm: number,
@@ -1334,19 +1359,14 @@ export function offsetRows(
   const cMax = new Float32Array(comp.count + 1)
   for (let i = 0; i < w * h; i++)
     if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
-  const cm = new Uint8Array(w * h)
   const ringMask = new Uint8Array(w * h)
+  const ridgeW = ridgeWidthsByLabel(comp.labels, comp.count, dt, w, h)
   let anyRing = false
   for (let l = 1; l <= comp.count; l++) {
     // TYPICAL width, not the fattest point: judging by the max lets one
     // junction declare a region ring-capable, and the ring then forms with
     // its two sides below the minimum, surviving only by zig-zagging.
-    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
-    const skelW = skeletonize(cm, w, h)
-    const ws: number[] = []
-    for (let i = 0; i < w * h; i++) if (skelW[i]) ws.push(dt[i])
-    ws.sort((a, b) => a - b)
-    const typical = ws.length ? ws[Math.floor(ws.length / 2)] : cMax[l]
+    const typical = ridgeW[l] || cMax[l]
     const ringCapable = outside || 2 * (typical / pxPerMm - offsetMm) >= pitch * 0.9
     // A region that can't hold a ring gets NOTHING. Substituting a single
     // centred row seemed reasonable but the medial axis fragments at every
@@ -1420,16 +1440,11 @@ export function echoFeasible(grid: Grid, pitch: number, offsetMm: number): boole
   }
   if (!raw) return false
   const comp = labelComponents(mask, w, h)
-  const cm = new Uint8Array(w * h)
   let kept = 0
+  const ridgeW = ridgeWidthsByLabel(comp.labels, comp.count, dt, w, h)
   for (let l = 1; l <= comp.count; l++) {
-    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
-    const skel = skeletonize(cm, w, h)
-    const ws: number[] = []
-    for (let i = 0; i < w * h; i++) if (skel[i]) ws.push(dt[i])
-    if (!ws.length) continue
-    ws.sort((a, b) => a - b)
-    const typical = ws[Math.floor(ws.length / 2)]
+    const typical = ridgeW[l]
+    if (typical <= 0) continue
     if (2 * (typical / pxPerMm - offsetMm) >= pitch * 0.9)
       for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) kept++
   }
@@ -1472,6 +1487,38 @@ function labelComponents(mask: Uint8Array, w: number, h: number) {
 
 // Zhang-Suen thinning to a 1px skeleton.
 function skeletonize(mask: Uint8Array, w: number, h: number): Uint8Array {
+  // Thinning is iterative, so running it over the FULL grid for every small
+  // region is what made the UI freeze: a six-letter design re-walked ~1M
+  // pixels per region, per pass. Crop to the region's bounding box, thin
+  // there, and write back.
+  let bx0 = w, by0 = h, bx1 = -1, by1 = -1
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (mask[y * w + x]) {
+        if (x < bx0) bx0 = x
+        if (y < by0) by0 = y
+        if (x > bx1) bx1 = x
+        if (y > by1) by1 = y
+      }
+  if (bx1 < 0) return new Uint8Array(w * h)
+  bx0 = Math.max(0, bx0 - 1); by0 = Math.max(0, by0 - 1)
+  bx1 = Math.min(w - 1, bx1 + 1); by1 = Math.min(h - 1, by1 + 1)
+  const cw = bx1 - bx0 + 1
+  const ch = by1 - by0 + 1
+  if (cw < w || ch < h) {
+    const sub = new Uint8Array(cw * ch)
+    for (let y = 0; y < ch; y++)
+      for (let x = 0; x < cw; x++) sub[y * cw + x] = mask[(y + by0) * w + (x + bx0)]
+    const thinned = skeletonizeFull(sub, cw, ch)
+    const out = new Uint8Array(w * h)
+    for (let y = 0; y < ch; y++)
+      for (let x = 0; x < cw; x++) out[(y + by0) * w + (x + bx0)] = thinned[y * cw + x]
+    return out
+  }
+  return skeletonizeFull(mask, w, h)
+}
+
+function skeletonizeFull(mask: Uint8Array, w: number, h: number): Uint8Array {
   const img = Uint8Array.from(mask)
   const at = (x: number, y: number) => (x >= 0 && y >= 0 && x < w && y < h ? img[y * w + x] : 0)
   let changed = true
