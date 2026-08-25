@@ -1284,9 +1284,16 @@ export function echoRequirement(
   for (let l = 1; l <= shape.count; l++) if (areas[l] >= minArea) widths.push(sMax[l] / pxPerMm)
   if (!widths.length) return { feasible: false, scale: 2 }
   widths.sort((a, b) => a - b)
-  const med = widths[Math.floor(widths.length / 2)]
+  // Stone sizes don't scale with the design, so scaling by s scales every
+  // stroke half-width by s. Size from the 15th-percentile stroke, not the
+  // median, so MOST strokes clear the bar (matching the 0.85 majority rule) —
+  // sizing off the median leaves the thin strokes still failing.
+  const w15 = widths[Math.floor(0.15 * (widths.length - 1))]
   const required = offsetMm + pitch * 0.45 // from 2*(maxD - offset) >= 0.9*pitch
-  return { feasible: echoFeasible(grid, pitch, offsetMm), scale: Math.max(1, required / med) }
+  return {
+    feasible: echoFeasible(grid, pitch, offsetMm),
+    scale: Math.max(1, (required / w15) * 1.05),
+  }
 }
 
 export function echoFeasible(grid: Grid, pitch: number, offsetMm: number): boolean {
@@ -1310,8 +1317,8 @@ export function echoFeasible(grid: Grid, pitch: number, offsetMm: number): boole
     if (l && 2 * (cMax[l] / pxPerMm - offsetMm) >= pitch * 0.9) kept++
   }
   // MOST of the echo territory must survive gating — a bulge here and there
-  // is not a double outline
-  return kept >= raw * 0.55
+  // is not a double outline, it's scattered fragments
+  return kept >= raw * 0.85
 }
 
 // ---------------------------------------------------------------------------
@@ -1768,7 +1775,15 @@ export function fillStones(
 
   // Law fill: everything placed deterministically above — no relaxation,
   // no gap-insertion. What the laws place is what ships.
-  return out
+  //
+  // Except lonely stones: a fill stone with no fill neighbour nearby isn't
+  // part of a pattern, it reads as a mistake. That happens when the strokes
+  // are too light for a fill and only tiny pockets survive the edge inset.
+  const near = rhythm * 1.6
+  const keep = out.filter((p) =>
+    out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
+  )
+  return keep
 }
 
 

@@ -257,7 +257,9 @@ export default function App() {
             outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
           } else {
             outline = outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
-            if (outlineDesign === 'double')
+            // an echo that can't form a full inner ring would emit fragments,
+            // which read as mistakes — refuse it and prompt to upsize instead
+            if (outlineDesign === 'double' && req.feasible)
               outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
           }
         }
@@ -271,6 +273,10 @@ export default function App() {
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+          if (!f.length && textMode === 'both')
+            setStatus(
+              'Strokes too light to fill at this size — raise Height, pick a bolder font, or lower Fill "From edge" / fill stone size',
+            )
         }
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
@@ -358,7 +364,7 @@ export default function App() {
         outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
       } else {
         outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
-        if (outlineDesign === 'double')
+        if (outlineDesign === 'double' && echoRequirement(grid, hole + hardGap, rhythm).feasible)
           outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
       }
     }
@@ -395,7 +401,7 @@ export default function App() {
           outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
         } else {
           outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
-          if (outlineDesign === 'double')
+          if (outlineDesign === 'double' && echoRequirement(raster.grid, hole + hardGap, rhythm).feasible)
             outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
         }
       }
