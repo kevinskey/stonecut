@@ -2,6 +2,7 @@ export interface Stone {
   x: number // mm, center
   y: number // mm, center
   size: string // key into stone size table
+  color?: string // display/design color (multi-color templates)
 }
 
 export interface StoneSpec {
