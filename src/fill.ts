@@ -65,7 +65,7 @@ export class SpacingIndex {
 }
 
 // Rasterize closed contours (mm) into a binary grid using canvas even-odd fill.
-export function rasterizeContours(contours: Pt[][], pxPerMm = 6): Grid {
+export function rasterizeContours(contours: Pt[][], pxPerMm = 6, padMm = 0): Grid {
   let maxX = 0
   let maxY = 0
   for (const c of contours)
@@ -73,7 +73,7 @@ export function rasterizeContours(contours: Pt[][], pxPerMm = 6): Grid {
       maxX = Math.max(maxX, p.x)
       maxY = Math.max(maxY, p.y)
     }
-  const pad = 2
+  const pad = 2 + Math.ceil(padMm * pxPerMm)
   const w = Math.ceil(maxX * pxPerMm) + pad * 2
   const h = Math.ceil(maxY * pxPerMm) + pad * 2
   const canvas = document.createElement('canvas')
@@ -1171,6 +1171,55 @@ export function outlineOrSpine(
         .sort((a, b) => b.length - a.length)
       for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
     }
+  }
+  return out
+}
+
+
+// ---------------------------------------------------------------------------
+// Offset outline rows — the classic rhinestone design styles:
+//   echo  = a second concentric row INSET inside the edge row ("double outline")
+//   ghost = a row floated OUTSIDE the letter edge (fabric shows through)
+// Both run through the full corner-aware, rhythm-harmonized pipeline.
+// ---------------------------------------------------------------------------
+export function offsetRows(
+  grid: Grid,
+  holeMm: number,
+  gapMm: number,
+  idx: SpacingIndex,
+  rhythmMm: number,
+  offsetMm: number,
+  outside: boolean,
+  uniform = false,
+): Pt[] {
+  const { bin, w, h, pxPerMm, padPx } = grid
+  const pitch = holeMm + gapMm
+  const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
+  let dt: Float32Array
+  if (outside) {
+    const inv = new Uint8Array(w * h)
+    for (let i = 0; i < w * h; i++) inv[i] = bin[i] ? 0 : 1
+    dt = distanceTransform({ bin: inv, w, h, pxPerMm, padPx })
+  } else {
+    dt = distanceTransform(grid)
+  }
+  const offPx = offsetMm * pxPerMm
+  const mask = new Uint8Array(w * h)
+  if (outside) {
+    for (let i = 0; i < w * h; i++) mask[i] = !bin[i] && dt[i] >= offPx ? 1 : 0
+  } else {
+    for (let i = 0; i < w * h; i++) mask[i] = bin[i] && dt[i] >= offPx ? 1 : 0
+  }
+  const rings = marchingSquares(mask, w, h)
+    // ghost mode: drop the grid-border frame contour
+    .filter((c) => !c.some((p) => p.x < 2 || p.y < 2 || p.x > w - 3 || p.y > h - 3))
+    .map((c) => c.map(toMm))
+    .sort((a, b) => b.length - a.length)
+  const out: Pt[] = []
+  for (const ring of rings) {
+    const info = analyzeContour(ring, pitch, rhythmMm)
+    placeContourCorners(info, pitch, idx, out, undefined, rhythmMm)
+    placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythmMm, uniform)
   }
   return out
 }

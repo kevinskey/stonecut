@@ -3,7 +3,7 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, debugSpans, debugStones, fillStones, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, debugSpans, debugStones, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
@@ -47,8 +47,11 @@ export default function App() {
   const [curSize, setCurSize] = useState('SS10')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
-  const [outlineStyle, setOutlineStyle] = useState<'auto' | 'walls' | 'centerline'>('auto')
+  const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline'>('single')
+  const [strokePolicy, setStrokePolicy] = useState<'auto' | 'walls'>('auto')
   const [uniformRhythm, setUniformRhythm] = useState(true)
+  const outlineStyle: 'auto' | 'walls' | 'centerline' =
+    outlineDesign === 'centerline' ? 'centerline' : strokePolicy
   const [zoom, setZoom] = useState(6) // px per mm
   const [status, setStatus] = useState('Ready')
 
@@ -220,7 +223,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, uniformRhythm])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -233,11 +236,17 @@ export default function App() {
         const rhythm = hole + gap
         const idx = new SpacingIndex(hole + hardGap)
         const pts: { x: number; y: number }[] = []
-        const grid = rasterizeContours(textPreview.contours)
-        const outline =
-          textMode !== 'fill'
-            ? outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
-            : []
+        const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
+        let outline: { x: number; y: number }[] = []
+        if (textMode !== 'fill') {
+          if (outlineDesign === 'ghost') {
+            outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
+          } else {
+            outline = outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
+            if (outlineDesign === 'double')
+              outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+          }
+        }
         pts.push(...outline)
         if (textMode !== 'outline') {
           const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
@@ -253,7 +262,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, uniformRhythm])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -278,8 +287,17 @@ export default function App() {
     const rhythm = hole + gap
     const idx = new SpacingIndex(hole + hardGap)
     const pts: { x: number; y: number }[] = []
-    const grid = rasterizeContours(contours)
-    const outline = textMode !== 'fill' ? outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm) : []
+    const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
+    let outline: { x: number; y: number }[] = []
+    if (textMode !== 'fill') {
+      if (outlineDesign === 'ghost') {
+        outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
+      } else {
+        outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
+        if (outlineDesign === 'double')
+          outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+      }
+    }
     pts.push(...outline)
     if (textMode !== 'outline') {
       const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
@@ -289,7 +307,7 @@ export default function App() {
     addGenerated(pts, offsetY)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm])
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -301,7 +319,16 @@ export default function App() {
       const rhythm = hole + gap
       const idx = new SpacingIndex(hole + hardGap)
       const pts: { x: number; y: number }[] = []
-      const outline = imgMode !== 'fill' ? outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm) : []
+      let outline: { x: number; y: number }[] = []
+      if (imgMode !== 'fill') {
+        if (outlineDesign === 'ghost') {
+          outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
+        } else {
+          outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
+          if (outlineDesign === 'double')
+            outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+        }
+      }
       pts.push(...outline)
       if (imgMode !== 'outline') {
         const inset = imgMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
@@ -313,7 +340,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -594,13 +621,23 @@ export default function App() {
             <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
             Uniform rhythm — verticals match horizontals per letter
           </label>
-          <label>Outline style
-            <select value={outlineStyle} onChange={(e) => setOutlineStyle(e.target.value as typeof outlineStyle)}>
-              <option value="auto">Auto — follow font lines when they fit</option>
-              <option value="walls">Always double (both walls)</option>
-              <option value="centerline">Always single line</option>
-            </select>
-          </label>
+          <div className="grid2">
+            <label>Outline design
+              <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
+                <option value="single">Single outline</option>
+                <option value="double">Double — echo row inside</option>
+                <option value="ghost">Ghost — floats outside</option>
+                <option value="centerline">Single-line lettering</option>
+              </select>
+            </label>
+            <label>Narrow strokes
+              <select value={strokePolicy} disabled={outlineDesign === 'centerline'}
+                onChange={(e) => setStrokePolicy(e.target.value as typeof strokePolicy)}>
+                <option value="auto">Auto fallback</option>
+                <option value="walls">Force walls</option>
+              </select>
+            </label>
+          </div>
           <button className="primary" onClick={generateText}>Add text stones</button>
         </Section>
 
