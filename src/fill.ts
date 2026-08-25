@@ -36,31 +36,51 @@ export interface Grid {
 // Spatial index enforcing a minimum center-to-center distance.
 export class SpacingIndex {
   private cell: number
-  private map = new Map<string, Pt[]>()
+  private map = new Map<string, { x: number; y: number; r: number }[]>()
   minDist: number
-  constructor(minDist: number) {
+  gap: number
+  defaultR: number
+  private useRadii: boolean
+  /**
+   * Legacy mode — new SpacingIndex(minDist) — enforces one uniform minimum.
+   * Radius mode — new SpacingIndex(minDist, gap, defaultRadius) — enforces
+   * radiusA + radiusB + gap per pair, so mixed stone sizes get the right
+   * clearance: two small fill stones may sit closer than a fill stone may
+   * sit to a big outline stone.
+   */
+  constructor(minDist: number, gap?: number, defaultRadius?: number) {
     this.minDist = minDist
-    this.cell = Math.max(minDist, 1)
+    this.gap = gap ?? 0
+    this.defaultR = defaultRadius ?? minDist / 2
+    this.useRadii = gap !== undefined && defaultRadius !== undefined
+    this.cell = Math.max(minDist * 1.5, 1)
   }
   private key(cx: number, cy: number) {
     return `${cx},${cy}`
   }
-  canPlace(p: Pt): boolean {
+  canPlace(p: Pt, r: number = this.defaultR): boolean {
     const cx = Math.floor(p.x / this.cell)
     const cy = Math.floor(p.y / this.cell)
     for (let gx = cx - 1; gx <= cx + 1; gx++)
       for (let gy = cy - 1; gy <= cy + 1; gy++) {
         const b = this.map.get(this.key(gx, gy))
         if (!b) continue
-        for (const o of b) if (Math.hypot(p.x - o.x, p.y - o.y) < this.minDist) return false
+        for (const o of b) {
+          const need = this.useRadii ? r + o.r + this.gap : this.minDist
+          // epsilon: a hex lattice places every neighbour at EXACTLY the
+          // minimum, so an exact comparison rejects ~half of them to
+          // floating-point noise and shreds the pattern
+          if (Math.hypot(p.x - o.x, p.y - o.y) < need - 1e-6) return false
+        }
       }
     return true
   }
-  add(p: Pt) {
+  add(p: Pt, r: number = this.defaultR) {
     const k = this.key(Math.floor(p.x / this.cell), Math.floor(p.y / this.cell))
+    const e = { x: p.x, y: p.y, r }
     const b = this.map.get(k)
-    if (b) b.push(p)
-    else this.map.set(k, [p])
+    if (b) b.push(e)
+    else this.map.set(k, [e])
   }
 }
 
@@ -1520,6 +1540,99 @@ function placePhaseLocked(
 // Fill
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Lattice fill — for OPEN areas (square bodies, star centres, big logos).
+//
+// Concentric rings are right for narrow strokes, where they read as spines
+// following the shape. In a wide open area they collapse into a spiral of
+// ever-smaller rings that collide near the middle. Open areas want a regular
+// lattice: hex (brick) or square (grid), centred on the region so symmetric
+// shapes fill symmetrically, with a small phase search for density.
+// ---------------------------------------------------------------------------
+function latticeFill(
+  compMask: Uint8Array,
+  dt: Float32Array,
+  grid: Grid,
+  insetPx: number,
+  pitch: number,
+  rhythm: number,
+  idx: SpacingIndex,
+  brick: boolean,
+): Pt[] {
+  const { w, h, pxPerMm, padPx } = grid
+  const toMmX = (px: number) => (px - padPx) / pxPerMm
+  const toMmY = (py: number) => (py - padPx) / pxPerMm
+
+  // fillable region = inside the component AND clear of the boundary
+  const ok = (xi: number, yi: number) => {
+    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+    const i = yi * w + xi
+    return compMask[i] === 1 && dt[i] >= insetPx
+  }
+  let minY = h, maxY = -1
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (ok(x, y)) {
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+        break
+      }
+  if (maxY < 0) return []
+
+  const spacingX = rhythm
+  const spacingY = (brick ? (rhythm * Math.sqrt(3)) / 2 : rhythm)
+  const spanY = toMmY(maxY) - toMmY(minY)
+  const nRows = Math.max(1, Math.floor(spanY / spacingY) + 1)
+  // centre the row block vertically: equal margin top and bottom
+  const y0 = toMmY(minY) + (spanY - (nRows - 1) * spacingY) / 2
+
+  const out: Pt[] = []
+  for (let r = 0; r < nRows; r++) {
+    const yMm = y0 + r * spacingY
+    const yi = Math.round(yMm * pxPerMm + padPx)
+    // contiguous fillable runs along this row — handles concave shapes and
+    // several separate spans (the two sides of a C, say) independently
+    const runs: { x0: number; x1: number }[] = []
+    let runStart = -1
+    for (let xi = 0; xi <= w; xi++) {
+      const good = xi < w && ok(xi, yi)
+      if (good && runStart < 0) runStart = xi
+      else if (!good && runStart >= 0) {
+        runs.push({ x0: toMmX(runStart), x1: toMmX(xi - 1) })
+        runStart = -1
+      }
+    }
+    for (const run of runs) {
+      const L = run.x1 - run.x0
+      let m = Math.floor(L / spacingX) + 1
+      // brick: alternate rows carry one fewer stone, so once each row is
+      // centred they land exactly between the neighbouring row's stones
+      if (brick && r % 2 === 1) m -= 1
+      if (m < 1) {
+        // run too short for the pattern: one centred stone if it fits at all
+        const p = { x: (run.x0 + run.x1) / 2, y: yMm }
+        if (ok(Math.round(p.x * pxPerMm + padPx), yi) && idx.canPlace(p)) {
+          idx.add(p)
+          out.push(p)
+        }
+        continue
+      }
+      // centre the run's stones: equal margin at both ends of the run
+      const x0 = run.x0 + (L - (m - 1) * spacingX) / 2
+      for (let k = 0; k < m; k++) {
+        const p = { x: x0 + k * spacingX, y: yMm }
+        if (!ok(Math.round(p.x * pxPerMm + padPx), yi)) continue
+        if (!idx.canPlace(p)) continue
+        idx.add(p)
+        out.push(p)
+      }
+    }
+  }
+  void pitch
+  return out
+}
+
 export function fillStones(
   grid: Grid,
   holeMm: number,
@@ -1569,6 +1682,12 @@ export function fillStones(
       // band (equal padding both sides); cap the stretch and re-center if the
       // stretched spacing would look sparse.
       let n = Math.floor(spanMm / rowPitch) + 1
+      if (n >= 3) {
+        // OPEN AREA: a regular lattice, not concentric rings
+        dbg(`lattice:n${n}:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
+        out.push(...latticeFill(compMask, dt, grid, minPx, pitch, rhythm, idx, brick))
+        continue
+      }
       dbg(`ringcomp:n${n}:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
       let s = n > 1 ? spanMm / (n - 1) : 0
       let start = startInsetMm

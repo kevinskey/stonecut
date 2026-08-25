@@ -167,6 +167,7 @@ export default function App() {
   const [imgThreshold, setImgThreshold] = useState(128)
   const [imgInvert, setImgInvert] = useState(false)
   const [imgAlphaKey, setImgAlphaKey] = useState(false)
+  const [imagePreview, setImagePreview] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
   const [imgMode, setImgMode] = useState<StoneMode>('both')
 
   // material
@@ -266,8 +267,8 @@ export default function App() {
           const fGap = hardGapOf(fillSpacing)
           const fRhythm = fHole + fillSpacing
           const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
-          const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap))
-          for (const p of outline) fIdx.add(p)
+          const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
+          for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
         }
@@ -282,6 +283,50 @@ export default function App() {
     }, 350)
     return () => window.clearTimeout(t)
   }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
+
+  // live IMAGE preview: same treatment text gets — settings changes re-stone
+  // the artwork automatically, nothing committed until you press Add
+  useEffect(() => {
+    if (!imageFile) return
+    const t = window.setTimeout(async () => {
+      try {
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey)
+        const hole = sizes[curSize]?.holeMm ?? 3
+        const hardGap = hardGapOf(gap)
+        const rhythm = hole + gap
+        const idx = new SpacingIndex(hole + hardGap)
+        const pts: { x: number; y: number; size?: string; color?: string }[] = []
+        let outline: { x: number; y: number }[] = []
+        if (imgMode !== 'fill') {
+          if (outlineDesign === 'ghost') {
+            outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
+          } else {
+            outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
+            if (outlineDesign === 'double')
+              outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+          }
+        }
+        pts.push(...outline)
+        if (imgMode !== 'outline') {
+          const fHole = sizes[fillSize]?.holeMm ?? 2.5
+          const fGap = hardGapOf(fillSpacing)
+          const fRhythm = fHole + fillSpacing
+          const fInset = imgMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
+          const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
+          for (const p of outline) fIdx.add(p, hole / 2)
+          const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+        }
+        setImagePreview(pts)
+        ;(window as unknown as { __scPts?: unknown }).__scPts = pts
+        ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
+      } catch {
+        setImagePreview(null)
+      }
+    }, 350)
+    return () => window.clearTimeout(t)
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap,
+      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fillEdgeGap, fillSpacing])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -323,8 +368,8 @@ export default function App() {
       const fGap = hardGapOf(fillSpacing)
       const fRhythm = fHole + fillSpacing
       const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
-      const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap))
-      for (const p of outline) fIdx.add(p)
+      const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
+      for (const p of outline) fIdx.add(p, hole / 2)
       const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
     }
@@ -360,13 +405,14 @@ export default function App() {
         const fGap = hardGapOf(fillSpacing)
         const fRhythm = fHole + fillSpacing
         const fInset = imgMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
-        const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap))
-        for (const p of outline) fIdx.add(p)
+        const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
+        for (const p of outline) fIdx.add(p, hole / 2)
         const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
         pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
       }
       const offsetY = stones.length ? bbox.maxY + 10 : 10
       addGenerated(pts, offsetY)
+      setImagePreview(null)
       setStatus(
         pts.length
           ? `Added ${pts.length} stones from image`
@@ -822,6 +868,17 @@ export default function App() {
             </pattern>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
+          {imagePreview?.map((p, i) => (
+            <circle
+              key={`ip${i}`}
+              cx={(p.x + 10) * zoom}
+              cy={(p.y + previewOffsetY) * zoom}
+              r={((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom}
+              fill={p.color ?? '#8fb0ff'}
+              fillOpacity={0.55}
+              pointerEvents="none"
+            />
+          ))}
           {previewLive && previewStones?.map((p, i) => (
             <circle
               key={`pv${i}`}
