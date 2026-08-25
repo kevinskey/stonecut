@@ -972,13 +972,38 @@ export function outlineOrSpine(
     return 0
   }
 
-  // An outline follows the font lines. The centerline fallback fires ONLY
-  // when a stroke is physically too narrow for rows on both walls to coexist
-  // (width under ~1.05×pitch) — or when the user forces single-line style.
+  // An outline follows the font lines; the centreline fallback fires when a
+  // stroke can't carry two readable rows.
   void wholeWord
+  void maxD
+  // Judge a letter by its TYPICAL stroke width, not its fattest point. The
+  // max distance-to-edge sits at a junction (where an E's stem meets an arm),
+  // so using it declares the whole letter "wide" and leaves thin stems with
+  // two wall rows crammed at the bare minimum. The median distance along the
+  // medial axis is the real stroke half-width.
+  const typicalHalf = new Float32Array(count + 1)
+  {
+    const cm = new Uint8Array(w * h)
+    for (let lbl = 1; lbl <= count; lbl++) {
+      for (let i = 0; i < w * h; i++) cm[i] = labels[i] === lbl ? 1 : 0
+      const skel = skeletonize(cm, w, h)
+      const widths: number[] = []
+      for (let i = 0; i < w * h; i++) if (skel[i]) widths.push(dt[i])
+      if (!widths.length) {
+        typicalHalf[lbl] = maxD[lbl]
+        continue
+      }
+      widths.sort((a, b) => a - b)
+      typicalHalf[lbl] = widths[Math.floor(widths.length / 2)]
+    }
+  }
+  // Two wall rows need room to READ as two rows. At ~1.05x pitch they are
+  // legal but sit at the bare minimum — holes nearly touching, with a
+  // fragile strip of template between them down the whole stroke. Below
+  // 1.5x pitch a single centred spine is both cleaner and stronger.
   const isNarrow = (lbl: number) =>
     style === 'centerline' ||
-    (style === 'auto' && lbl > 0 && 2 * (maxD[lbl] / pxPerMm) < pitch * 1.05)
+    (style === 'auto' && lbl > 0 && 2 * (typicalHalf[lbl] / pxPerMm) < pitch * 1.5)
 
   const out: Pt[] = []
   const narrowLbls = new Set<number>()
@@ -1231,26 +1256,46 @@ export function offsetRows(
     for (let i = 0; i < w * h; i++) mask[i] = !bin[i] && dt[i] >= offPx ? 1 : 0
   } else {
     for (let i = 0; i < w * h; i++) mask[i] = bin[i] && dt[i] >= offPx ? 1 : 0
-    // a clean echo requires its ring's own two sides to clear the minimum:
-    // drop components where the remaining depth can't separate the loop —
-    // a thin-loop echo is zigzag garbage, and no echo beats a bad echo
-    const comp = labelComponents(mask, w, h)
-    if (comp.count) {
-      const cMax = new Float32Array(comp.count + 1)
-      for (let i = 0; i < w * h; i++)
-        if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
-      for (let i = 0; i < w * h; i++) {
-        const l = comp.labels[i]
-        if (l && 2 * (cMax[l] / pxPerMm - offsetMm) < pitch * 0.9) mask[i] = 0
-      }
+  }
+
+  const out: Pt[] = []
+  // Per region: a full echo RING needs its own two sides to clear the
+  // minimum. Where the stroke is only wide enough for one inner row, the
+  // ring collapses to the medial axis — a CENTRED row, equidistant from both
+  // walls. Walking the degenerate ring instead produced a lopsided line
+  // (measured 6.60mm from one wall, 5.31mm from the other).
+  const comp = labelComponents(mask, w, h)
+  const cMax = new Float32Array(comp.count + 1)
+  for (let i = 0; i < w * h; i++)
+    if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
+  const cm = new Uint8Array(w * h)
+  const ringMask = new Uint8Array(w * h)
+  let anyRing = false
+  for (let l = 1; l <= comp.count; l++) {
+    const ringCapable = !outside && 2 * (cMax[l] / pxPerMm - offsetMm) < pitch * 0.9 ? false : true
+    if (ringCapable) {
+      for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) ringMask[i] = 1
+      anyRing = true
+      continue
+    }
+    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
+    const skel = skeletonize(cm, w, h)
+    const paths = traceSkeleton(skel, w, h)
+      .map((p) => smoothPath(p).map(toMm))
+      .sort((a, b) => b.length - a.length)
+    for (const p of paths) {
+      let len = 0
+      for (let k = 1; k < p.length; k++) len += Math.hypot(p[k].x - p[k - 1].x, p[k].y - p[k - 1].y)
+      if (len < rhythmMm) continue
+      out.push(...placeOpenEven(p, pitch, idx, rhythmMm))
     }
   }
-  const rings = marchingSquares(mask, w, h)
-    // ghost mode: drop the grid-border frame contour
-    .filter((c) => !c.some((p) => p.x < 2 || p.y < 2 || p.x > w - 3 || p.y > h - 3))
-    .map((c) => c.map(toMm))
-    .sort((a, b) => b.length - a.length)
-  const out: Pt[] = []
+  const rings = anyRing
+    ? marchingSquares(ringMask, w, h)
+        .filter((c) => !c.some((p) => p.x < 2 || p.y < 2 || p.x > w - 3 || p.y > h - 3))
+        .map((c) => c.map(toMm))
+        .sort((a, b) => b.length - a.length)
+    : []
   for (const ring of rings) {
     const info = analyzeContour(ring, pitch, rhythmMm)
     placeContourCorners(info, pitch, idx, out, undefined, rhythmMm)
