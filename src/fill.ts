@@ -108,7 +108,13 @@ export function rasterizeContours(contours: Pt[][], pxPerMm = 6, padMm = 0): Gri
     path.closePath()
   }
   ctx.fillStyle = '#000'
-  ctx.fill(path, 'evenodd')
+  // NONZERO, not even-odd. Glyphs are routinely drawn as overlapping
+  // same-winding contours (an E as a C-shape plus a separate middle-arm bar).
+  // Even-odd treats the overlap as 'inside twice = outside' and punches a
+  // phantom hole — measured 78mm^2 inside each E, which the outline then
+  // traced. Real counters (O, B, A) are wound the opposite way, so nonzero
+  // still makes those holes correctly.
+  ctx.fill(path, 'nonzero')
   const data = ctx.getImageData(0, 0, w, h).data
   const bin = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) bin[i] = data[i * 4 + 3] > 127 ? 1 : 0
