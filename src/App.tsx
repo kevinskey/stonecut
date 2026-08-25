@@ -3,7 +3,7 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, debugSpans, debugStones, echoRequirement, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, debugSpans, debugStones, echoRequirement, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
@@ -267,7 +267,7 @@ export default function App() {
           const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap))
           for (const p of outline) fIdx.add(p)
-          const f = fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+          const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
         }
         setPreviewStones(pts)
@@ -324,7 +324,7 @@ export default function App() {
       const fInset = textMode === 'both' ? hole / 2 + fillEdgeGap + fHole / 2 : fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap))
       for (const p of outline) fIdx.add(p)
-      const f = fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
     }
     const offsetY = stones.length ? bbox.maxY + 10 : 10

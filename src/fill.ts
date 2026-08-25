@@ -1652,3 +1652,80 @@ export function fillStones(
   return out
 }
 
+
+// ---------------------------------------------------------------------------
+// Per-glyph fill — determinism fix.
+//
+// The outline works from exact vector contours, but the fill works from a
+// raster. Rasterizing a whole word at once lands each glyph on a different
+// sub-pixel phase of the grid, so identical letters get slightly different
+// distance fields and therefore different fill decisions.
+//
+// Filling each glyph in its OWN local frame (bbox translated to the origin)
+// normalizes that phase: identical glyphs rasterize identically and fill
+// identically. Results are translated back and validated against the global
+// index so cross-glyph spacing still holds.
+// ---------------------------------------------------------------------------
+export function fillByGlyph(
+  contours: Pt[][],
+  holeMm: number,
+  gapMm: number,
+  startInsetMm: number,
+  idx: SpacingIndex,
+  fixedPts: Pt[],
+  rhythmMm: number,
+  brick = false,
+): Pt[] {
+  interface Group {
+    minX: number
+    minY: number
+    maxX: number
+    maxY: number
+    cs: Pt[][]
+  }
+  const groups: Group[] = []
+  for (const c of contours) {
+    if (c.length < 3) continue
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const p of c) {
+      if (p.x < minX) minX = p.x
+      if (p.y < minY) minY = p.y
+      if (p.x > maxX) maxX = p.x
+      if (p.y > maxY) maxY = p.y
+    }
+    // attach to any group whose bbox overlaps (a counter sits inside its glyph)
+    const hit = groups.find((g) => !(maxX < g.minX || minX > g.maxX || maxY < g.minY || minY > g.maxY))
+    if (hit) {
+      hit.minX = Math.min(hit.minX, minX)
+      hit.minY = Math.min(hit.minY, minY)
+      hit.maxX = Math.max(hit.maxX, maxX)
+      hit.maxY = Math.max(hit.maxY, maxY)
+      hit.cs.push(c)
+    } else groups.push({ minX, minY, maxX, maxY, cs: [c] })
+  }
+
+  const out: Pt[] = []
+  for (const g of groups) {
+    const ox = g.minX
+    const oy = g.minY
+    const local = g.cs.map((c) => c.map((p) => ({ x: p.x - ox, y: p.y - oy })))
+    const grid = rasterizeContours(local)
+    // outline stones near this glyph, in the glyph's local frame
+    const pad = rhythmMm * 3
+    const localFixed = fixedPts
+      .filter((p) => p.x >= g.minX - pad && p.x <= g.maxX + pad && p.y >= g.minY - pad && p.y <= g.maxY + pad)
+      .map((p) => ({ x: p.x - ox, y: p.y - oy }))
+    const localIdx = new SpacingIndex(idx.minDist)
+    for (const p of localFixed) localIdx.add(p)
+    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick)
+    for (const p of placed) {
+      const q = { x: p.x + ox, y: p.y + oy }
+      // cross-glyph legality still enforced against the global index
+      if (idx.canPlace(q)) {
+        idx.add(q)
+        out.push(q)
+      }
+    }
+  }
+  return out
+}
