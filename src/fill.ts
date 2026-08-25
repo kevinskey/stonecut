@@ -1229,6 +1229,24 @@ export function outlineOrSpine(
 //   ghost = a row floated OUTSIDE the letter edge (fabric shows through)
 // Both run through the full corner-aware, rhythm-harmonized pipeline.
 // ---------------------------------------------------------------------------
+
+// A rasterised medial axis staircases, and it bends toward every branch at a
+// junction — so a straight stem's centre row comes out wandering. Snap a
+// near-linear path to its chord so straight reads straight.
+export function straightenPath(p: Pt[]): Pt[] {
+  if (p.length < 3) return p
+  const a = p[0]
+  const b = p[p.length - 1]
+  const L = Math.hypot(b.x - a.x, b.y - a.y)
+  if (L < 1) return p
+  let maxDev = 0
+  for (const q of p) {
+    const d = Math.abs((b.x - a.x) * (a.y - q.y) - (a.x - q.x) * (b.y - a.y)) / L
+    if (d > maxDev) maxDev = d
+  }
+  return maxDev < Math.max(1.3, L * 0.07) ? [a, b] : p
+}
+
 export function offsetRows(
   grid: Grid,
   holeMm: number,
@@ -1272,10 +1290,9 @@ export function offsetRows(
   const ringMask = new Uint8Array(w * h)
   let anyRing = false
   for (let l = 1; l <= comp.count; l++) {
-    // TYPICAL width, not the fattest point. Judging by the max lets one
-    // junction declare the region ring-capable, and the ring then forms with
-    // its two sides ~3.7mm apart (below the 4.2mm minimum), which survives
-    // only by zig-zagging — the crowded 'double rows' look.
+    // TYPICAL width, not the fattest point: judging by the max lets one
+    // junction declare a region ring-capable, and the ring then forms with
+    // its two sides below the minimum, surviving only by zig-zagging.
     for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
     const skelW = skeletonize(cm, w, h)
     const ws: number[] = []
@@ -1283,20 +1300,14 @@ export function offsetRows(
     ws.sort((a, b) => a - b)
     const typical = ws.length ? ws[Math.floor(ws.length / 2)] : cMax[l]
     const ringCapable = outside || 2 * (typical / pxPerMm - offsetMm) >= pitch * 0.9
-    if (ringCapable) {
-      for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) ringMask[i] = 1
-      anyRing = true
-      continue
-    }
-    const paths = traceSkeleton(skelW, w, h)
-      .map((p) => smoothPath(p).map(toMm))
-      .sort((a, b) => b.length - a.length)
-    for (const p of paths) {
-      let len = 0
-      for (let k = 1; k < p.length; k++) len += Math.hypot(p[k].x - p[k - 1].x, p[k].y - p[k - 1].y)
-      if (len < rhythmMm) continue
-      out.push(...placeOpenEven(p, pitch, idx, rhythmMm))
-    }
+    // A region that can't hold a ring gets NOTHING. Substituting a single
+    // centred row seemed reasonable but the medial axis fragments at every
+    // junction: the row came out wandering ~2.2mm and dropped a 24mm gap
+    // mid-stem. Feasibility refuses the design instead, and says what size
+    // would work.
+    if (!ringCapable) continue
+    for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) ringMask[i] = 1
+    anyRing = true
   }
   const rings = anyRing
     ? marchingSquares(ringMask, w, h)
@@ -1361,17 +1372,22 @@ export function echoFeasible(grid: Grid, pitch: number, offsetMm: number): boole
   }
   if (!raw) return false
   const comp = labelComponents(mask, w, h)
-  const cMax = new Float32Array(comp.count + 1)
-  for (let i = 0; i < w * h; i++)
-    if (comp.labels[i] && dt[i] > cMax[comp.labels[i]]) cMax[comp.labels[i]] = dt[i]
+  const cm = new Uint8Array(w * h)
   let kept = 0
-  for (let i = 0; i < w * h; i++) {
-    const l = comp.labels[i]
-    if (l && 2 * (cMax[l] / pxPerMm - offsetMm) >= pitch * 0.9) kept++
+  for (let l = 1; l <= comp.count; l++) {
+    for (let i = 0; i < w * h; i++) cm[i] = comp.labels[i] === l ? 1 : 0
+    const skel = skeletonize(cm, w, h)
+    const ws: number[] = []
+    for (let i = 0; i < w * h; i++) if (skel[i]) ws.push(dt[i])
+    if (!ws.length) continue
+    ws.sort((a, b) => a - b)
+    const typical = ws[Math.floor(ws.length / 2)]
+    if (2 * (typical / pxPerMm - offsetMm) >= pitch * 0.9)
+      for (let i = 0; i < w * h; i++) if (comp.labels[i] === l) kept++
   }
-  // MOST of the echo territory must survive gating — a bulge here and there
-  // is not a double outline, it's scattered fragments
-  return kept >= raw * 0.85
+  // near-total: a double outline that only forms on part of the design is
+  // fragments, which read as mistakes
+  return kept >= raw * 0.9
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,7 +1742,7 @@ export function fillStones(
     const walkSkeleton = (m: Uint8Array) => {
       const skel = skeletonize(m, w, h)
       const paths = traceSkeleton(skel, w, h)
-        .map((p) => smoothPath(p).map(toMm))
+        .map((p) => straightenPath(smoothPath(p, 3).map(toMm)))
         .sort((a, b) => b.length - a.length)
       // A medial axis forks where strokes meet (a G's bar into its bowl).
       // Those short branch stubs are not runs — stones placed along them land
