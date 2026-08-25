@@ -15,6 +15,10 @@ type StoneMode = 'outline' | 'fill' | 'both'
 
 const MARGIN = 5 // mm margin around design in exports
 
+// template-integrity floor (sticky flock ~0.5-1.2mm edge gap) regardless of
+// how wide the design spacing is set
+const hardGapOf = (spacing: number) => Math.max(0.5, Math.min(spacing, 1.2))
+
 function Section({ title, defaultOpen = true, children }: {
   title: string
   defaultOpen?: boolean
@@ -44,6 +48,7 @@ export default function App() {
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
   const [outlineStyle, setOutlineStyle] = useState<'auto' | 'walls' | 'centerline'>('auto')
+  const [uniformRhythm, setUniformRhythm] = useState(true)
   const [zoom, setZoom] = useState(6) // px per mm
   const [status, setStatus] = useState('Ready')
 
@@ -215,7 +220,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, uniformRhythm])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -224,22 +229,23 @@ export default function App() {
     const t = window.setTimeout(() => {
       try {
         const hole = sizes[curSize]?.holeMm ?? 3
-        const spacing = hole + gap
-        const idx = new SpacingIndex(spacing)
+        const hardGap = hardGapOf(gap)
+        const rhythm = hole + gap
+        const idx = new SpacingIndex(hole + hardGap)
         const pts: { x: number; y: number }[] = []
         const grid = rasterizeContours(textPreview.contours)
         const outline =
           textMode !== 'fill'
-            ? outlineOrSpine(textPreview.contours, grid, hole, gap, idx, outlineStyle, true)
+            ? outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
             : []
         pts.push(...outline)
         if (textMode !== 'outline') {
-          const inset = textMode === 'both' ? spacing * 0.87 : hole / 2 + 0.1
-          pts.push(...fillStones(grid, hole, gap, inset, idx, outline))
+          const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
+          pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm))
         }
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
-        ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ at: s.at, chords: [...s.chords] }))
+        ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ ...s, chords: [...s.chords] }))
         ;(window as unknown as { __scContours?: unknown }).__scContours = textPreview.contours
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
       } catch {
@@ -247,7 +253,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, uniformRhythm])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -257,7 +263,7 @@ export default function App() {
         // half-gap threshold: safety net for merges only — relaxed fills sit
         // slightly under full pitch by design and must not get culled here
         const all = [...prev, ...fresh]
-        const kept = removeCollisions(all, (s) => sizes[s.size]?.holeMm ?? 3, gap * 0.5)
+        const kept = removeCollisions(all, (s) => sizes[s.size]?.holeMm ?? 3, hardGapOf(gap) * 0.5)
         return kept
       })
     },
@@ -268,21 +274,22 @@ export default function App() {
     if (!font) { setStatus('Upload a font file first (.ttf/.otf)'); return }
     const { contours } = textToContours(font, text, textHeight, letterSpacing)
     const hole = sizes[curSize]?.holeMm ?? 3
-    const spacing = hole + gap
-    const idx = new SpacingIndex(spacing)
+    const hardGap = hardGapOf(gap)
+    const rhythm = hole + gap
+    const idx = new SpacingIndex(hole + hardGap)
     const pts: { x: number; y: number }[] = []
     const grid = rasterizeContours(contours)
-    const outline = textMode !== 'fill' ? outlineOrSpine(contours, grid, hole, gap, idx, outlineStyle, true) : []
+    const outline = textMode !== 'fill' ? outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm) : []
     pts.push(...outline)
     if (textMode !== 'outline') {
-      const inset = textMode === 'both' ? spacing * 0.87 : hole / 2 + 0.1
-      pts.push(...fillStones(grid, hole, gap, inset, idx, outline))
+      const inset = textMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
+      pts.push(...fillStones(grid, hole, hardGap, inset, idx, outline, rhythm))
     }
     const offsetY = stones.length ? bbox.maxY + 10 : 10
     addGenerated(pts, offsetY)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated])
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -290,14 +297,15 @@ export default function App() {
     try {
       const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert)
       const hole = sizes[curSize]?.holeMm ?? 3
-      const spacing = hole + gap
-      const idx = new SpacingIndex(spacing)
+      const hardGap = hardGapOf(gap)
+      const rhythm = hole + gap
+      const idx = new SpacingIndex(hole + hardGap)
       const pts: { x: number; y: number }[] = []
-      const outline = imgMode !== 'fill' ? outlineOrSpine(raster.contours, raster.grid, hole, gap, idx, outlineStyle) : []
+      const outline = imgMode !== 'fill' ? outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm) : []
       pts.push(...outline)
       if (imgMode !== 'outline') {
-        const inset = imgMode === 'both' ? spacing * 0.87 : hole / 2 + 0.1
-        pts.push(...fillStones(raster.grid, hole, gap, inset, idx, outline))
+        const inset = imgMode === 'both' ? rhythm * 0.87 : hole / 2 + 0.1
+        pts.push(...fillStones(raster.grid, hole, hardGap, inset, idx, outline, rhythm))
       }
       const offsetY = stones.length ? bbox.maxY + 10 : 10
       addGenerated(pts, offsetY)
@@ -305,7 +313,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -573,10 +581,19 @@ export default function App() {
               <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
                 onChange={(e) => setSizes((prev) => ({ ...prev, [curSize]: { ...prev[curSize], holeMm: +e.target.value } }))} />
             </label>
-            <label>Min gap (mm)
-              <input type="number" step={0.1} min={0.2} max={5} value={gap} onChange={(e) => setGap(+e.target.value)} />
+            <label>Spacing (mm)
+              <input type="number" step={0.1} min={0.4} max={15} value={gap} onChange={(e) => setGap(+e.target.value)} />
             </label>
           </div>
+          <div className="chiprow">
+            {[['Dense', 0.5], ['Standard', 0.8], ['Open', 3], ['Scatter', 8]].map(([name, v]) => (
+              <button key={name as string} className={`chip ${gap === v ? 'active' : ''}`} onClick={() => setGap(v as number)}>{name}</button>
+            ))}
+          </div>
+          <label className="row">
+            <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
+            Uniform rhythm — verticals match horizontals per letter
+          </label>
           <label>Outline style
             <select value={outlineStyle} onChange={(e) => setOutlineStyle(e.target.value as typeof outlineStyle)}>
               <option value="auto">Auto — follow font lines when they fit</option>

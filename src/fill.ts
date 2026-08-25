@@ -20,7 +20,7 @@ import type { Pt } from './model'
 
 // diagnostic registry: every stone tagged by the subsystem that placed it
 export const debugStones: { cat: string; x: number; y: number }[] = []
-export const debugSpans: { at: string; chords: number[] }[] = []
+export const debugSpans: { at: string; chords: number[]; r?: number; m0?: number; mFinal?: number; Lc?: number; E?: number; need?: number; att?: string }[] = []
 function dbg(cat: string, pts: Pt[]) {
   for (const p of pts) debugStones.push({ cat, x: p.x, y: p.y })
 }
@@ -269,10 +269,11 @@ function pointAt(path: Path, s: number): Pt {
 // from every already-placed stone (chord distance matters on tight curves).
 // A blocked stone slides forward until it fits. Several start phases are
 // tried; the densest placement is committed to idx.
-function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex, phases = 5): Pt[] {
+function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex, phases = 5, rhythm?: number): Pt[] {
+  const target = rhythm ?? pitch
   const path = makePath(poly, closed)
   if (!path) return []
-  if (path.total < pitch * 1.2) {
+  if (path.total < target * 1.2) {
     // tiny path: try a single stone, midpoint first
     for (const s of [path.total / 2, 0, path.total]) {
       const p = pointAt(path, s)
@@ -283,15 +284,15 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
     }
     return []
   }
-  const ds = pitch / 12
+  const ds = target / 12
   let best: Pt[] = []
   for (let ph = 0; ph < phases; ph++) {
-    const offset = (ph / phases) * pitch
+    const offset = (ph / phases) * target
     const placed: Pt[] = []
-    let arcSince = pitch // allow immediate first placement
+    let arcSince = target // allow immediate first placement
     const end = closed ? offset + path.total : path.total
     for (let s = offset; s < end; s += ds) {
-      if (arcSince < pitch) {
+      if (arcSince < target) {
         arcSince += ds
         continue
       }
@@ -314,8 +315,8 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
   return best
 }
 
-export function placeRing(poly: Pt[], pitch: number, idx: SpacingIndex, phases = 5): Pt[] {
-  return walkPoly(poly, true, pitch, idx, phases)
+export function placeRing(poly: Pt[], pitch: number, idx: SpacingIndex, phases = 5, rhythm?: number): Pt[] {
+  return walkPoly(poly, true, pitch, idx, phases, rhythm)
 }
 
 // Place a run of stones between two arc positions on a path. The run is laid
@@ -330,7 +331,9 @@ function placeRun(
   pitch: number,
   idx: SpacingIndex,
   inside?: (p: Pt) => boolean,
+  rhythm?: number,
 ): Pt[] {
+  const target = rhythm ?? pitch * 1.15
   void inside
   const span = sHi - sLo
   if (span < 0) return []
@@ -347,7 +350,7 @@ function placeRun(
     // NEVER off the line — no stone beats a bent stone
     return []
   }
-  let m = Math.max(2, Math.round(span / (pitch * 1.15)) + 1)
+  let m = Math.max(2, Math.round(span / target) + 1)
   while (m > 2 && span / (m - 1) < pitch * 1.02) m--
 
   // If a run can't legally hold its stone count (tight curve, external
@@ -433,10 +436,10 @@ function placeRun(
 }
 
 // Open runs (skeleton spines, stroke centerlines) are spans end-to-end.
-function placeOpenEven(poly: Pt[], pitch: number, idx: SpacingIndex): Pt[] {
+function placeOpenEven(poly: Pt[], pitch: number, idx: SpacingIndex, rhythm?: number): Pt[] {
   const path = makePath(poly, false)
   if (!path) return []
-  return placeRun(path, 0, path.total, pitch, idx)
+  return placeRun(path, 0, path.total, pitch, idx, undefined, rhythm)
 }
 
 // Place interior stones between two ALREADY-PLACED corner anchors so that
@@ -463,7 +466,7 @@ function placeBetweenAnchors(
   const bPt = pointAt(path, bArc)
 
   // one full layout attempt at a given stone count; nothing committed
-  const attempt = (m: number): { pt: Pt[]; ok: boolean; spread: number } => {
+  const attempt = (m: number): { pt: Pt[]; ok: boolean; spread: number; why?: string } => {
     const sp = E / (m + 1)
     const s: number[] = []
     for (let i = 0; i < m; i++) s.push(aArc + (i + 1) * sp)
@@ -548,17 +551,18 @@ function placeBetweenAnchors(
     // full anchor-to-anchor chain
     const chain = [aPt, ...pt, bPt]
     let ok = true
-    for (let i = 0; i < m; i++) if (!idx.canPlace(pt[i])) ok = false
+    let why = ''
+    for (let i = 0; i < m; i++) if (!idx.canPlace(pt[i])) { ok = false; why += `place${i};` }
     const chords: number[] = []
     for (let i = 1; i < chain.length; i++)
       chords.push(Math.hypot(chain[i].x - chain[i - 1].x, chain[i].y - chain[i - 1].y))
-    for (let i = 1; i < chords.length - 0; i++) {
-      // inter-stone chords (not anchor gaps) must be fully legal
-      if (i > 0 && i < chords.length && i - 1 >= 1 && i - 1 <= m - 1 && chords[i] < pitch) ok = false
-    }
-    for (let i = 1; i <= m - 1; i++) if (chords[i] < pitch) ok = false
+    for (let i = 1; i <= m - 1; i++) if (chords[i] < pitch) { ok = false; why += `chord${i}=${chords[i].toFixed(2)};` }
     const spread = Math.max(...chords) - Math.min(...chords)
-    return { pt, ok, spread }
+    const mean = chords.reduce((a2, b2) => a2 + b2, 0) / chords.length
+    // score = internal evenness AND fidelity to the design rhythm — an even
+    // row at the wrong beat must lose to an even row at the right beat
+    const score = spread * 2 + Math.abs(mean - r)
+    return { pt, ok, spread: score, why }
   }
 
   let m0 = Math.round(Lc / r) - 1
@@ -573,7 +577,15 @@ function placeBetweenAnchors(
             +Math.hypot(p.x - aPt.x, p.y - aPt.y).toFixed(2),
             +Math.hypot(bPt.x - p.x, bPt.y - p.y).toFixed(2),
           ]
-          debugSpans.push({ at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`, chords })
+          debugSpans.push({
+            at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`,
+            chords,
+            r: +r.toFixed(2),
+            m0,
+            Lc: +Lc.toFixed(2),
+            E: +E.toFixed(2),
+            need: +need.toFixed(2),
+          })
         }
         return [p]
       }
@@ -585,12 +597,25 @@ function placeBetweenAnchors(
   const cands: number[] = [m0]
   if (m0 + 1 >= 1 && E / (m0 + 2) >= pitch * 1.0) cands.push(m0 + 1)
   if (m0 - 1 >= 1) cands.push(m0 - 1)
-  let best: { pt: Pt[]; ok: boolean; spread: number } | null = null
+  let best: { pt: Pt[]; ok: boolean; spread: number; why?: string } | null = null
+  const attLog: string[] = []
   for (const m of cands) {
     const a = attempt(m)
+    attLog.push(`${m}:${a.ok ? 'ok' : a.why}`)
     if (!best) best = a
     else if (a.ok && !best.ok) best = a
     else if (a.ok === best.ok && a.spread < best.spread - 1e-9) best = a
+  }
+  // NEVER commit a layout with holes: if no candidate count is fully legal,
+  // descend until one is — fewer stones evenly spaced beat a silent gap
+  if (best && !best.ok) {
+    for (let m = m0 - 2; m >= 1; m--) {
+      const a = attempt(m)
+      if (a.ok) {
+        best = a
+        break
+      }
+    }
   }
   if (!best) return []
 
@@ -608,7 +633,7 @@ function placeBetweenAnchors(
     const chords: number[] = []
     for (let i = 1; i < chain.length; i++)
       chords.push(+Math.hypot(chain[i].x - chain[i - 1].x, chain[i].y - chain[i - 1].y).toFixed(2))
-    debugSpans.push({ at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`, chords })
+    debugSpans.push({ at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`, chords, r: +r.toFixed(2), m0, mFinal: placed.length, att: attLog.join(' | ') })
   }
   return placed
 }
@@ -629,7 +654,8 @@ interface ContourInfo {
 }
 
 // Phase 0: detect corners on a contour — no stones placed yet.
-function analyzeContour(poly: Pt[], pitch: number): ContourInfo {
+function analyzeContour(poly: Pt[], pitch: number, rhythm?: number): ContourInfo {
+  const target = rhythm ?? pitch * 1.15
   const path = makePath(poly, true)
   if (!path || path.total < pitch * 2.5) return { poly, path, corners: [], fallback: true }
   const step = 0.3
@@ -659,7 +685,7 @@ function analyzeContour(poly: Pt[], pitch: number): ContourInfo {
   // across a ~1.5-pitch window, a real corner's net turn stays large; a
   // micro-bump (like a 2mm font spur) returns to course — net turn ~0 —
   // and gets no stone: the row runs straight through it.
-  const W2 = Math.max(win + 1, Math.round((pitch * 2.0) / ds))
+  const W2 = Math.max(win + 1, Math.round((target * 2.0) / ds))
   const significant = (i: number): boolean => {
     const a = pts[wrap(i - W2)]
     const b = pts[i]
@@ -699,7 +725,7 @@ function analyzeContour(poly: Pt[], pitch: number): ContourInfo {
     }
     const apex = pts[wrap(best)]
     const alpha = Math.max(0.35, Math.PI - Math.abs(turns[i]))
-    const off = Math.min(pitch * 2.5, Math.max(pitch * 1.04, (pitch * 1.08) / (2 * Math.sin(alpha / 2))))
+    const off = Math.min(target * 2.5, Math.max(pitch * 1.02, (pitch * 1.08) / (2 * Math.sin(alpha / 2))))
     corners.push({ arc: wrap(best) * ds, off, alpha, apex, key: Math.abs(turns[i]) >= 1.2 })
   }
   corners.sort((a, b) => a.arc - b.arc)
@@ -715,7 +741,9 @@ function placeContourCorners(
   idx: SpacingIndex,
   out: Pt[],
   banned?: (p: Pt) => boolean,
+  rhythm?: number,
 ) {
+  const target = rhythm ?? pitch * 1.15
   if (info.fallback || !info.path) return
   for (const cn of info.corners) {
     if (banned?.(cn.apex)) continue
@@ -736,7 +764,7 @@ function placeContourCorners(
     const probe = { x: cn.apex.x + bis.x * pitch * 0.8, y: cn.apex.y + bis.y * pitch * 0.8 }
     if (!pointInPoly(info.poly, probe)) continue
     const halfSin = Math.sin(cn.alpha / 2)
-    for (let s = pitch * 1.05; s * halfSin < pitch * 0.95 && s < pitch * 6.3; s += pitch * 1.05) {
+    for (let s = target * 1.02; s * halfSin < target * 0.95 && s < target * 6.3; s += target * 1.02) {
       const p = { x: cn.apex.x + bis.x * s, y: cn.apex.y + bis.y * s }
       if (!pointInPoly(info.poly, p)) break
       if (idx.canPlace(p)) {
@@ -777,7 +805,10 @@ function placeContourEdges(
   out: Pt[],
   inside?: (p: Pt) => boolean,
   banned?: (p: Pt) => boolean,
+  rhythm?: number,
+  uniform = false, // one shared beat for the whole contour (edges match)
 ) {
+  const target = rhythm ?? pitch * 1.15
   if (info.fallback || !info.path) {
     out.push(...walkPoly(info.poly, true, pitch, idx))
     return
@@ -796,21 +827,25 @@ function placeContourEdges(
     const b = corners[(ci + 1) % corners.length]
     const rawEnd = ci + 1 < corners.length ? b.arc : b.arc + path.total
     const minSp = Math.max(a.alpha < 1.05 ? a.off : 0, b.alpha < 1.05 ? b.off : 0)
-    segs.push({ aArc: a.arc, rawEnd, minSp, Lc: chordLength(path, a.arc, rawEnd, pitch), group: groupId })
+    segs.push({ aArc: a.arc, rawEnd, minSp, Lc: chordLength(path, a.arc, rawEnd, target), group: groupId })
     if (!hasKeys || b.key) groupId++
   }
   if (hasKeys && segs.length && !corners[0].key) {
     const lastG = segs[segs.length - 1].group
     for (const sg of segs) if (sg.group === lastG) sg.group = 0
   }
-  // per-group minimax rhythm: the eye judges the WORST gap in a span
+  // per-group minimax rhythm: the eye judges the WORST gap in a span.
+  // uniform mode: ALL spans share one group → one beat across the letter.
+  if (uniform) for (const sg of segs) sg.group = 0
   const groupR = new Map<number, number>()
   for (const gid of [...new Set(segs.map((sg) => sg.group))]) {
     const gsegs = segs.filter((sg) => sg.group === gid)
-    let gr = pitch * 1.15
+    let gr = target
     let bestWorst = Infinity
     let bestSum = Infinity
-    for (let r = pitch * 1.03; r <= pitch * 1.38; r += pitch * 0.01) {
+    const rLo = Math.max(pitch * 1.03, target * 0.88)
+    const rHi = Math.max(rLo + pitch * 0.02, target * 1.12)
+    for (let r = rLo; r <= rHi; r += (rHi - rLo) / 30) {
       let worst = 0
       let sum = 0
       for (const sg of gsegs) {
@@ -831,7 +866,7 @@ function placeContourEdges(
   }
   for (let ci = 0; ci < segs.length; ci++) {
     const { aArc, rawEnd, minSp, Lc, group } = segs[ci]
-    const bestR = groupR.get(group) ?? pitch * 1.15
+    const bestR = groupR.get(group) ?? target
     if (!banned) {
       const got = placeBetweenAnchors(path, aArc, rawEnd, minSp, pitch, idx, inside, bestR, Lc)
       dbg('edge', got)
@@ -862,7 +897,7 @@ function placeContourEdges(
         const u = uAnch ? aArc + minSp : iv.u
         const v = vAnch ? rawEnd - minSp : iv.v
         if (v - u > 0.3) {
-          const got = placeRun(path, u, v, pitch, idx, inside)
+          const got = placeRun(path, u, v, pitch, idx, inside, target)
           dbg('edge', got)
           out.push(...got)
         }
@@ -884,11 +919,14 @@ export function outlineOrSpine(
   idx: SpacingIndex,
   style: OutlineStyle = 'auto',
   wholeWord = false, // text: one narrow letter switches the whole word
+  rhythmMm?: number, // design target spacing (center-to-center); pitch stays the legal floor
+  uniformRhythm = false,
 ): Pt[] {
   debugStones.length = 0
   debugSpans.length = 0
   const { bin, w, h, pxPerMm, padPx } = grid
   const pitch = holeMm + gapMm
+  const rhythm = rhythmMm ?? pitch * 1.15
   const dt = distanceTransform(grid)
   const { labels, count } = labelComponents(bin, w, h)
   const maxD = new Float32Array(count + 1)
@@ -1082,7 +1120,7 @@ export function outlineOrSpine(
           // one primary line per channel; skeleton branch stubs (Y-forks at
           // wedge mouths) only qualify if they're substantial lines themselves
           if (placedAny && len < pitch * 2.2) continue
-          const got = placeOpenEven(p, pitch, idx)
+          const got = placeOpenEven(p, pitch, idx, rhythm)
           dbg('line', got)
           out.push(...got)
           if (got.length) placedAny = true
@@ -1098,7 +1136,7 @@ export function outlineOrSpine(
         const inv2 = new Uint8Array(w * h)
         for (let i = 0; i < w * h; i++) inv2[i] = acceptedMask[i] ? 0 : 1
         const dtToLine = distanceTransform({ bin: inv2, w, h, pxPerMm, padPx })
-        const rBan = pitch * 0.55 * pxPerMm
+        const rBan = Math.min(rhythm, pitch * 1.5) * 0.55 * pxPerMm
         bannedTest = (p: Pt): boolean => {
           const px2 = Math.round(p.x * pxPerMm + padPx)
           const py2 = Math.round(p.y * pxPerMm + padPx)
@@ -1119,9 +1157,9 @@ export function outlineOrSpine(
   wallContours.sort((a, b) => b.length - a.length)
   // corners FIRST across the entire design, then edges — corner anchors
   // never lose their spot to an edge stone from a neighboring contour
-  const contourInfos = wallContours.map((c) => analyzeContour(c, pitch))
-  for (const info of contourInfos) placeContourCorners(info, pitch, idx, out, bannedTest)
-  for (const info of contourInfos) placeContourEdges(info, pitch, idx, out, insideTest, bannedTest)
+  const contourInfos = wallContours.map((c) => analyzeContour(c, pitch, rhythm))
+  for (const info of contourInfos) placeContourCorners(info, pitch, idx, out, bannedTest, rhythm)
+  for (const info of contourInfos) placeContourEdges(info, pitch, idx, out, insideTest, bannedTest, rhythm, uniformRhythm)
 
   if (narrowLbls.size) {
     const compMask = new Uint8Array(w * h)
@@ -1131,7 +1169,7 @@ export function outlineOrSpine(
       const paths = traceSkeleton(skel, w, h)
         .map((p) => smoothPath(p).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx))
+      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
     }
   }
   return out
@@ -1286,11 +1324,13 @@ export function fillStones(
   startInsetMm: number,
   idx: SpacingIndex,
   fixedPts: Pt[] = [], // outline stones — immovable during relaxation
+  rhythmMm?: number,
 ): Pt[] {
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
   const pitch = holeMm + gapMm
-  const rowPitch = pitch * 0.87
+  const rhythm = rhythmMm ?? pitch * 1.15
+  const rowPitch = rhythm * 0.87
   const minPx = startInsetMm * pxPerMm
   const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
 
@@ -1311,7 +1351,7 @@ export function fillStones(
       const paths = traceSkeleton(skel, w, h)
         .map((p) => smoothPath(p).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx))
+      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
     }
 
     if (spanMm < pitch * 0.55) {
@@ -1347,7 +1387,7 @@ export function fillStones(
         const rings = marchingSquares(levelMask, w, h)
           .map((c) => c.map(toMm))
           .sort((a, b) => b.length - a.length)
-        for (const ring of rings) out.push(...walkPoly(ring, true, pitch, idx))
+        for (const ring of rings) out.push(...walkPoly(ring, true, pitch, idx, 5, rhythm))
       }
     }
   }
@@ -1384,7 +1424,7 @@ export function fillStones(
   // relax, negotiating around the locked pattern to blend in.
   const structured = out
   const edgeMinPx = (holeMm / 2 + 0.05) * pxPerMm
-  const gapIdx = new SpacingIndex(pitch)
+  const gapIdx = new SpacingIndex(rhythm)
   for (const p of fixedPts) gapIdx.add(p)
   for (const p of structured) gapIdx.add(p)
   const step = Math.max(1, Math.round(pxPerMm / 2))
