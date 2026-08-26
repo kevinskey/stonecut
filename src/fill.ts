@@ -75,6 +75,21 @@ export class SpacingIndex {
       }
     return true
   }
+  /** Everything already placed within `r` of p. Lets a caller ask for more
+   *  clearance than the physical floor without being bound by it. */
+  within(p: Pt, r: number): { x: number; y: number }[] {
+    const cx = Math.floor(p.x / this.cell)
+    const cy = Math.floor(p.y / this.cell)
+    const span = Math.ceil(r / this.cell)
+    const hit: { x: number; y: number }[] = []
+    for (let gx = cx - span; gx <= cx + span; gx++)
+      for (let gy = cy - span; gy <= cy + span; gy++) {
+        const b = this.map.get(this.key(gx, gy))
+        if (!b) continue
+        for (const o of b) if (Math.hypot(p.x - o.x, p.y - o.y) < r - 1e-6) hit.push(o)
+      }
+    return hit
+  }
   add(p: Pt, r: number = this.defaultR) {
     const k = this.key(Math.floor(p.x / this.cell), Math.floor(p.y / this.cell))
     const e = { x: p.x, y: p.y, r }
@@ -390,6 +405,10 @@ function placeRun(
   void inside
   const span = sHi - sLo
   if (span < 0) return []
+  {
+    const even = tryEvenLayout(path, sLo, sHi, true, pitch, target, idx)
+    if (even) return even
+  }
   if (span < pitch) {
     // short edges get a CENTERED stone or none — off-center fallback singles
     // read as mistakes and make identical features render differently
@@ -498,6 +517,86 @@ function placeOpenEven(poly: Pt[], pitch: number, idx: SpacingIndex, rhythm?: nu
 // Place interior stones between two ALREADY-PLACED corner anchors so that
 // every gap — corner→stone, stone→stone, stone→corner — is equal. The corner
 // stones are part of the row's rhythm, not obstacles at its ends.
+
+/**
+ * Try to lay a span out as EQUAL parts that also clear the rhythm against
+ * everything already placed. Returns null if no stone count achieves it.
+ *
+ * This is the preferred layout, tried before the older placers. Those handle
+ * a blocked stone by nudging it off its beat, which is what puts a cluster at
+ * a junction: a run meets a corner or another run and its end stones bunch
+ * while its middle stays even. Re-dividing with one fewer stone keeps the run
+ * even instead.
+ *
+ * Returning null rather than an empty layout matters. Demanding rhythm-width
+ * clearance everywhere starves any feature that legitimately runs close to
+ * another -- a counter beside a stem, a converging channel -- and the feature
+ * comes out bare. The caller falls back to the older behaviour there, so the
+ * worst case is exactly what we had before.
+ */
+function tryEvenLayout(
+  path: Path,
+  aArc: number,
+  bArc: number,
+  includeEnds: boolean,
+  pitch: number,
+  rhythm: number,
+  idx: SpacingIndex,
+): Pt[] | null {
+  const L = bArc - aArc
+  if (L <= 1e-9) return null
+  const minSep = rhythm * 0.93
+  const tangentAt = (s: number) => {
+    const e = Math.min(0.5, Math.max(0.05, L / 20))
+    const p0 = pointAt(path, Math.max(0, s - e))
+    const p1 = pointAt(path, s + e)
+    const dx = p1.x - p0.x
+    const dy = p1.y - p0.y
+    const l = Math.hypot(dx, dy)
+    return l < 1e-9 ? null : { x: dx / l, y: dy / l }
+  }
+  // Crowding is stones too close ALONG a run. Two rows running parallel — a
+  // stroke's two walls — are normal and often closer than a rhythm.
+  const fits = (pts: Pt[], arcs: number[]) => {
+    for (let i = 0; i < pts.length; i++) {
+      if (!idx.canPlace(pts[i])) return false
+      const t = tangentAt(arcs[i])
+      if (t)
+        for (const o of idx.within(pts[i], minSep)) {
+          const dx = o.x - pts[i].x
+          const dy = o.y - pts[i].y
+          const l = Math.hypot(dx, dy)
+          if (l < 1e-9) return false
+          if (Math.abs((dx / l) * t.x + (dy / l) * t.y) > 0.7) return false
+        }
+      for (let j = 0; j < i; j++)
+        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pitch - 1e-6) return false
+    }
+    return true
+  }
+  const ideal = includeEnds
+    ? Math.max(2, Math.round(L / rhythm) + 1)
+    : Math.max(0, Math.round(L / rhythm) - 1)
+  // Accept only if the rhythm-clearance costs at most ONE stone. Where a run
+  // sits close to another for its whole length — a spine beside its own wall,
+  // two converging walls — no dense layout ever clears, and the first one that
+  // does is far too sparse: a V dropped from 47 stones at 4.97mm to 37 at
+  // 6.99mm. Better to hand those back to the older placer untouched.
+  const floor = Math.max(includeEnds ? 2 : 1, ideal - 1)
+  for (let m = ideal; m >= floor; m--) {
+    const arcs: number[] = []
+    const sp = includeEnds ? L / (m - 1) : L / (m + 1)
+    if (sp < pitch * 1.005) continue
+    if (includeEnds) for (let i = 0; i < m; i++) arcs.push(aArc + i * sp)
+    else for (let i = 1; i <= m; i++) arcs.push(aArc + i * sp)
+    const pts = arcs.map((s) => pointAt(path, s))
+    if (!fits(pts, arcs)) continue
+    for (const p of pts) idx.add(p)
+    return pts
+  }
+  return null
+}
+
 function placeBetweenAnchors(
   path: Path,
   aArc: number,
@@ -515,6 +614,10 @@ function placeBetweenAnchors(
   if (E <= 0) return []
   const need = Math.max(minSp, pitch * 1.005)
   const r = targetR ?? pitch * 1.15
+  {
+    const even = tryEvenLayout(path, aArc, bArc, false, pitch, r, idx)
+    if (even) return even
+  }
   const Lc = chordE ?? E
   const aPt = pointAt(path, aArc)
   const bPt = pointAt(path, bArc)
