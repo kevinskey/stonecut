@@ -1297,6 +1297,7 @@ export function outlineOrSpine(
   // equals the later stone goes, since the earlier one is already spaced
   // against everything before it.
   {
+    let kept = out
     const rank = new Map<Pt, number>()
     for (const s of debugStones) {
       const r = s.cat.startsWith('corner') ? 3 : s.cat.startsWith('line') ? 2 : s.cat.startsWith('spine') ? 1 : 0
@@ -1336,7 +1337,42 @@ export function outlineOrSpine(
         dropped.add(out[j])
       }
     }
-    if (dropped.size) return out.filter((p) => !dropped.has(p))
+    if (dropped.size) kept = kept.filter((p) => !dropped.has(p))
+
+    // RESPACE, don't just remove. Dropping a crowder leaves its gap at double
+    // width, which reads as an inconsistent edge — an N whose stem carries an
+    // even run and then a hole. Heal a double gap by putting a stone back in
+    // the middle of it.
+    //
+    // The midpoint is only valid if it lies ON the same edge: two stones on
+    // one wall have a midpoint at the same depth from the outline, while two
+    // on OPPOSITE walls of a stroke have a midpoint out at the medial axis.
+    // Depth is what tells them apart.
+    const depthAt = (q: Pt) => {
+      const xi = Math.round(q.x * pxPerMm + padPx)
+      const yi = Math.round(q.y * pxPerMm + padPx)
+      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return -1
+      return dt[yi * w + xi] / pxPerMm
+    }
+    const wantDepth = holeMm / 2 + 0.1
+    const healed: Pt[] = []
+    for (let i = 0; i < kept.length; i++)
+      for (let j = i + 1; j < kept.length; j++) {
+        const gap = Math.hypot(kept[i].x - kept[j].x, kept[i].y - kept[j].y)
+        if (gap < realised * 1.55 || gap > realised * 2.6) continue
+        const m = { x: (kept[i].x + kept[j].x) / 2, y: (kept[i].y + kept[j].y) / 2 }
+        const dep = depthAt(m)
+        if (dep < 0 || Math.abs(dep - wantDepth) > 0.6) continue
+        if (!idx.canPlace(m)) continue
+        if (healed.some((q) => Math.hypot(q.x - m.x, q.y - m.y) < realised * 0.93)) continue
+        idx.add(m)
+        healed.push(m)
+      }
+    if (healed.length) {
+      dbg('heal', healed)
+      kept.push(...healed)
+    }
+    return kept
   }
   return out
 }
