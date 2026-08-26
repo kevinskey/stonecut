@@ -1714,6 +1714,57 @@ export function fillStones(
     return mask[yi * w + xi] === 1
   }
 
+  // Decide each stone ANALYTICALLY, not by looking up one pixel.
+  //
+  // A rounded pixel lookup resolves to 1/6 mm here, and the two sides of a
+  // symmetric letter are not bit-identical — Anton's H mirrors to 0.085mm,
+  // which is half a pixel. That is enough to flip the lookup on one stem and
+  // not the other, and a stone appears in one stem with no partner opposite.
+  // Interpolating the distance field and measuring the real distance to the
+  // outline decides both sides the same way.
+  const dtAt = (xMm: number, yMm: number) => {
+    const fx = xMm * pxPerMm + padPx
+    const fy = yMm * pxPerMm + padPx
+    const x0i = Math.floor(fx)
+    const y0i = Math.floor(fy)
+    if (x0i < 0 || y0i < 0 || x0i + 1 >= w || y0i + 1 >= h) return -1
+    const tx = fx - x0i
+    const ty = fy - y0i
+    const a = dt[y0i * w + x0i]
+    const b = dt[y0i * w + x0i + 1]
+    const c2 = dt[(y0i + 1) * w + x0i]
+    const d = dt[(y0i + 1) * w + x0i + 1]
+    return (a * (1 - tx) + b * tx) * (1 - ty) + (c2 * (1 - tx) + d * tx) * ty
+  }
+  // the outline as a path: each stone joined to its two nearest neighbours, so
+  // clearance is measured to the LINE, not to each bead. Measuring to the
+  // beads alone leaves a boundary that scallops inward between them, and the
+  // lattice samples that ripple as a column flickering in and out row by row.
+  const segs: [Pt, Pt][] = []
+  for (const a of fixedPts) {
+    const near = fixedPts
+      .filter((b) => b !== a)
+      .map((b) => ({ b, d: Math.hypot(b.x - a.x, b.y - a.y) }))
+      .sort((p, q) => p.d - q.d)
+      .slice(0, 2)
+    for (const { b } of near) if (a.x < b.x || (a.x === b.x && a.y < b.y)) segs.push([a, b])
+  }
+  const clearOfOutline = (p: Pt) => {
+    const need = idx.minDist - 1e-6
+    for (const s of fixedPts)
+      if (Math.hypot(p.x - s.x, p.y - s.y) < need) return false
+    for (const [a, b] of segs) {
+      const vx = b.x - a.x
+      const vy = b.y - a.y
+      const len2 = vx * vx + vy * vy
+      if (len2 < 1e-12) continue
+      let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2
+      t = t < 0 ? 0 : t > 1 ? 1 : t
+      if (Math.hypot(p.x - (a.x + vx * t), p.y - (a.y + vy * t)) < need) return false
+    }
+    return true
+  }
+
   // bounds of everything a stone could occupy
   let minX = w
   let maxX = -1
@@ -1748,15 +1799,14 @@ export function fillStones(
 
   for (let r = 0; r < nRows; r++) {
     const yMm = y0 + r * stepY
-    const yi = Math.round(yMm * pxPerMm + padPx)
     // a brick row is offset half a step; it also needs one extra candidate at
     // each end so the offset does not shorten the row
     const shift = brick && r % 2 === 1 ? stepX / 2 : 0
     for (let c = -1; c <= nCols; c++) {
       const xMm = x0 + c * stepX + shift
-      const xi = Math.round(xMm * pxPerMm + padPx)
-      if (!fillable(xi, yi)) continue
       const p = { x: xMm, y: yMm }
+      if (dtAt(xMm, yMm) < minPx) continue
+      if (!clearOfOutline(p)) continue
       if (!idx.canPlace(p)) continue
       idx.add(p)
       out.push(p)
