@@ -75,6 +75,21 @@ export class SpacingIndex {
       }
     return true
   }
+  /** Is anything already placed within `r` of p? Lets a caller demand more
+   *  clearance than the physical floor — an outline wants stones a rhythm
+   *  apart, not merely non-overlapping. */
+  hasWithin(p: Pt, r: number): boolean {
+    const cx = Math.floor(p.x / this.cell)
+    const cy = Math.floor(p.y / this.cell)
+    const span = Math.ceil(r / this.cell)
+    for (let gx = cx - span; gx <= cx + span; gx++)
+      for (let gy = cy - span; gy <= cy + span; gy++) {
+        const b = this.map.get(this.key(gx, gy))
+        if (!b) continue
+        for (const o of b) if (Math.hypot(p.x - o.x, p.y - o.y) < r - 1e-6) return true
+      }
+    return false
+  }
   add(p: Pt, r: number = this.defaultR) {
     const k = this.key(Math.floor(p.x / this.cell), Math.floor(p.y / this.cell))
     const e = { x: p.x, y: p.y, r }
@@ -314,28 +329,38 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
   // greedily leaves the remainder at the seam — an O came out with 28 gaps
   // of 4.54mm and one of 7.86mm.
   if (closed) {
-    let m = Math.max(3, Math.round(path.total / target))
-    while (m > 3 && path.total / m < pitch) m--
-    const sp = path.total / m
-    let best: Pt[] = []
-    for (let ph = 0; ph < phases; ph++) {
-      const offset = (ph / phases) * sp
-      const placed: Pt[] = []
-      for (let i = 0; i < m; i++) {
-        const p = pointAt(path, offset + i * sp)
-        let ok = idx.canPlace(p)
-        if (ok)
-          for (const q of placed)
-            if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
-              ok = false
-              break
-            }
-        if (ok) placed.push(p)
+    // ALL of the division or one fewer — never a partial ring. Keeping the
+    // stones that happen to fit and skipping the rest leaves holes in a loop
+    // that is otherwise perfectly divided.
+    const minSep = target * 0.93
+    let m0 = Math.max(3, Math.round(path.total / target))
+    while (m0 > 3 && path.total / m0 < pitch) m0--
+    for (let m = m0; m >= 3; m--) {
+      const sp = path.total / m
+      if (sp < pitch * 1.005) continue
+      for (let ph = 0; ph < phases; ph++) {
+        const offset = (ph / phases) * sp
+        const placed: Pt[] = []
+        let ok = true
+        for (let i = 0; i < m && ok; i++) {
+          const p = pointAt(path, offset + i * sp)
+          if (!idx.canPlace(p) || idx.hasWithin(p, minSep)) ok = false
+          else {
+            for (const q of placed)
+              if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
+                ok = false
+                break
+              }
+            if (ok) placed.push(p)
+          }
+        }
+        if (ok && placed.length === m) {
+          for (const p of placed) idx.add(p)
+          return placed
+        }
       }
-      if (placed.length > best.length) best = placed
     }
-    for (const p of best) idx.add(p)
-    return best
+    return []
   }
 
   const ds = target / 12
@@ -386,106 +411,9 @@ function placeRun(
   inside?: (p: Pt) => boolean,
   rhythm?: number,
 ): Pt[] {
-  const target = rhythm ?? pitch * 1.15
   void inside
-  const span = sHi - sLo
-  if (span < 0) return []
-  if (span < pitch) {
-    // short edges get a CENTERED stone or none — off-center fallback singles
-    // read as mistakes and make identical features render differently
-    for (const f of [0.5, 0.47, 0.53]) {
-      const p = pointAt(path, sLo + f * span)
-      if (idx.canPlace(p)) {
-        idx.add(p)
-        return [p]
-      }
-    }
-    // NEVER off the line — no stone beats a bent stone
-    return []
-  }
-  let m = Math.max(2, Math.round(span / target) + 1)
-  while (m > 2 && span / (m - 1) < pitch * 1.02) m--
-
-  // If a run can't legally hold its stone count (tight curve, external
-  // blockers), retry the WHOLE run with one fewer stone — an even run with
-  // fewer stones beats a dropped stone's hole.
-  let s: number[] = []
-  let pt: Pt[] = []
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const sp = span / (m - 1)
-    s = []
-    for (let i = 0; i < m; i++) s.push(sLo + i * sp)
-    pt = s.map((v) => pointAt(path, v))
-
-    // free externally-blocked stones (scan outward for nearest legal arc,
-    // reaching up to just short of the neighboring stones so one stuck stone
-    // never forces the whole run to drop a stone)
-    for (let i = 0; i < m; i++) {
-      if (idx.canPlace(pt[i])) continue
-      const loLim = i > 0 ? s[i - 1] + 0.4 : sLo
-      const hiLim = i < m - 1 ? s[i + 1] - 0.4 : sHi
-      outer: for (let d = 0.1; d <= sp * 1.2; d += 0.1) {
-        for (const sign of [1, -1]) {
-          const cand = s[i] + sign * d
-          if (cand < loLim || cand > hiLim) continue
-          const p = pointAt(path, cand)
-          if (idx.canPlace(p)) {
-            s[i] = cand
-            pt[i] = p
-            break outer
-          }
-        }
-      }
-    }
-
-    // equal-gap relaxation with obstacle respect
-    for (let it = 0; it < 40; it++) {
-      let moved = false
-      for (let i = 0; i < m; i++) {
-        const target = i === 0 ? sLo : i === m - 1 ? sHi : (s[i - 1] + s[i + 1]) / 2
-        let step = (target - s[i]) * 0.5
-        if (Math.abs(step) < 0.02) continue
-        for (let k = 0; k < 3; k++) {
-          let cand = s[i] + step
-          if (i > 0) cand = Math.max(cand, s[i - 1] + sp * 0.25)
-          if (i < m - 1) cand = Math.min(cand, s[i + 1] - sp * 0.25)
-          cand = Math.max(sLo, Math.min(sHi, cand))
-          const p = pointAt(path, cand)
-          const okPrev = i === 0 || Math.hypot(p.x - pt[i - 1].x, p.y - pt[i - 1].y) >= pitch
-          const okNext = i === m - 1 || Math.hypot(p.x - pt[i + 1].x, p.y - pt[i + 1].y) >= pitch
-          if (okPrev && okNext && idx.canPlace(p)) {
-            s[i] = cand
-            pt[i] = p
-            moved = true
-            break
-          }
-          step *= 0.4
-        }
-      }
-      if (!moved) break
-    }
-
-    // run is valid only if every stone is placeable and clears its neighbor
-    let ok = true
-    for (let i = 0; i < m && ok; i++) {
-      if (!idx.canPlace(pt[i])) ok = false
-      else if (i > 0 && Math.hypot(pt[i].x - pt[i - 1].x, pt[i].y - pt[i - 1].y) < pitch * 0.995) ok = false
-    }
-    if (ok || m <= 2) break
-    m--
-  }
-
-  const placed: Pt[] = []
-  let last: Pt | null = null
-  for (let i = 0; i < m; i++) {
-    const p = pt[i]
-    if (idx.canPlace(p) && (!last || Math.hypot(p.x - last.x, p.y - last.y) >= pitch * 0.98)) {
-      idx.add(p)
-      placed.push(p)
-      last = p
-    }
-  }
-  return placed
+  const r = rhythm ?? pitch * 1.15
+  return divideSpan(path, sLo, sHi, true, pitch, r, idx, r * 0.93)
 }
 
 // Open runs (skeleton spines, stroke centerlines) are spans end-to-end.
@@ -498,6 +426,80 @@ function placeOpenEven(poly: Pt[], pitch: number, idx: SpacingIndex, rhythm?: nu
 // Place interior stones between two ALREADY-PLACED corner anchors so that
 // every gap — corner→stone, stone→stone, stone→corner — is equal. The corner
 // stones are part of the row's rhythm, not obstacles at its ends.
+
+/**
+ * THE outline placement routine. Every outline stone comes from here.
+ *
+ * Divide a span into equal parts as near the rhythm as the span allows, and
+ * place. If ANY stone in the layout is blocked — by another run, by the letter
+ * next door — re-divide the WHOLE span with one fewer stone. Never nudge a
+ * stone off its beat and never skip one: those are the two ways an outline
+ * goes wrong. Nudging makes the spacing uneven, skipping leaves a hole. An
+ * even span with fewer stones beats a ragged span with more.
+ *
+ * `minSep` is what the caller demands of everything already on the canvas.
+ * Passing the physical floor lets two different runs put stones a floor-width
+ * apart while the rest of the letter runs at the rhythm — that is the crowding
+ * at every junction. Pass a rhythm-scaled value and the layout simply uses
+ * fewer stones there instead.
+ */
+function divideSpan(
+  path: Path,
+  aArc: number,
+  bArc: number,
+  includeEnds: boolean,
+  pitch: number,
+  rhythm: number,
+  idx: SpacingIndex,
+  minSep: number,
+): Pt[] {
+  const L = bArc - aArc
+  if (L <= 1e-9) return []
+  const fits = (pts: Pt[]) => {
+    for (let i = 0; i < pts.length; i++) {
+      if (!idx.canPlace(pts[i])) return false
+      if (idx.hasWithin(pts[i], minSep)) return false
+      for (let j = 0; j < i; j++)
+        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pitch - 1e-6) return false
+    }
+    return true
+  }
+  const layout = (m: number): Pt[] | null => {
+    if (includeEnds) {
+      if (m < 2) return null
+      const sp = L / (m - 1)
+      if (sp < pitch * 1.005) return null
+      const pts: Pt[] = []
+      for (let i = 0; i < m; i++) pts.push(pointAt(path, aArc + i * sp))
+      return pts
+    }
+    if (m < 1) return null
+    const sp = L / (m + 1)
+    if (sp < pitch * 1.005) return null
+    const pts: Pt[] = []
+    for (let i = 1; i <= m; i++) pts.push(pointAt(path, aArc + i * sp))
+    return pts
+  }
+  const ideal = includeEnds
+    ? Math.max(2, Math.round(L / rhythm) + 1)
+    : Math.max(0, Math.round(L / rhythm) - 1)
+  for (let m = ideal; m >= (includeEnds ? 2 : 1); m--) {
+    const pts = layout(m)
+    if (!pts) continue
+    if (!fits(pts)) continue
+    for (const p of pts) idx.add(p)
+    return pts
+  }
+  if (L >= pitch * 0.5) {
+    const p = pointAt(path, aArc + L / 2)
+    if (idx.canPlace(p) && !idx.hasWithin(p, minSep)) {
+      idx.add(p)
+      return [p]
+    }
+  }
+  return []
+}
+
 function placeBetweenAnchors(
   path: Path,
   aArc: number,
@@ -508,188 +510,13 @@ function placeBetweenAnchors(
   inside?: (p: Pt) => boolean,
   targetR?: number,
   chordE?: number,
-  phase = 0, // 0 = rows anchored to corners; 0.5 = half-offset (brick)
+  phase = 0,
 ): Pt[] {
   void inside
-  const E = bArc - aArc
-  if (E <= 0) return []
-  const need = Math.max(minSp, pitch * 1.005)
+  void chordE
+  void phase
   const r = targetR ?? pitch * 1.15
-  const Lc = chordE ?? E
-  const aPt = pointAt(path, aArc)
-  const bPt = pointAt(path, bArc)
-
-  // one full layout attempt at a given stone count; nothing committed
-  const attempt = (m: number): { pt: Pt[]; ok: boolean; spread: number; why?: string } => {
-    const sp = phase === 0 ? E / (m + 1) : E / m
-    const s: number[] = []
-    for (let i = 0; i < m; i++) s.push(aArc + (phase === 0 ? (i + 1) * sp : (i + 0.5) * sp))
-    const pt = s.map((v) => pointAt(path, v))
-    // free blocked stones
-    for (let i = 0; i < m; i++) {
-      if (idx.canPlace(pt[i])) continue
-      const loLim = (i > 0 ? s[i - 1] : aArc) + 0.4
-      const hiLim = (i < m - 1 ? s[i + 1] : bArc) - 0.4
-      outer: for (let d = 0.1; d <= sp; d += 0.1) {
-        for (const sign of [1, -1]) {
-          const cand = s[i] + sign * d
-          if (cand < loLim || cand > hiLim) continue
-          const p = pointAt(path, cand)
-          if (idx.canPlace(p)) {
-            s[i] = cand
-            pt[i] = p
-            break outer
-          }
-        }
-      }
-    }
-    // if even seeding left stones in blocked spots, greedy-search the span
-    // for ANY legal arrangement of the full count, then relax to even —
-    // only surrender a stone when no arrangement exists at all
-    {
-      let blocked = false
-      for (let i = 0; i < m; i++) if (!idx.canPlace(pt[i])) blocked = true
-      if (blocked) {
-        const gs: number[] = []
-        const gp: Pt[] = []
-        let cursor = aArc + 0.4
-        while (gs.length < m && cursor <= bArc - 0.4) {
-          const p = pointAt(path, cursor)
-          const prevOk = gs.length === 0
-            ? Math.hypot(p.x - aPt.x, p.y - aPt.y) >= minSp * 0.9
-            : Math.hypot(p.x - gp[gp.length - 1].x, p.y - gp[gp.length - 1].y) >= pitch
-          if (prevOk && idx.canPlace(p)) {
-            gs.push(cursor)
-            gp.push(p)
-            cursor += pitch * 0.9
-          } else cursor += 0.15
-        }
-        if (gs.length === m && Math.hypot(bPt.x - gp[m - 1].x, bPt.y - gp[m - 1].y) >= minSp * 0.9) {
-          for (let i = 0; i < m; i++) {
-            s[i] = gs[i]
-            pt[i] = gp[i]
-          }
-        }
-      }
-    }
-    // equal-CHORD relaxation with anchors as fixed neighbors
-    for (let it = 0; it < 60; it++) {
-      let moved = false
-      for (let i = 0; i < m; i++) {
-        const prevS = i === 0 ? aArc : s[i - 1]
-        const nextS = i === m - 1 ? bArc : s[i + 1]
-        const prevPt = i === 0 ? aPt : pt[i - 1]
-        const nextPt = i === m - 1 ? bPt : pt[i + 1]
-        const cPrev = Math.hypot(pt[i].x - prevPt.x, pt[i].y - prevPt.y)
-        const cNext = Math.hypot(pt[i].x - nextPt.x, pt[i].y - nextPt.y)
-        let step = (cNext - cPrev) * 0.45
-        if (Math.abs(step) < 0.02) continue
-        for (let k = 0; k < 3; k++) {
-          let cand = s[i] + step
-          cand = Math.max(prevS + sp * 0.3, Math.min(nextS - sp * 0.3, cand))
-          const p = pointAt(path, cand)
-          const okPrev = i === 0 || Math.hypot(p.x - pt[i - 1].x, p.y - pt[i - 1].y) >= pitch
-          const okNext = i === m - 1 || Math.hypot(p.x - pt[i + 1].x, p.y - pt[i + 1].y) >= pitch
-          if (okPrev && okNext && idx.canPlace(p)) {
-            s[i] = cand
-            pt[i] = p
-            moved = true
-            break
-          }
-          step *= 0.4
-        }
-      }
-      if (!moved) break
-    }
-    // judge: every stone placeable, consecutive chords legal, spread of the
-    // full anchor-to-anchor chain
-    const chain = [aPt, ...pt, bPt]
-    let ok = true
-    let why = ''
-    for (let i = 0; i < m; i++) if (!idx.canPlace(pt[i])) { ok = false; why += `place${i};` }
-    const chords: number[] = []
-    for (let i = 1; i < chain.length; i++)
-      chords.push(Math.hypot(chain[i].x - chain[i - 1].x, chain[i].y - chain[i - 1].y))
-    for (let i = 1; i <= m - 1; i++) if (chords[i] < pitch) { ok = false; why += `chord${i}=${chords[i].toFixed(2)};` }
-    const spread = Math.max(...chords) - Math.min(...chords)
-    const mean = chords.reduce((a2, b2) => a2 + b2, 0) / chords.length
-    // score = internal evenness AND fidelity to the design rhythm — an even
-    // row at the wrong beat must lose to an even row at the right beat
-    const score = spread * 2 + Math.abs(mean - r)
-    return { pt, ok, spread: score, why }
-  }
-
-  let m0 = phase === 0 ? Math.round(Lc / r) - 1 : Math.round(Lc / r)
-  while (m0 > 0 && Lc / (m0 + (phase === 0 ? 1 : 0)) < need) m0--
-  if (m0 <= 0) {
-    for (const f of [0.5, 0.47, 0.53]) {
-      const p = pointAt(path, aArc + f * E)
-      if (idx.canPlace(p)) {
-        idx.add(p)
-        {
-          const chords = [
-            +Math.hypot(p.x - aPt.x, p.y - aPt.y).toFixed(2),
-            +Math.hypot(bPt.x - p.x, bPt.y - p.y).toFixed(2),
-          ]
-          debugSpans.push({
-            at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`,
-            chords,
-            r: +r.toFixed(2),
-            m0,
-            Lc: +Lc.toFixed(2),
-            E: +E.toFixed(2),
-            need: +need.toFixed(2),
-          })
-        }
-        return [p]
-      }
-    }
-    return []
-  }
-
-  // try the ideal count and its neighbors; commit the cleanest legal layout
-  const cands: number[] = [m0]
-  if (m0 + 1 >= 1 && E / (m0 + 2) >= pitch * 1.0) cands.push(m0 + 1)
-  if (m0 - 1 >= 1) cands.push(m0 - 1)
-  let best: { pt: Pt[]; ok: boolean; spread: number; why?: string } | null = null
-  const attLog: string[] = []
-  for (const m of cands) {
-    const a = attempt(m)
-    attLog.push(`${m}:${a.ok ? 'ok' : a.why}`)
-    if (!best) best = a
-    else if (a.ok && !best.ok) best = a
-    else if (a.ok === best.ok && a.spread < best.spread - 1e-9) best = a
-  }
-  // NEVER commit a layout with holes: if no candidate count is fully legal,
-  // descend until one is — fewer stones evenly spaced beat a silent gap
-  if (best && !best.ok) {
-    for (let m = m0 - 2; m >= 1; m--) {
-      const a = attempt(m)
-      if (a.ok) {
-        best = a
-        break
-      }
-    }
-  }
-  if (!best) return []
-
-  const placed: Pt[] = []
-  let last: Pt | null = null
-  for (const p of best.pt) {
-    if (idx.canPlace(p) && (!last || Math.hypot(p.x - last.x, p.y - last.y) >= pitch * 0.999)) {
-      idx.add(p)
-      placed.push(p)
-      last = p
-    }
-  }
-  {
-    const chain = [aPt, ...placed, bPt]
-    const chords: number[] = []
-    for (let i = 1; i < chain.length; i++)
-      chords.push(+Math.hypot(chain[i].x - chain[i - 1].x, chain[i].y - chain[i - 1].y).toFixed(2))
-    debugSpans.push({ at: `${aPt.x.toFixed(0)},${aPt.y.toFixed(0)}`, chords, r: +r.toFixed(2), m0, mFinal: placed.length, att: attLog.join(' | ') })
-  }
-  return placed
+  return divideSpan(path, aArc, bArc, false, pitch, r, idx, Math.max(minSp, r * 0.93))
 }
 
 
@@ -1286,95 +1113,18 @@ export function outlineOrSpine(
     }
   }
 
-  // NO CROWDED PAIRS. Corners, spines, detail lines and wall runs are placed
-  // by different mechanisms; where two of them meet, only the hard spacing
-  // floor keeps their stones apart, so a sharp apex or a spine-to-wall
-  // junction ends up with stones a floor-width apart while the rest of the
-  // letter runs at the rhythm. A cluster at a vertex reads as a mistake --
-  // better to drop the crowder and carry a slightly wider gap.
+  // Crowding and holes are prevented at placement time now: every stone comes
+  // from divideSpan, which re-divides a span rather than nudging a stone off
+  // its beat or skipping one.
   //
-  // Anchors win: a corner defines the letter's shape and never moves. Between
-  // equals the later stone goes, since the earlier one is already spaced
-  // against everything before it.
-  {
-    let kept = out
-    const rank = new Map<Pt, number>()
-    for (const s of debugStones) {
-      const r = s.cat.startsWith('corner') ? 3 : s.cat.startsWith('line') ? 2 : s.cat.startsWith('spine') ? 1 : 0
-      for (const p of out)
-        if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
-          rank.set(p, Math.max(rank.get(p) ?? 0, r))
-    }
-    // Judge against the spacing the letter ACTUALLY realises, not the nominal
-    // rhythm. The run divider stretches its beat to fit each span, so a letter
-    // asked for 4.2mm may settle at 4.44mm — and a 3.91mm pair, plainly tight
-    // to the eye beside its neighbours, clears a threshold derived from 4.2.
-    const nn: number[] = []
-    for (const a of out) {
-      let m = Infinity
-      for (const b of out) {
-        if (a === b) continue
-        const dd = Math.hypot(a.x - b.x, a.y - b.y)
-        if (dd < m) m = dd
-      }
-      if (Number.isFinite(m)) nn.push(m)
-    }
-    nn.sort((a, b) => a - b)
-    const realised = nn.length ? nn[Math.floor(nn.length / 2)] : rhythm
-    const tooClose = Math.max(rhythm, realised) * 0.93
-    const dropped = new Set<Pt>()
-    for (let i = 0; i < out.length; i++) {
-      if (dropped.has(out[i])) continue
-      for (let j = i + 1; j < out.length; j++) {
-        if (dropped.has(out[j])) continue
-        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) >= tooClose) continue
-        const ri = rank.get(out[i]) ?? 0
-        const rj = rank.get(out[j]) ?? 0
-        if (ri < rj) {
-          dropped.add(out[i])
-          break
-        }
-        dropped.add(out[j])
-      }
-    }
-    if (dropped.size) kept = kept.filter((p) => !dropped.has(p))
-
-    // RESPACE, don't just remove. Dropping a crowder leaves its gap at double
-    // width, which reads as an inconsistent edge — an N whose stem carries an
-    // even run and then a hole. Heal a double gap by putting a stone back in
-    // the middle of it.
-    //
-    // The midpoint is only valid if it lies ON the same edge: two stones on
-    // one wall have a midpoint at the same depth from the outline, while two
-    // on OPPOSITE walls of a stroke have a midpoint out at the medial axis.
-    // Depth is what tells them apart.
-    const depthAt = (q: Pt) => {
-      const xi = Math.round(q.x * pxPerMm + padPx)
-      const yi = Math.round(q.y * pxPerMm + padPx)
-      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return -1
-      return dt[yi * w + xi] / pxPerMm
-    }
-    const wantDepth = holeMm / 2 + 0.1
-    const healed: Pt[] = []
-    for (let i = 0; i < kept.length; i++)
-      for (let j = i + 1; j < kept.length; j++) {
-        const gap = Math.hypot(kept[i].x - kept[j].x, kept[i].y - kept[j].y)
-        if (gap < realised * 1.55 || gap > realised * 2.6) continue
-        const m = { x: (kept[i].x + kept[j].x) / 2, y: (kept[i].y + kept[j].y) / 2 }
-        const dep = depthAt(m)
-        if (dep < 0 || Math.abs(dep - wantDepth) > 0.6) continue
-        if (!idx.canPlace(m)) continue
-        if (healed.some((q) => Math.hypot(q.x - m.x, q.y - m.y) < realised * 0.93)) continue
-        idx.add(m)
-        healed.push(m)
-      }
-    if (healed.length) {
-      dbg('heal', healed)
-      kept.push(...healed)
-    }
-    return kept
-  }
-  return out
+  // One thing placement cannot see: a stone alone. A short skeleton branch or
+  // a span too tight to divide can end up with a single stone nowhere near
+  // anything else, and one stone by itself reads as a mistake rather than as
+  // part of a run.
+  const lonely = rhythm * 1.9
+  return out.filter((p) =>
+    out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= lonely),
+  )
 }
 
 
