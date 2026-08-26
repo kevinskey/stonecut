@@ -1635,8 +1635,7 @@ export function fillStones(
   gapMm: number,
   startInsetMm: number,
   idx: SpacingIndex,
-  _fixedPts: Pt[] = [], // outline stones — already inside idx, so the
-  //                       lattice needs no separate reference to them
+  fixedPts: Pt[] = [], // outline stones (already in idx)
   rhythmMm?: number,
   brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
 ): Pt[] {
@@ -1648,6 +1647,48 @@ export function fillStones(
 
   const mask = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) mask[i] = dt[i] >= minPx ? 1 : 0
+
+  // Subtract the outline stones' clearance from the fillable area.
+  //
+  // Without this the mask only knows the glyph edge, so a row running just
+  // inside the outline is "fillable" everywhere while individual stones on it
+  // still fail the outline clearance — and which ones fail depends on how each
+  // lattice column happens to line up with the outline stones beneath it. The
+  // row survives in scattered pieces: three stones, a double gap, two more.
+  //
+  // Clear along the outline PATH, not one disk per stone. Disks alone leave a
+  // scalloped boundary that bulges inward between stones, and the lattice
+  // samples that ripple as a column flickering in and out row by row. Filling
+  // in each stone's gap to its nearest neighbours makes the boundary a smooth
+  // offset, so a row is either there across a run or not there at all.
+  if (fixedPts.length) {
+    const clear = idx.minDist * pxPerMm
+    const cr = Math.ceil(clear)
+    const crr = clear * clear
+    const stamp = (xMm: number, yMm: number) => {
+      const cx = Math.round(xMm * pxPerMm + padPx)
+      const cy = Math.round(yMm * pxPerMm + padPx)
+      for (let yy = Math.max(0, cy - cr); yy <= Math.min(h - 1, cy + cr); yy++) {
+        const dy = yy - cy
+        const span = Math.floor(Math.sqrt(Math.max(0, crr - dy * dy)))
+        const row = yy * w
+        for (let xx = Math.max(0, cx - span); xx <= Math.min(w - 1, cx + span); xx++)
+          mask[row + xx] = 0
+      }
+    }
+    for (const a of fixedPts) {
+      stamp(a.x, a.y)
+      // the two nearest outline stones are its neighbours along the path
+      const near = fixedPts
+        .filter((b) => b !== a)
+        .map((b) => ({ b, d: Math.hypot(b.x - a.x, b.y - a.y) }))
+        .sort((p, q) => p.d - q.d)
+        .slice(0, 2)
+      for (const { b } of near)
+        for (const t of [0.25, 0.5]) stamp(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+    }
+  }
+
   const { labels, count } = labelComponents(mask, w, h)
   const maxD = new Float32Array(count + 1)
   for (let i = 0; i < w * h; i++) if (labels[i] && dt[i] > maxD[labels[i]]) maxD[labels[i]] = dt[i]
