@@ -983,10 +983,10 @@ export function outlineOrSpine(
   const pitch = holeMm + gapMm
   const rhythm = rhythmMm ?? pitch * 1.15
   const dt = distanceTransform(grid)
+  const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
   const { labels, count } = labelComponents(bin, w, h)
   const maxD = new Float32Array(count + 1)
   for (let i = 0; i < w * h; i++) if (labels[i] && dt[i] > maxD[labels[i]]) maxD[labels[i]] = dt[i]
-  const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
 
   // which component does a contour bound?
   const labelOf = (c: Pt[]): number => {
@@ -1624,495 +1624,10 @@ function smoothPath(poly: Pt[], passes = 2): Pt[] {
 }
 
 
-// Single fill rows phase-lock to the OUTLINE stones beside them: project the
-// wall stones onto the spine, cluster their beats, and place fill stones ON
-// the beats (grid) or BETWEEN them (brick) — the rung structure of a
-// hand-set template.
-function placePhaseLocked(
-  poly: Pt[],
-  walls: Pt[],
-  pitch: number,
-  rhythm: number,
-  idx: SpacingIndex,
-  brick: boolean,
-  closed = false,
-): Pt[] {
-  const path = makePath(poly, closed)
-  if (!path) return []
-  const fallback = (why: string) => {
-    dbg('fallback:' + why, [pointAt(path, path.total / 2)])
-    return closed
-      ? walkPoly(poly, true, pitch, idx, 5, rhythm)
-      : placeRun(path, 0, path.total, pitch, idx, undefined, rhythm)
-  }
-  if (!walls.length) return fallback('nowalls')
-  if (path.total < rhythm * 0.4) return fallback('short')
-  const step = 0.4
-  const n = Math.max(2, Math.ceil(path.total / step))
-  const samples: Pt[] = []
-  for (let i = 0; i <= n; i++) samples.push(pointAt(path, (i * path.total) / n))
-  const arcs: number[] = []
-  for (const w of walls) {
-    let bi = 0
-    let bd = 1e9
-    for (let i = 0; i <= n; i++) {
-      const d = Math.hypot(w.x - samples[i].x, w.y - samples[i].y)
-      if (d < bd) {
-        bd = d
-        bi = i
-      }
-    }
-    if (bd < rhythm * 2.4) arcs.push((bi * path.total) / n)
-  }
-  if (arcs.length < 2) return fallback('few-arcs')
-  arcs.sort((a, b) => a - b)
-  const clusters: number[] = []
-  let acc: number[] = [arcs[0]]
-  for (let i = 1; i < arcs.length; i++) {
-    if (arcs[i] - arcs[i - 1] < rhythm * 0.45) acc.push(arcs[i])
-    else {
-      clusters.push(acc.reduce((a2, b2) => a2 + b2, 0) / acc.length)
-      acc = [arcs[i]]
-    }
-  }
-  clusters.push(acc.reduce((a2, b2) => a2 + b2, 0) / acc.length)
-  const targets: number[] = []
-  if (clusters.length === 1) {
-    targets.push(
-      brick ? Math.min(path.total, clusters[0] + rhythm / 2) : clusters[0],
-    )
-  } else if (brick) {
-    for (let i = 1; i < clusters.length; i++) targets.push((clusters[i - 1] + clusters[i]) / 2)
-    if (closed && clusters.length >= 2)
-      targets.push(((clusters[clusters.length - 1] + clusters[0] + path.total) / 2) % path.total)
-  } else {
-    targets.push(...clusters)
-  }
-  const placed: Pt[] = []
-  for (const t of targets) {
-    for (const f of [0, 0.12, -0.12, 0.25, -0.25]) {
-      const p = pointAt(path, t + f * rhythm)
-      if (
-        idx.canPlace(p) &&
-        (!placed.length ||
-          Math.hypot(p.x - placed[placed.length - 1].x, p.y - placed[placed.length - 1].y) >= pitch)
-      ) {
-        idx.add(p)
-        placed.push(p)
-        break
-      }
-    }
-  }
-  if (placed.length) { dbg('lock', placed); return placed }
-  return fallback('none-placed')
-}
-
 // ---------------------------------------------------------------------------
 // Fill
 // ---------------------------------------------------------------------------
 
-
-// ---------------------------------------------------------------------------
-// Lattice fill — for OPEN areas (square bodies, star centres, big logos).
-//
-// Concentric rings are right for narrow strokes, where they read as spines
-// following the shape. In a wide open area they collapse into a spiral of
-// ever-smaller rings that collide near the middle. Open areas want a regular
-// lattice: hex (brick) or square (grid), centred on the region so symmetric
-// shapes fill symmetrically, with a small phase search for density.
-// ---------------------------------------------------------------------------
-function latticeFill(
-  compMask: Uint8Array,
-  dt: Float32Array,
-  grid: Grid,
-  insetPx: number,
-  pitch: number,
-  rhythm: number,
-  idx: SpacingIndex,
-  brick: boolean,
-): Pt[] {
-  const { w, h, pxPerMm, padPx } = grid
-  const toMmX = (px: number) => (px - padPx) / pxPerMm
-  const toMmY = (py: number) => (py - padPx) / pxPerMm
-
-  // fillable region = inside the component AND clear of the boundary
-  const ok = (xi: number, yi: number) => {
-    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
-    const i = yi * w + xi
-    return compMask[i] === 1 && dt[i] >= insetPx
-  }
-  let minY = h, maxY = -1
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++)
-      if (ok(x, y)) {
-        if (y < minY) minY = y
-        if (y > maxY) maxY = y
-        break
-      }
-  if (maxY < 0) return []
-
-  const spacingX = rhythm
-  const spacingY = (brick ? (rhythm * Math.sqrt(3)) / 2 : rhythm)
-  const spanY = toMmY(maxY) - toMmY(minY)
-  const nRows = Math.max(1, Math.floor(spanY / spacingY) + 1)
-  // centre the row block vertically: equal margin top and bottom
-  const y0 = toMmY(minY) + (spanY - (nRows - 1) * spacingY) / 2
-
-  const out: Pt[] = []
-  for (let r = 0; r < nRows; r++) {
-    const yMm = y0 + r * spacingY
-    const yi = Math.round(yMm * pxPerMm + padPx)
-    // contiguous fillable runs along this row — handles concave shapes and
-    // several separate spans (the two sides of a C, say) independently
-    const runs: { x0: number; x1: number }[] = []
-    let runStart = -1
-    for (let xi = 0; xi <= w; xi++) {
-      const good = xi < w && ok(xi, yi)
-      if (good && runStart < 0) runStart = xi
-      else if (!good && runStart >= 0) {
-        runs.push({ x0: toMmX(runStart), x1: toMmX(xi - 1) })
-        runStart = -1
-      }
-    }
-    for (const run of runs) {
-      const L = run.x1 - run.x0
-      let m = Math.floor(L / spacingX) + 1
-      // brick: alternate rows carry one fewer stone, so once each row is
-      // centred they land exactly between the neighbouring row's stones
-      if (brick && r % 2 === 1) m -= 1
-      if (m < 1) {
-        // run too short for the pattern: one centred stone if it fits at all
-        const p = { x: (run.x0 + run.x1) / 2, y: yMm }
-        if (ok(Math.round(p.x * pxPerMm + padPx), yi) && idx.canPlace(p)) {
-          idx.add(p)
-          out.push(p)
-        }
-        continue
-      }
-      // centre the run's stones: equal margin at both ends of the run
-      const x0 = run.x0 + (L - (m - 1) * spacingX) / 2
-      for (let k = 0; k < m; k++) {
-        const p = { x: x0 + k * spacingX, y: yMm }
-        if (!ok(Math.round(p.x * pxPerMm + padPx), yi)) continue
-        if (!idx.canPlace(p)) continue
-        idx.add(p)
-        out.push(p)
-      }
-    }
-  }
-  void pitch
-  return out
-}
-
-
-// Project the OUTLINE row inward to make an interior row.
-//
-// Deriving each interior row from its own closed loop makes it quantise
-// separately, so rows drift out of phase — worst on short features like an
-// E's arms, where a ring has few wall stones to lock onto. Marching each
-// outline stone inward along the distance-field gradient instead gives the
-// interior row the outline's own count and phase by construction, so the
-// columns line up everywhere.
-function projectRowInward(
-  fixedPts: Pt[],
-  dt: Float32Array,
-  grid: Grid,
-  depthMm: number,
-  pitch: number,
-  idx: SpacingIndex,
-  brickShift: boolean,
-  rhythm: number,
-  inComponent: (p: Pt) => boolean,
-  wide: Float32Array,
-): Pt[] {
-  const { w, h, pxPerMm, padPx } = grid
-  const sample = (xMm: number, yMm: number) => {
-    const xi = Math.round(xMm * pxPerMm + padPx)
-    const yi = Math.round(yMm * pxPerMm + padPx)
-    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return -1
-    return dt[yi * w + xi] / pxPerMm
-  }
-  const grad = (xMm: number, yMm: number) => {
-    const e = 1 / pxPerMm
-    const gx = sample(xMm + e, yMm) - sample(xMm - e, yMm)
-    const gy = sample(xMm, yMm + e) - sample(xMm, yMm - e)
-    const l = Math.hypot(gx, gy)
-    return l < 1e-9 ? null : { x: gx / l, y: gy / l }
-  }
-  const placed: Pt[] = []
-  for (const p of fixedPts) {
-    // walk inward until this point is `depthMm` from the edge
-    let q = { x: p.x, y: p.y }
-    let ok = false
-    for (let s = 0; s < 200; s++) {
-      const d = sample(q.x, q.y)
-      if (d < 0) break
-      if (d >= depthMm) {
-        ok = true
-        break
-      }
-      const g = grad(q.x, q.y)
-      if (!g) break
-      q = { x: q.x + g.x * 0.2, y: q.y + g.y * 0.2 }
-    }
-    if (!ok || !inComponent(q)) continue
-    {
-      // TWO ROWS OR ONE — never a crowded pair. One depth is reached from
-      // BOTH walls, so it yields two rows. Where the stroke is too light to
-      // hold them a full beat apart they land inside each other's clearance
-      // and interleave into scatter instead of reading as rows. Collapse them
-      // onto the medial axis: both walls then land on the same centre line
-      // and the within-row check keeps one clean run.
-      const qi = Math.round(q.x * pxPerMm + padPx)
-      const qj = Math.round(q.y * pxPerMm + padPx)
-      const lw = qi >= 0 && qj >= 0 && qi < w && qj < h ? wide[qj * w + qi] : 0
-      if (lw > 0 && lw - 2 * depthMm < rhythm) {
-        for (let s = 0; s < 200; s++) {
-          const g = grad(q.x, q.y)
-          if (!g) break
-          const n = { x: q.x + g.x * 0.2, y: q.y + g.y * 0.2 }
-          if (sample(n.x, n.y) <= sample(q.x, q.y)) break
-          q = n
-        }
-      }
-    }
-    if (brickShift) {
-      // Half a beat along the row direction (perpendicular to the gradient).
-      // All-or-nothing: leaving one stone unshifted while its neighbours move
-      // puts a beat-and-a-half hole in the row, which reads as a dropout.
-      const g = grad(q.x, q.y)
-      if (!g) continue
-      const t = { x: -g.y, y: g.x }
-      const c = { x: q.x + t.x * rhythm * 0.5, y: q.y + t.y * rhythm * 0.5 }
-      if (!inComponent(c) || sample(c.x, c.y) < depthMm - 0.4) continue
-      q = c
-    }
-    let clash = false
-    for (const o of placed)
-      if (Math.hypot(q.x - o.x, q.y - o.y) < pitch - 1e-6) {
-        clash = true
-        break
-      }
-    if (clash || !idx.canPlace(q)) continue
-    placed.push(q)
-  }
-  return placed
-}
-
-
-// Divide the holes in a projected row evenly along the row's own iso-depth
-// contour. Projection can only place a stone where an outline stone exists to
-// project from, so a row breaks wherever the wall it came from is interrupted
-// — an E's stem loses its inner column at every arm junction, and an L's foot
-// comes out sparse. Re-deriving the contour and dividing each hole into whole
-// beats carries the rhythm across the break instead of stopping at it.
-function completeRowOnContour(
-  ring: Pt[],
-  seeds: Pt[],
-  rhythm: number,
-  pitch: number,
-  idx: SpacingIndex,
-): Pt[] {
-  if (ring.length < 3) return []
-  const cum = [0]
-  for (let i = 1; i <= ring.length; i++) {
-    const a = ring[i - 1]
-    const b = ring[i % ring.length]
-    cum.push(cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y))
-  }
-  const total = cum[ring.length]
-  if (total < rhythm * 2) return []
-  const at = (s: number): Pt => {
-    s = ((s % total) + total) % total
-    let lo = 0
-    let hi = ring.length
-    while (lo < hi - 1) {
-      const m = (lo + hi) >> 1
-      if (cum[m] <= s) lo = m
-      else hi = m
-    }
-    const a = ring[lo]
-    const b = ring[(lo + 1) % ring.length]
-    const seg = cum[lo + 1] - cum[lo]
-    const t = seg < 1e-9 ? 0 : (s - cum[lo]) / seg
-    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
-  }
-  // where the already-placed stones of this row sit on the contour
-  const arcs: number[] = []
-  for (const p of seeds) {
-    let bs = -1
-    let bd = Infinity
-    for (let i = 0; i < ring.length; i++) {
-      const d = Math.hypot(p.x - ring[i].x, p.y - ring[i].y)
-      if (d < bd) {
-        bd = d
-        bs = cum[i]
-      }
-    }
-    if (bd <= rhythm * 0.6) arcs.push(bs)
-  }
-  arcs.sort((a, b) => a - b)
-  const added: Pt[] = []
-  const tryPlace = (s: number) => {
-    const q = at(s)
-    if (!idx.canPlace(q)) return
-    for (const o of added) if (Math.hypot(q.x - o.x, q.y - o.y) < pitch - 1e-6) return
-    idx.add(q)
-    added.push(q)
-  }
-  if (arcs.length === 0) {
-    // no stone reached this contour at all — divide the whole loop evenly
-    const n = Math.max(1, Math.round(total / rhythm))
-    if (total / n < pitch) return []
-    for (let k = 0; k < n; k++) tryPlace(k * (total / n))
-    return added
-  }
-  for (let i = 0; i < arcs.length; i++) {
-    const s0 = arcs[i]
-    const s1 = i + 1 < arcs.length ? arcs[i + 1] : arcs[0] + total
-    const g = s1 - s0
-    const n = Math.round(g / rhythm) - 1
-    if (n < 1) continue
-    const step = g / (n + 1)
-    if (step < pitch) continue
-    for (let k = 1; k <= n; k++) tryPlace(s0 + k * step)
-  }
-  return added
-}
-
-
-// Full stroke width, in mm, at every pixel of a shape.
-//
-// One width per connected component is wrong for any letter whose parts differ
-// in weight: an L's foot is narrower than its stem, so a row count divided
-// from the stem doesn't fit inside the foot and the foot comes out empty.
-// Stamping each medial-axis pixel's maximal ball back over the shape recovers
-// the width of the stroke each pixel actually belongs to.
-function localWidthField(
-  mask: Uint8Array,
-  dt: Float32Array,
-  w: number,
-  h: number,
-  pxPerMm: number,
-): Float32Array {
-  const wide = new Float32Array(w * h)
-  for (let y = 1; y < h - 1; y++)
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x
-      if (!mask[i]) continue
-      const d = dt[i]
-      if (d <= 0) continue
-      if (
-        !(d >= dt[i - 1] && d >= dt[i + 1] && d >= dt[i - w] && d >= dt[i + w] &&
-          d >= dt[i - w - 1] && d >= dt[i - w + 1] &&
-          d >= dt[i + w - 1] && d >= dt[i + w + 1])
-      )
-        continue
-      const r = Math.ceil(d)
-      const rr = d * d
-      const val = (2 * d) / pxPerMm
-      const y0 = Math.max(0, y - r)
-      const y1 = Math.min(h - 1, y + r)
-      for (let yy = y0; yy <= y1; yy++) {
-        const dy = yy - y
-        const span = Math.floor(Math.sqrt(Math.max(0, rr - dy * dy)))
-        const row = yy * w
-        const x0 = Math.max(0, x - span)
-        const x1 = Math.min(w - 1, x + span)
-        for (let xx = x0; xx <= x1; xx++) {
-          const j = row + xx
-          if (mask[j] && wide[j] < val) wide[j] = val
-        }
-      }
-    }
-  // tips no maximal ball reached: fall back to twice their own edge distance
-  for (let i = 0; i < w * h; i++)
-    if (mask[i] && wide[i] === 0) wide[i] = (2 * dt[i]) / pxPerMm
-  return wide
-}
-
-// Split a shape into regions that take the same number of fill rows, so each
-// is divided on its own width. Slivers along the transition between two
-// weights are absorbed into whichever neighbour they border most — otherwise
-// a stem-to-foot junction fragments into strips too narrow to hold a row.
-function splitByRowCount(
-  mask: Uint8Array,
-  wide: Float32Array,
-  rhythm: number,
-  minArea: number,
-  w: number,
-  h: number,
-): { regions: Uint8Array[]; widths: number[] } {
-  const kOf = new Int32Array(w * h)
-  for (let i = 0; i < w * h; i++)
-    if (mask[i]) kOf[i] = Math.max(1, Math.min(9, Math.round(wide[i] / rhythm)))
-
-  const labels = new Int32Array(w * h)
-  const members: number[][] = [[]]
-  const stack: number[] = []
-  for (let s = 0; s < w * h; s++) {
-    if (!kOf[s] || labels[s]) continue
-    const id = members.length
-    const k = kOf[s]
-    const mem: number[] = []
-    labels[s] = id
-    stack.push(s)
-    while (stack.length) {
-      const i = stack.pop() as number
-      mem.push(i)
-      const x = i % w
-      const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]
-      for (const j of nb) {
-        if (j < 0 || j >= w * h) continue
-        if (labels[j] || kOf[j] !== k) continue
-        labels[j] = id
-        stack.push(j)
-      }
-    }
-    members.push(mem)
-  }
-
-  // absorb slivers, smallest first
-  const order = members.map((_, i) => i).slice(1).sort((a, b) => members[a].length - members[b].length)
-  for (const id of order) {
-    const mem = members[id]
-    if (!mem.length || mem.length >= minArea) continue
-    const border = new Map<number, number>()
-    for (const i of mem) {
-      const x = i % w
-      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
-        if (j < 0 || j >= w * h) continue
-        const l = labels[j]
-        if (!l || l === id) continue
-        border.set(l, (border.get(l) ?? 0) + 1)
-      }
-    }
-    let host = 0
-    let bestN = 0
-    for (const [l, n] of border)
-      if (n > bestN) {
-        bestN = n
-        host = l
-      }
-    if (!host) continue
-    for (const i of mem) labels[i] = host
-    members[host].push(...mem)
-    members[id] = []
-  }
-
-  const regions: Uint8Array[] = []
-  const widths: number[] = []
-  for (let id = 1; id < members.length; id++) {
-    const mem = members[id]
-    if (mem.length < 4) continue
-    const m = new Uint8Array(w * h)
-    for (const i of mem) m[i] = 1
-    const ws = mem.map((i) => wide[i]).sort((a, b) => a - b)
-    regions.push(m)
-    widths.push(ws[Math.floor(ws.length / 2)])
-  }
-  return { regions, widths }
-}
 
 export function fillStones(
   grid: Grid,
@@ -2120,7 +1635,8 @@ export function fillStones(
   gapMm: number,
   startInsetMm: number,
   idx: SpacingIndex,
-  fixedPts: Pt[] = [], // outline stones (already in idx)
+  _fixedPts: Pt[] = [], // outline stones — already inside idx, so the
+  //                       lattice needs no separate reference to them
   rhythmMm?: number,
   brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
 ): Pt[] {
@@ -2129,7 +1645,6 @@ export function fillStones(
   const pitch = holeMm + gapMm
   const rhythm = rhythmMm ?? pitch * 1.15
   const minPx = startInsetMm * pxPerMm
-  const toMm = (p: Pt): Pt => ({ x: (p.x - padPx) / pxPerMm, y: (p.y - padPx) / pxPerMm })
 
   const mask = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) mask[i] = dt[i] >= minPx ? 1 : 0
@@ -2137,122 +1652,74 @@ export function fillStones(
   const maxD = new Float32Array(count + 1)
   for (let i = 0; i < w * h; i++) if (labels[i] && dt[i] > maxD[labels[i]]) maxD[labels[i]] = dt[i]
 
+  // ONE LATTICE FOR THE WHOLE SHAPE.
+  //
+  // Deriving each row from the edge it sits beside makes every region pick its
+  // own phase: an H's two stems stop sharing columns, an E's arms stop lining
+  // up with its stem, an O's fill spirals with the curve. The result reads as
+  // speckle even when every individual row is evenly spaced.
+  //
+  // Fill instead is a single lattice laid across the whole shape. A stone goes
+  // wherever a lattice point falls far enough inside the outline. Columns are
+  // then dead straight everywhere by construction, junctions need no
+  // negotiation, and a letter's lighter limbs inherit the same lines as its
+  // stems.
   const out: Pt[] = []
-  const compMask = new Uint8Array(w * h)
-  // Divide rows on the width of the stroke a pixel actually belongs to, not
-  // on the widest point of its whole letter: the L's stem is heavier than its
-  // foot, and a division taken from the stem leaves no room inside the foot.
-  const wideField = localWidthField(mask, dt, w, h, pxPerMm)
-  // A region is worth keeping if it can hold a short run of stones. Sized to
-  // a full rhythm-square it swallows exactly the parts that most need their
-  // own division — a letter's lighter limb lands just under it and gets
-  // absorbed back into the heavier stroke it differs from.
-  const minRegionPx = (rhythm * pxPerMm) ** 2 * 0.6
-  const fillRegion = (compMask: Uint8Array, fullWmm: number) => {
-    const halfWmm = fullWmm / 2
-    const spanMm = halfWmm - startInsetMm
 
-    const walkSkeleton = (m: Uint8Array) => {
-      const skel = skeletonize(m, w, h)
-      const paths = traceSkeleton(skel, w, h)
-        .map((p) => straightenPath(smoothPath(p, 3).map(toMm)))
-        .sort((a, b) => b.length - a.length)
-      // A medial axis forks where strokes meet (a G's bar into its bowl).
-      // Those short branch stubs are not runs — stones placed along them land
-      // diagonally across the junction, belonging to neither row. Walk the
-      // substantial paths only; the longest always qualifies so a small
-      // isolated pocket still gets its row.
-      const arcLen = (p: Pt[]) => {
-        let L = 0
-        for (let k = 1; k < p.length; k++) L += Math.hypot(p[k].x - p[k - 1].x, p[k].y - p[k - 1].y)
-        return L
-      }
-      for (let i = 0; i < paths.length; i++) {
-        if (i > 0 && arcLen(paths[i]) < rhythm * 1.5) continue
-        out.push(...placePhaseLocked(paths[i], fixedPts, pitch, rhythm, idx, brick))
-      }
-    }
-
-    if (spanMm < pitch * 0.55) {
-      // The pocket is so shallow that an iso-loop's two sides would collide:
-      // place a single centerline row on the pocket's skeleton.
-      dbg(`skelcomp:span${spanMm.toFixed(1)}`, [{ x: -1, y: -1 }])
-      walkSkeleton(compMask)
-    } else {
-      // Multiple rows: stretch spacing so the block exactly spans the depth
-      // band (equal padding both sides); cap the stretch and re-center if the
-      // stretched spacing would look sparse.
-      // EVEN SPACING ACROSS THE STROKE. Rows must divide the FULL width so
-      // every gap matches: wall -> row -> ... -> row -> wall. Offsetting a
-      // fixed distance from each edge instead makes the two inward rows land
-      // on top of each other in a medium stroke, and they knock each other
-      // out — the scattered fill.
-      const fullW = fullWmm
-      let k = Math.max(1, Math.round(fullW / rhythm))
-      while (k > 1 && fullW / k < idx.minDist) k--
-      const sGap = fullW / k
-      if (k >= 6) {
-        // open area: a lattice, not concentric rings
-        dbg(`lattice:k${k}`, [{ x: -1, y: -1 }])
-        out.push(...latticeFill(compMask, dt, grid, minPx, pitch, rhythm, idx, brick))
-        return
-      }
-      dbg(`rings:k${k}:gap${sGap.toFixed(2)}`, [{ x: -1, y: -1 }])
-      // depths of the interior rows, symmetric about the medial axis
-      const depths: number[] = []
-      for (let i = 1; i * sGap < halfWmm - 0.15; i++) depths.push(i * sGap)
-      const medial = k % 2 === 0 // even k puts one row exactly on the centre
-      const levelMask = new Uint8Array(w * h)
-      const inComp = (p: Pt): boolean => {
-        const xi = Math.round(p.x * pxPerMm + padPx)
-        const yi = Math.round(p.y * pxPerMm + padPx)
-        if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
-        return compMask[yi * w + xi] === 1
-      }
-      for (let di = 0; di < depths.length; di++) {
-        // A row sits at an evenly-divided depth, but that depth can land a
-        // hair inside the outline stones' clearance — and then the row loses
-        // scattered stones and reads as broken rather than as a row. Nudge
-        // the WHOLE row deeper together and keep the best-yielding depth, so
-        // it stays a straight column instead of a wobbling one.
-        let best: Pt[] = []
-        let bestD = depths[di]
-        for (const nudge of [0, 0.2, 0.4, 0.6, 0.8]) {
-          const d = depths[di] + nudge
-          if (d > halfWmm) break
-          const row = projectRowInward(
-            fixedPts, dt, grid, d, pitch, idx,
-            brick && di % 2 === 0, rhythm, inComp, wideField,
-          )
-          if (row.length > best.length) {
-            best = row
-            bestD = d
-          } else break // past the peak — deeper only loses more
-        }
-        for (const q of best) {
-          idx.add(q)
-          out.push(q)
-        }
-        const tPx = bestD * pxPerMm
-        for (let i = 0; i < w * h; i++)
-          levelMask[i] = compMask[i] && dt[i] >= tPx ? 1 : 0
-        for (const ring of marchingSquares(levelMask, w, h))
-          out.push(
-            ...completeRowOnContour(ring.map(toMm), best, rhythm, pitch, idx),
-          )
-      }
-      if (medial) walkSkeleton(compMask)
-    }
+  const toMmX = (px: number) => (px - padPx) / pxPerMm
+  const toMmY = (py: number) => (py - padPx) / pxPerMm
+  const fillable = (xi: number, yi: number) => {
+    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+    return mask[yi * w + xi] === 1
   }
 
-  for (let lbl = 1; lbl <= count; lbl++) {
-    for (let i = 0; i < w * h; i++) compMask[i] = labels[i] === lbl ? 1 : 0
-    const { regions, widths } = splitByRowCount(
-      compMask, wideField, rhythm, minRegionPx, w, h,
-    )
-    // widest first: the heavy strokes set the rhythm the lighter parts join
-    const order = regions.map((_, i) => i).sort((a, b) => widths[b] - widths[a])
-    for (const i of order) fillRegion(regions[i], widths[i])
+  // bounds of everything a stone could occupy
+  let minX = w
+  let maxX = -1
+  let minY = h
+  let maxY = -1
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (fillable(x, y)) {
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+  if (maxX < 0) return []
+
+  const stepX = rhythm
+  // brick rows sit closer together so a stone keeps the same distance to the
+  // two it nests between as to the two beside it
+  const stepY = brick ? (rhythm * Math.sqrt(3)) / 2 : rhythm
+
+  // Centre the lattice on the shape so the margins match on both sides —
+  // anchoring it at a corner leaves a fat gap on one edge and a shaved row on
+  // the other. Centring is also what keeps identical letters identical: the
+  // anchor comes from the glyph's own extent, never from where it sits in the
+  // word.
+  const spanX = toMmX(maxX) - toMmX(minX)
+  const spanY = toMmY(maxY) - toMmY(minY)
+  const nCols = Math.max(1, Math.floor(spanX / stepX) + 1)
+  const nRows = Math.max(1, Math.floor(spanY / stepY) + 1)
+  const x0 = toMmX(minX) + (spanX - (nCols - 1) * stepX) / 2
+  const y0 = toMmY(minY) + (spanY - (nRows - 1) * stepY) / 2
+
+  for (let r = 0; r < nRows; r++) {
+    const yMm = y0 + r * stepY
+    const yi = Math.round(yMm * pxPerMm + padPx)
+    // a brick row is offset half a step; it also needs one extra candidate at
+    // each end so the offset does not shorten the row
+    const shift = brick && r % 2 === 1 ? stepX / 2 : 0
+    for (let c = -1; c <= nCols; c++) {
+      const xMm = x0 + c * stepX + shift
+      const xi = Math.round(xMm * pxPerMm + padPx)
+      if (!fillable(xi, yi)) continue
+      const p = { x: xMm, y: yMm }
+      if (!idx.canPlace(p)) continue
+      idx.add(p)
+      out.push(p)
+    }
   }
 
   // Law fill: everything placed deterministically above — no relaxation,
