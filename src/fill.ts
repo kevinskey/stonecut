@@ -1787,6 +1787,10 @@ export function fillByGlyph(
     } else groups.push({ minX, minY, maxX, maxY, cs: [c] })
   }
 
+  // The outline stones are bigger than the fill stones; recover their radius
+  // from the mixed-size minimum the caller built the index with.
+  const outlineR = Math.max(idx.defaultR, idx.minDist - idx.gap - idx.defaultR)
+
   const out: Pt[] = []
   for (const g of groups) {
     const ox = g.minX
@@ -1798,8 +1802,13 @@ export function fillByGlyph(
     const localFixed = fixedPts
       .filter((p) => p.x >= g.minX - pad && p.x <= g.maxX + pad && p.y >= g.minY - pad && p.y <= g.maxY + pad)
       .map((p) => ({ x: p.x - ox, y: p.y - oy }))
-    const localIdx = new SpacingIndex(idx.minDist)
-    for (const p of localFixed) localIdx.add(p)
+    // Mirror the caller's per-radius mode. Built with one argument the local
+    // index falls back to a single uniform minimum — the FILL-to-OUTLINE
+    // distance — and then demands it between two small fill stones as well.
+    // That rejects every second lattice point and leaves the fill
+    // checkerboarded, with obvious unfilled space inside every stroke.
+    const localIdx = new SpacingIndex(idx.minDist, idx.gap, idx.defaultR)
+    for (const p of localFixed) localIdx.add(p, outlineR)
     const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick)
     for (const p of placed) {
       const q = { x: p.x + ox, y: p.y + oy }

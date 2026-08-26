@@ -274,8 +274,15 @@ export default function App() {
           // letter reads as one uniform field of stones rather than an outline
           // with a differently-paced infill. The customer picks the fill STONE
           // SIZE; the beat is shared.
-          const fRhythm = rhythm
-          const fInset = textMode === 'both' ? rhythm : fHole / 2 + 0.1
+          // The lattice steps on the FILL stone's own pitch, not the outline's.
+          // Inheriting the outline rhythm spaces small fill stones as if they
+          // were the big outline ones, which reads as padding on both axes.
+          const fRhythm = fHole + fGap
+          // A fill stone only has to sit inside the shape; its clearance from
+          // the outline is already enforced per-pair by fIdx below. Insetting a
+          // whole rhythm as well padded the fill twice and left a dead band
+          // between the outline and the first lattice line.
+          const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -323,8 +330,11 @@ export default function App() {
         if (imgMode !== 'outline') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
           const fGap = hardGapOf(gap)
-          const fRhythm = rhythm
-          const fInset = imgMode === 'both' ? rhythm : fHole / 2 + 0.1
+          // The lattice steps on the FILL stone's own pitch, not the outline's.
+          // Inheriting the outline rhythm spaces small fill stones as if they
+          // were the big outline ones, which reads as padding on both axes.
+          const fRhythm = fHole + fGap
+          const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -379,8 +389,15 @@ export default function App() {
     if (textMode !== 'outline') {
       const fHole = sizes[fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
-      const fRhythm = rhythm
-      const fInset = textMode === 'both' ? rhythm : fHole / 2 + 0.1
+    // The lattice steps on the FILL stone's own pitch, not the outline's.
+          // Inheriting the outline rhythm spaces small fill stones as if they
+          // were the big outline ones, which reads as padding on both axes.
+          const fRhythm = fHole + fGap
+        // A fill stone only has to sit inside the shape; its clearance from
+          // the outline is already enforced per-pair by fIdx below. Insetting a
+          // whole rhythm as well padded the fill twice and left a dead band
+          // between the outline and the first lattice line.
+          const fInset = fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
       const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -416,8 +433,11 @@ export default function App() {
       if (imgMode !== 'outline') {
         const fHole = sizes[fillSize]?.holeMm ?? 2.5
         const fGap = hardGapOf(gap)
-        const fRhythm = rhythm
-        const fInset = imgMode === 'both' ? rhythm : fHole / 2 + 0.1
+      // The lattice steps on the FILL stone's own pitch, not the outline's.
+          // Inheriting the outline rhythm spaces small fill stones as if they
+          // were the big outline ones, which reads as padding on both axes.
+          const fRhythm = fHole + fGap
+        const fInset = fHole / 2 + 0.1
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
         for (const p of outline) fIdx.add(p, hole / 2)
         const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
@@ -759,8 +779,8 @@ export default function App() {
             </label>
           </div>
           <div className="sizeinfo">
-            Even spacing: fill shares the outline rhythm ·{' '}
-            <b>{((sizes[curSize]?.holeMm ?? 3) + gap).toFixed(1)} mm</b>
+            Even spacing: one lattice, stepped on the fill stone ·{' '}
+            <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
             <span> — set it in Stones · Spacing</span>
           </div>
           <label>Fill style
