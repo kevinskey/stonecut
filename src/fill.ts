@@ -1804,6 +1804,161 @@ function latticeFill(
   return out
 }
 
+
+// Project the OUTLINE row inward to make an interior row.
+//
+// Deriving each interior row from its own closed loop makes it quantise
+// separately, so rows drift out of phase — worst on short features like an
+// E's arms, where a ring has few wall stones to lock onto. Marching each
+// outline stone inward along the distance-field gradient instead gives the
+// interior row the outline's own count and phase by construction, so the
+// columns line up everywhere.
+function projectRowInward(
+  fixedPts: Pt[],
+  dt: Float32Array,
+  grid: Grid,
+  depthMm: number,
+  pitch: number,
+  idx: SpacingIndex,
+  brickShift: boolean,
+  rhythm: number,
+  inComponent: (p: Pt) => boolean,
+): Pt[] {
+  const { w, h, pxPerMm, padPx } = grid
+  const sample = (xMm: number, yMm: number) => {
+    const xi = Math.round(xMm * pxPerMm + padPx)
+    const yi = Math.round(yMm * pxPerMm + padPx)
+    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return -1
+    return dt[yi * w + xi] / pxPerMm
+  }
+  const grad = (xMm: number, yMm: number) => {
+    const e = 1 / pxPerMm
+    const gx = sample(xMm + e, yMm) - sample(xMm - e, yMm)
+    const gy = sample(xMm, yMm + e) - sample(xMm, yMm - e)
+    const l = Math.hypot(gx, gy)
+    return l < 1e-9 ? null : { x: gx / l, y: gy / l }
+  }
+  const placed: Pt[] = []
+  for (const p of fixedPts) {
+    // walk inward until this point is `depthMm` from the edge
+    let q = { x: p.x, y: p.y }
+    let ok = false
+    for (let s = 0; s < 200; s++) {
+      const d = sample(q.x, q.y)
+      if (d < 0) break
+      if (d >= depthMm) {
+        ok = true
+        break
+      }
+      const g = grad(q.x, q.y)
+      if (!g) break
+      q = { x: q.x + g.x * 0.2, y: q.y + g.y * 0.2 }
+    }
+    if (!ok || !inComponent(q)) continue
+    if (brickShift) {
+      // Half a beat along the row direction (perpendicular to the gradient).
+      // All-or-nothing: leaving one stone unshifted while its neighbours move
+      // puts a beat-and-a-half hole in the row, which reads as a dropout.
+      const g = grad(q.x, q.y)
+      if (!g) continue
+      const t = { x: -g.y, y: g.x }
+      const c = { x: q.x + t.x * rhythm * 0.5, y: q.y + t.y * rhythm * 0.5 }
+      if (!inComponent(c) || sample(c.x, c.y) < depthMm - 0.4) continue
+      q = c
+    }
+    let clash = false
+    for (const o of placed)
+      if (Math.hypot(q.x - o.x, q.y - o.y) < pitch - 1e-6) {
+        clash = true
+        break
+      }
+    if (clash || !idx.canPlace(q)) continue
+    placed.push(q)
+  }
+  return placed
+}
+
+
+// Divide the holes in a projected row evenly along the row's own iso-depth
+// contour. Projection can only place a stone where an outline stone exists to
+// project from, so a row breaks wherever the wall it came from is interrupted
+// — an E's stem loses its inner column at every arm junction, and an L's foot
+// comes out sparse. Re-deriving the contour and dividing each hole into whole
+// beats carries the rhythm across the break instead of stopping at it.
+function completeRowOnContour(
+  ring: Pt[],
+  seeds: Pt[],
+  rhythm: number,
+  pitch: number,
+  idx: SpacingIndex,
+): Pt[] {
+  if (ring.length < 3) return []
+  const cum = [0]
+  for (let i = 1; i <= ring.length; i++) {
+    const a = ring[i - 1]
+    const b = ring[i % ring.length]
+    cum.push(cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y))
+  }
+  const total = cum[ring.length]
+  if (total < rhythm * 2) return []
+  const at = (s: number): Pt => {
+    s = ((s % total) + total) % total
+    let lo = 0
+    let hi = ring.length
+    while (lo < hi - 1) {
+      const m = (lo + hi) >> 1
+      if (cum[m] <= s) lo = m
+      else hi = m
+    }
+    const a = ring[lo]
+    const b = ring[(lo + 1) % ring.length]
+    const seg = cum[lo + 1] - cum[lo]
+    const t = seg < 1e-9 ? 0 : (s - cum[lo]) / seg
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+  }
+  // where the already-placed stones of this row sit on the contour
+  const arcs: number[] = []
+  for (const p of seeds) {
+    let bs = -1
+    let bd = Infinity
+    for (let i = 0; i < ring.length; i++) {
+      const d = Math.hypot(p.x - ring[i].x, p.y - ring[i].y)
+      if (d < bd) {
+        bd = d
+        bs = cum[i]
+      }
+    }
+    if (bd <= rhythm * 0.6) arcs.push(bs)
+  }
+  arcs.sort((a, b) => a - b)
+  const added: Pt[] = []
+  const tryPlace = (s: number) => {
+    const q = at(s)
+    if (!idx.canPlace(q)) return
+    for (const o of added) if (Math.hypot(q.x - o.x, q.y - o.y) < pitch - 1e-6) return
+    idx.add(q)
+    added.push(q)
+  }
+  if (arcs.length === 0) {
+    // no stone reached this contour at all — divide the whole loop evenly
+    const n = Math.max(1, Math.round(total / rhythm))
+    if (total / n < pitch) return []
+    for (let k = 0; k < n; k++) tryPlace(k * (total / n))
+    return added
+  }
+  for (let i = 0; i < arcs.length; i++) {
+    const s0 = arcs[i]
+    const s1 = i + 1 < arcs.length ? arcs[i + 1] : arcs[0] + total
+    const g = s1 - s0
+    const n = Math.round(g / rhythm) - 1
+    if (n < 1) continue
+    const step = g / (n + 1)
+    if (step < pitch) continue
+    for (let k = 1; k <= n; k++) tryPlace(s0 + k * step)
+  }
+  return added
+}
+
 export function fillStones(
   grid: Grid,
   holeMm: number,
@@ -1884,20 +2039,43 @@ export function fillStones(
       for (let i = 1; i * sGap < maxD[lbl] / pxPerMm - 0.15; i++) depths.push(i * sGap)
       const medial = k % 2 === 0 // even k puts one row exactly on the centre
       const levelMask = new Uint8Array(w * h)
+      const inComp = (p: Pt): boolean => {
+        const xi = Math.round(p.x * pxPerMm + padPx)
+        const yi = Math.round(p.y * pxPerMm + padPx)
+        if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+        return compMask[yi * w + xi] === 1
+      }
       for (let di = 0; di < depths.length; di++) {
-        const tPx = depths[di] * pxPerMm + 0.01
-        for (let i = 0; i < w * h; i++) levelMask[i] = compMask[i] && dt[i] >= tPx ? 1 : 0
-        const rings = marchingSquares(levelMask, w, h)
-          .map((c) => c.map(toMm))
-          .sort((a, b) => b.length - a.length)
-        // PHASE-LOCK every interior row to the OUTLINE stones. Placing each
-        // ring through the corner pipeline quantises it on its own: an inner
-        // loop is shorter than the one outside it, so the two drift out of
-        // phase and one ends up gapped — the rows stop reading as rows.
-        // Locking to the wall stones makes the columns line up across the
-        // stroke (grid = on their beat, brick = between).
-        for (const ring of rings)
-          out.push(...placePhaseLocked(ring, fixedPts, pitch, rhythm, idx, brick && di % 2 === 0, true))
+        // A row sits at an evenly-divided depth, but that depth can land a
+        // hair inside the outline stones' clearance — and then the row loses
+        // scattered stones and reads as broken rather than as a row. Nudge
+        // the WHOLE row deeper together and keep the best-yielding depth, so
+        // it stays a straight column instead of a wobbling one.
+        let best: Pt[] = []
+        let bestD = depths[di]
+        for (const nudge of [0, 0.2, 0.4, 0.6, 0.8]) {
+          const d = depths[di] + nudge
+          if (d > maxD[lbl] / pxPerMm) break
+          const row = projectRowInward(
+            fixedPts, dt, grid, d, pitch, idx,
+            brick && di % 2 === 0, rhythm, inComp,
+          )
+          if (row.length > best.length) {
+            best = row
+            bestD = d
+          } else break // past the peak — deeper only loses more
+        }
+        for (const q of best) {
+          idx.add(q)
+          out.push(q)
+        }
+        const tPx = bestD * pxPerMm
+        for (let i = 0; i < w * h; i++)
+          levelMask[i] = compMask[i] && dt[i] >= tPx ? 1 : 0
+        for (const ring of marchingSquares(levelMask, w, h))
+          out.push(
+            ...completeRowOnContour(ring.map(toMm), best, rhythm, pitch, idx),
+          )
       }
       if (medial) walkSkeleton(compMask)
     }
