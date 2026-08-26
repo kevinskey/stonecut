@@ -616,7 +616,13 @@ export default function App() {
           <label>Text<input value={text} onChange={(e) => setText(e.target.value)} /></label>
           <div className="fontpicker" ref={pickerRef}>
             <label>Font</label>
-            <button className="fontbtn" onClick={() => setFontOpen((o) => !o)}>
+            <button className="fontbtn" onClick={() => setFontOpen((o) => {
+              // Reopening with the last search still in the box shows only the
+              // handful of fonts that matched it, which reads as "there are
+              // only 3 fonts". Every open starts from the whole library.
+              if (!o) { setFontSearch(''); setFontCat('all') }
+              return !o
+            })}>
               {fontName || 'Choose a font…'}
               <span className="caret">▾</span>
             </button>

@@ -1100,7 +1100,12 @@ export function outlineOrSpine(
         // reject clamp-border corner pockets: a REAL valley touching the
         // border (M baseline mouth) has letter on BOTH sides along it; the
         // pocket outside a rounded corner has letter on one side only
-        let pocket = false
+        // Judge by PROPORTION, not a single-pixel veto. One border pixel
+        // whose scan happens to miss the letter condemned the whole channel,
+        // which is why every wedge in KEVIN was rejected and its two walls
+        // both got stoned into a zigzag.
+        let borderPx = 0
+        let openPx = 0
         for (const i of px) {
           const x = i % w
           const y = (i / w) | 0
@@ -1108,6 +1113,7 @@ export function outlineOrSpine(
           if (y <= gy0 + 1 || y >= gy1 - 1) dirs = [[1, 0], [-1, 0]]
           else if (x <= gx0 + 1 || x >= gx1 - 1) dirs = [[0, 1], [0, -1]]
           if (!dirs) continue
+          borderPx++
           const reach = Math.ceil(2 * dtInv[i]) + 6
           let both = true
           for (const [dx2, dy2] of dirs) {
@@ -1120,9 +1126,14 @@ export function outlineOrSpine(
             }
             if (!found) { both = false; break }
           }
-          if (!both) { pocket = true; break }
+          if (!both) openPx++
         }
-        if (pocket) continue
+        // ALL one-sided, not ANY. A real valley touching the border has letter
+        // on both sides of it SOMEWHERE along its length; the pocket outside a
+        // rounded corner never does. Rejecting on any single one-sided pixel
+        // condemned every wedge in a K, V or N — both walls then got stoned
+        // and their stones interleaved into a zigzag down the taper.
+        if (borderPx && openPx === borderPx) continue
         chMask.fill(0)
         for (const i of px) chMask[i] = 1
         const skel = skeletonize(chMask, w, h)
@@ -1157,7 +1168,12 @@ export function outlineOrSpine(
             probe[probe.length - 1].x - probe[0].x,
             probe[probe.length - 1].y - probe[0].y,
           )
-          if (chord < Math.max(2.2 * g90, pitch * 1.1)) continue
+          // Measure a WEDGE against its median width, not its widest. g90 of a
+          // taper is its mouth, so a V's or K's inner notch has to be absurdly
+          // long to clear the bar — it gets rejected, both its walls get
+          // stoned, and where they converge the stones interleave into a
+          // zigzag instead of running down the middle.
+          if (chord < Math.max(2.2 * (wedge ? g50 : g90), pitch * 1.1)) continue
           if (arcLen > 0 && chord / arcLen < 0.65) continue
         }
         // pixel skeletons of tapered slivers staircase — near-straight lines
