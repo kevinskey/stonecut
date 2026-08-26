@@ -1285,6 +1285,43 @@ export function outlineOrSpine(
       for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
     }
   }
+
+  // NO CROWDED PAIRS. Corners, spines, detail lines and wall runs are placed
+  // by different mechanisms; where two of them meet, only the hard spacing
+  // floor keeps their stones apart, so a sharp apex or a spine-to-wall
+  // junction ends up with stones a floor-width apart while the rest of the
+  // letter runs at the rhythm. A cluster at a vertex reads as a mistake --
+  // better to drop the crowder and carry a slightly wider gap.
+  //
+  // Anchors win: a corner defines the letter's shape and never moves. Between
+  // equals the later stone goes, since the earlier one is already spaced
+  // against everything before it.
+  {
+    const rank = new Map<Pt, number>()
+    for (const s of debugStones) {
+      const r = s.cat.startsWith('corner') ? 3 : s.cat.startsWith('line') ? 2 : s.cat.startsWith('spine') ? 1 : 0
+      for (const p of out)
+        if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
+          rank.set(p, Math.max(rank.get(p) ?? 0, r))
+    }
+    const tooClose = rhythm * 0.92
+    const dropped = new Set<Pt>()
+    for (let i = 0; i < out.length; i++) {
+      if (dropped.has(out[i])) continue
+      for (let j = i + 1; j < out.length; j++) {
+        if (dropped.has(out[j])) continue
+        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) >= tooClose) continue
+        const ri = rank.get(out[i]) ?? 0
+        const rj = rank.get(out[j]) ?? 0
+        if (ri < rj) {
+          dropped.add(out[i])
+          break
+        }
+        dropped.add(out[j])
+      }
+    }
+    if (dropped.size) return out.filter((p) => !dropped.has(p))
+  }
   return out
 }
 
