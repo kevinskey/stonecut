@@ -1304,7 +1304,23 @@ export function outlineOrSpine(
         if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
           rank.set(p, Math.max(rank.get(p) ?? 0, r))
     }
-    const tooClose = rhythm * 0.92
+    // Judge against the spacing the letter ACTUALLY realises, not the nominal
+    // rhythm. The run divider stretches its beat to fit each span, so a letter
+    // asked for 4.2mm may settle at 4.44mm — and a 3.91mm pair, plainly tight
+    // to the eye beside its neighbours, clears a threshold derived from 4.2.
+    const nn: number[] = []
+    for (const a of out) {
+      let m = Infinity
+      for (const b of out) {
+        if (a === b) continue
+        const dd = Math.hypot(a.x - b.x, a.y - b.y)
+        if (dd < m) m = dd
+      }
+      if (Number.isFinite(m)) nn.push(m)
+    }
+    nn.sort((a, b) => a - b)
+    const realised = nn.length ? nn[Math.floor(nn.length / 2)] : rhythm
+    const tooClose = Math.max(rhythm, realised) * 0.93
     const dropped = new Set<Pt>()
     for (let i = 0; i < out.length; i++) {
       if (dropped.has(out[i])) continue
