@@ -1794,23 +1794,65 @@ export function fillStones(
   const spanY = toMmY(maxY) - toMmY(minY)
   const nCols = Math.max(1, Math.floor(spanX / stepX) + 1)
   const nRows = Math.max(1, Math.floor(spanY / stepY) + 1)
-  const x0 = toMmX(minX) + (spanX - (nCols - 1) * stepX) / 2
-  const y0 = toMmY(minY) + (spanY - (nRows - 1) * stepY) / 2
+  const baseX = toMmX(minX) + (spanX - (nCols - 1) * stepX) / 2
+  const baseY = toMmY(minY) + (spanY - (nRows - 1) * stepY) / 2
 
-  for (let r = 0; r < nRows; r++) {
-    const yMm = y0 + r * stepY
-    // a brick row is offset half a step; it also needs one extra candidate at
-    // each end so the offset does not shorten the row
-    const shift = brick && r % 2 === 1 ? stepX / 2 : 0
-    for (let c = -1; c <= nCols; c++) {
-      const xMm = x0 + c * stepX + shift
-      const p = { x: xMm, y: yMm }
-      if (dtAt(xMm, yMm) < minPx) continue
-      if (!clearOfOutline(p)) continue
-      if (!idx.canPlace(p)) continue
-      idx.add(p)
-      out.push(p)
+  // Walk the lattice at a given offset. `exact` decides each stone the slow,
+  // accurate way; the cheap pixel test is only ever used to SCORE offsets
+  // against each other, never to place a stone.
+  const walk = (dx: number, dy: number, exact: boolean): Pt[] => {
+    const got: Pt[] = []
+    for (let r = -1; r <= nRows; r++) {
+      const yMm = baseY + dy + r * stepY
+      // a brick row is offset half a step; both need a spare candidate at each
+      // end so the offset cannot shorten the row
+      const shift = brick && ((r % 2) + 2) % 2 === 1 ? stepX / 2 : 0
+      for (let c = -1; c <= nCols; c++) {
+        const xMm = baseX + dx + c * stepX + shift
+        if (!exact) {
+          if (!fillable(Math.round(xMm * pxPerMm + padPx), Math.round(yMm * pxPerMm + padPx)))
+            continue
+          got.push({ x: xMm, y: yMm })
+          continue
+        }
+        const p = { x: xMm, y: yMm }
+        if (dtAt(xMm, yMm) < minPx) continue
+        if (!clearOfOutline(p)) continue
+        if (!idx.canPlace(p)) continue
+        got.push(p)
+      }
     }
+    return got
+  }
+
+  // Centring gives even margins but pins the lattice's phase, and a pocket
+  // that could hold a row or column can miss it by less than a step — a B's
+  // outer bowl comes out a column short, an R's leg gets one column where it
+  // has room for two. Slide the lattice, as one rigid piece, to whichever
+  // offset seats the most stones. Every row and column stays aligned; only
+  // where the pattern sits changes.
+  //
+  // Scored on the pixel mask, which is ~200x cheaper than the exact test:
+  // scoring 36 offsets exactly locks the UI for seconds on a long word.
+  const STEPS = 6
+  const scored: { dx: number; dy: number; n: number }[] = []
+  for (let iy = 0; iy < STEPS; iy++)
+    for (let ix = 0; ix < STEPS; ix++) {
+      const dx = (ix / STEPS) * stepX
+      const dy = (iy / STEPS) * stepY
+      scored.push({ dx, dy, n: walk(dx, dy, false).length })
+    }
+  // The cheap score can rank an offset the exact test then dislikes, so
+  // re-check the leading few exactly and keep the real winner.
+  scored.sort((a, b) => b.n - a.n)
+  let best: Pt[] = []
+  for (const s of scored.slice(0, 4)) {
+    const got = walk(s.dx, s.dy, true)
+    if (got.length > best.length) best = got
+  }
+  for (const p of best) {
+    idx.add(p)
+    out.push(p)
   }
 
   // Law fill: everything placed deterministically above — no relaxation,
