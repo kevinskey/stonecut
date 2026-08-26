@@ -1408,18 +1408,21 @@ export function outlineOrSpine(
         if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
           rank.set(p, Math.max(rank.get(p) ?? 0, r))
     }
-    // Judge each stone against ITS OWN neighbourhood, not the design.
+    // Crowding has a physical definition: a pair JAMMED at the spacing floor
+    // while the rest of the design runs at a rhythm. Nothing else is crowding.
     //
-    // A design-wide bar punishes any run legitimately denser than the average:
-    // an E's top and bottom rows sit at 4.3mm while the design median is
-    // 4.88mm, so a 0.93x-of-median threshold called EVERY pair in those rows
-    // crowded and dropped alternate stones — turning a 4.3mm row into an 8.6mm
-    // one. 19% of the design disappeared that way.
+    // Two softer rules failed here. A design-wide median punished any run
+    // legitimately denser than average — GLEE's E rows at 4.3mm against a
+    // 4.88mm median lost every other stone, 19% of the design. Comparing a
+    // stone's nearest neighbour to its SECOND nearest failed too: at the end
+    // of a run the second nearest is a diagonal stone on another edge, so a
+    // perfectly-spaced 4.89mm pair was judged against 6.86mm and dropped,
+    // punching the hole in the E's middle arm.
     //
-    // A stone is crowded only when its nearest neighbour is much closer than
-    // its NEXT one. That is scale-free: an evenly spaced run has both
-    // distances equal and is never touched, while a real intruder sits far
-    // closer than the run's own spacing.
+    // The floor is the one distance that means something absolute: stones that
+    // close are touching the minimum the index allows, which only happens when
+    // two different runs collide at a junction.
+    const tooClose = pitch * 1.02
     const nnAll: number[] = []
     for (const a of out) {
       let m = Infinity
@@ -1432,27 +1435,12 @@ export function outlineOrSpine(
     }
     nnAll.sort((a, b) => a - b)
     const realised = nnAll.length ? nnAll[Math.floor(nnAll.length / 2)] : rhythm
-    const nnTwo = (p: Pt) => {
-      let d1 = Infinity
-      let d2 = Infinity
-      for (const q of out) {
-        if (q === p) continue
-        const d = Math.hypot(p.x - q.x, p.y - q.y)
-        if (d < d1) {
-          d2 = d1
-          d1 = d
-        } else if (d < d2) d2 = d
-      }
-      return { d1, d2 }
-    }
     const dropped = new Set<Pt>()
     for (let i = 0; i < out.length; i++) {
       if (dropped.has(out[i])) continue
-      const a2 = nnTwo(out[i])
-      if (!(a2.d1 < a2.d2 * 0.75)) continue // evenly spaced: leave it alone
       for (let j = i + 1; j < out.length; j++) {
         if (dropped.has(out[j])) continue
-        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) > a2.d1 + 1e-6) continue
+        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) >= tooClose) continue
         const ri = rank.get(out[i]) ?? 0
         const rj = rank.get(out[j]) ?? 0
         if (ri < rj) {
