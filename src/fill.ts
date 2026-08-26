@@ -1823,6 +1823,7 @@ function projectRowInward(
   brickShift: boolean,
   rhythm: number,
   inComponent: (p: Pt) => boolean,
+  wide: Float32Array,
 ): Pt[] {
   const { w, h, pxPerMm, padPx } = grid
   const sample = (xMm: number, yMm: number) => {
@@ -1855,6 +1856,26 @@ function projectRowInward(
       q = { x: q.x + g.x * 0.2, y: q.y + g.y * 0.2 }
     }
     if (!ok || !inComponent(q)) continue
+    {
+      // TWO ROWS OR ONE — never a crowded pair. One depth is reached from
+      // BOTH walls, so it yields two rows. Where the stroke is too light to
+      // hold them a full beat apart they land inside each other's clearance
+      // and interleave into scatter instead of reading as rows. Collapse them
+      // onto the medial axis: both walls then land on the same centre line
+      // and the within-row check keeps one clean run.
+      const qi = Math.round(q.x * pxPerMm + padPx)
+      const qj = Math.round(q.y * pxPerMm + padPx)
+      const lw = qi >= 0 && qj >= 0 && qi < w && qj < h ? wide[qj * w + qi] : 0
+      if (lw > 0 && lw - 2 * depthMm < rhythm) {
+        for (let s = 0; s < 200; s++) {
+          const g = grad(q.x, q.y)
+          if (!g) break
+          const n = { x: q.x + g.x * 0.2, y: q.y + g.y * 0.2 }
+          if (sample(n.x, n.y) <= sample(q.x, q.y)) break
+          q = n
+        }
+      }
+    }
     if (brickShift) {
       // Half a beat along the row direction (perpendicular to the gradient).
       // All-or-nothing: leaving one stone unshifted while its neighbours move
@@ -1959,6 +1980,140 @@ function completeRowOnContour(
   return added
 }
 
+
+// Full stroke width, in mm, at every pixel of a shape.
+//
+// One width per connected component is wrong for any letter whose parts differ
+// in weight: an L's foot is narrower than its stem, so a row count divided
+// from the stem doesn't fit inside the foot and the foot comes out empty.
+// Stamping each medial-axis pixel's maximal ball back over the shape recovers
+// the width of the stroke each pixel actually belongs to.
+function localWidthField(
+  mask: Uint8Array,
+  dt: Float32Array,
+  w: number,
+  h: number,
+  pxPerMm: number,
+): Float32Array {
+  const wide = new Float32Array(w * h)
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      if (!mask[i]) continue
+      const d = dt[i]
+      if (d <= 0) continue
+      if (
+        !(d >= dt[i - 1] && d >= dt[i + 1] && d >= dt[i - w] && d >= dt[i + w] &&
+          d >= dt[i - w - 1] && d >= dt[i - w + 1] &&
+          d >= dt[i + w - 1] && d >= dt[i + w + 1])
+      )
+        continue
+      const r = Math.ceil(d)
+      const rr = d * d
+      const val = (2 * d) / pxPerMm
+      const y0 = Math.max(0, y - r)
+      const y1 = Math.min(h - 1, y + r)
+      for (let yy = y0; yy <= y1; yy++) {
+        const dy = yy - y
+        const span = Math.floor(Math.sqrt(Math.max(0, rr - dy * dy)))
+        const row = yy * w
+        const x0 = Math.max(0, x - span)
+        const x1 = Math.min(w - 1, x + span)
+        for (let xx = x0; xx <= x1; xx++) {
+          const j = row + xx
+          if (mask[j] && wide[j] < val) wide[j] = val
+        }
+      }
+    }
+  // tips no maximal ball reached: fall back to twice their own edge distance
+  for (let i = 0; i < w * h; i++)
+    if (mask[i] && wide[i] === 0) wide[i] = (2 * dt[i]) / pxPerMm
+  return wide
+}
+
+// Split a shape into regions that take the same number of fill rows, so each
+// is divided on its own width. Slivers along the transition between two
+// weights are absorbed into whichever neighbour they border most — otherwise
+// a stem-to-foot junction fragments into strips too narrow to hold a row.
+function splitByRowCount(
+  mask: Uint8Array,
+  wide: Float32Array,
+  rhythm: number,
+  minArea: number,
+  w: number,
+  h: number,
+): { regions: Uint8Array[]; widths: number[] } {
+  const kOf = new Int32Array(w * h)
+  for (let i = 0; i < w * h; i++)
+    if (mask[i]) kOf[i] = Math.max(1, Math.min(9, Math.round(wide[i] / rhythm)))
+
+  const labels = new Int32Array(w * h)
+  const members: number[][] = [[]]
+  const stack: number[] = []
+  for (let s = 0; s < w * h; s++) {
+    if (!kOf[s] || labels[s]) continue
+    const id = members.length
+    const k = kOf[s]
+    const mem: number[] = []
+    labels[s] = id
+    stack.push(s)
+    while (stack.length) {
+      const i = stack.pop() as number
+      mem.push(i)
+      const x = i % w
+      const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]
+      for (const j of nb) {
+        if (j < 0 || j >= w * h) continue
+        if (labels[j] || kOf[j] !== k) continue
+        labels[j] = id
+        stack.push(j)
+      }
+    }
+    members.push(mem)
+  }
+
+  // absorb slivers, smallest first
+  const order = members.map((_, i) => i).slice(1).sort((a, b) => members[a].length - members[b].length)
+  for (const id of order) {
+    const mem = members[id]
+    if (!mem.length || mem.length >= minArea) continue
+    const border = new Map<number, number>()
+    for (const i of mem) {
+      const x = i % w
+      for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w]) {
+        if (j < 0 || j >= w * h) continue
+        const l = labels[j]
+        if (!l || l === id) continue
+        border.set(l, (border.get(l) ?? 0) + 1)
+      }
+    }
+    let host = 0
+    let bestN = 0
+    for (const [l, n] of border)
+      if (n > bestN) {
+        bestN = n
+        host = l
+      }
+    if (!host) continue
+    for (const i of mem) labels[i] = host
+    members[host].push(...mem)
+    members[id] = []
+  }
+
+  const regions: Uint8Array[] = []
+  const widths: number[] = []
+  for (let id = 1; id < members.length; id++) {
+    const mem = members[id]
+    if (mem.length < 4) continue
+    const m = new Uint8Array(w * h)
+    for (const i of mem) m[i] = 1
+    const ws = mem.map((i) => wide[i]).sort((a, b) => a - b)
+    regions.push(m)
+    widths.push(ws[Math.floor(ws.length / 2)])
+  }
+  return { regions, widths }
+}
+
 export function fillStones(
   grid: Grid,
   holeMm: number,
@@ -1984,9 +2139,18 @@ export function fillStones(
 
   const out: Pt[] = []
   const compMask = new Uint8Array(w * h)
-  for (let lbl = 1; lbl <= count; lbl++) {
-    for (let i = 0; i < w * h; i++) compMask[i] = labels[i] === lbl ? 1 : 0
-    const spanMm = maxD[lbl] / pxPerMm - startInsetMm
+  // Divide rows on the width of the stroke a pixel actually belongs to, not
+  // on the widest point of its whole letter: the L's stem is heavier than its
+  // foot, and a division taken from the stem leaves no room inside the foot.
+  const wideField = localWidthField(mask, dt, w, h, pxPerMm)
+  // A region is worth keeping if it can hold a short run of stones. Sized to
+  // a full rhythm-square it swallows exactly the parts that most need their
+  // own division — a letter's lighter limb lands just under it and gets
+  // absorbed back into the heavier stroke it differs from.
+  const minRegionPx = (rhythm * pxPerMm) ** 2 * 0.6
+  const fillRegion = (compMask: Uint8Array, fullWmm: number) => {
+    const halfWmm = fullWmm / 2
+    const spanMm = halfWmm - startInsetMm
 
     const walkSkeleton = (m: Uint8Array) => {
       const skel = skeletonize(m, w, h)
@@ -2023,7 +2187,7 @@ export function fillStones(
       // fixed distance from each edge instead makes the two inward rows land
       // on top of each other in a medium stroke, and they knock each other
       // out — the scattered fill.
-      const fullW = 2 * (maxD[lbl] / pxPerMm)
+      const fullW = fullWmm
       let k = Math.max(1, Math.round(fullW / rhythm))
       while (k > 1 && fullW / k < idx.minDist) k--
       const sGap = fullW / k
@@ -2031,12 +2195,12 @@ export function fillStones(
         // open area: a lattice, not concentric rings
         dbg(`lattice:k${k}`, [{ x: -1, y: -1 }])
         out.push(...latticeFill(compMask, dt, grid, minPx, pitch, rhythm, idx, brick))
-        continue
+        return
       }
       dbg(`rings:k${k}:gap${sGap.toFixed(2)}`, [{ x: -1, y: -1 }])
       // depths of the interior rows, symmetric about the medial axis
       const depths: number[] = []
-      for (let i = 1; i * sGap < maxD[lbl] / pxPerMm - 0.15; i++) depths.push(i * sGap)
+      for (let i = 1; i * sGap < halfWmm - 0.15; i++) depths.push(i * sGap)
       const medial = k % 2 === 0 // even k puts one row exactly on the centre
       const levelMask = new Uint8Array(w * h)
       const inComp = (p: Pt): boolean => {
@@ -2055,10 +2219,10 @@ export function fillStones(
         let bestD = depths[di]
         for (const nudge of [0, 0.2, 0.4, 0.6, 0.8]) {
           const d = depths[di] + nudge
-          if (d > maxD[lbl] / pxPerMm) break
+          if (d > halfWmm) break
           const row = projectRowInward(
             fixedPts, dt, grid, d, pitch, idx,
-            brick && di % 2 === 0, rhythm, inComp,
+            brick && di % 2 === 0, rhythm, inComp, wideField,
           )
           if (row.length > best.length) {
             best = row
@@ -2079,6 +2243,16 @@ export function fillStones(
       }
       if (medial) walkSkeleton(compMask)
     }
+  }
+
+  for (let lbl = 1; lbl <= count; lbl++) {
+    for (let i = 0; i < w * h; i++) compMask[i] = labels[i] === lbl ? 1 : 0
+    const { regions, widths } = splitByRowCount(
+      compMask, wideField, rhythm, minRegionPx, w, h,
+    )
+    // widest first: the heavy strokes set the rhythm the lighter parts join
+    const order = regions.map((_, i) => i).sort((a, b) => widths[b] - widths[a])
+    for (const i of order) fillRegion(regions[i], widths[i])
   }
 
   // Law fill: everything placed deterministically above — no relaxation,
