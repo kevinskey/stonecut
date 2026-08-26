@@ -1408,29 +1408,51 @@ export function outlineOrSpine(
         if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
           rank.set(p, Math.max(rank.get(p) ?? 0, r))
     }
-    // Judge against the spacing the letter ACTUALLY realises, not the nominal
-    // rhythm. The run divider stretches its beat to fit each span, so a letter
-    // asked for 4.2mm may settle at 4.44mm — and a 3.91mm pair, plainly tight
-    // to the eye beside its neighbours, clears a threshold derived from 4.2.
-    const nn: number[] = []
+    // Judge each stone against ITS OWN neighbourhood, not the design.
+    //
+    // A design-wide bar punishes any run legitimately denser than the average:
+    // an E's top and bottom rows sit at 4.3mm while the design median is
+    // 4.88mm, so a 0.93x-of-median threshold called EVERY pair in those rows
+    // crowded and dropped alternate stones — turning a 4.3mm row into an 8.6mm
+    // one. 19% of the design disappeared that way.
+    //
+    // A stone is crowded only when its nearest neighbour is much closer than
+    // its NEXT one. That is scale-free: an evenly spaced run has both
+    // distances equal and is never touched, while a real intruder sits far
+    // closer than the run's own spacing.
+    const nnAll: number[] = []
     for (const a of out) {
       let m = Infinity
       for (const b of out) {
         if (a === b) continue
-        const dd = Math.hypot(a.x - b.x, a.y - b.y)
-        if (dd < m) m = dd
+        const d = Math.hypot(a.x - b.x, a.y - b.y)
+        if (d < m) m = d
       }
-      if (Number.isFinite(m)) nn.push(m)
+      if (Number.isFinite(m)) nnAll.push(m)
     }
-    nn.sort((a, b) => a - b)
-    const realised = nn.length ? nn[Math.floor(nn.length / 2)] : rhythm
-    const tooClose = Math.max(rhythm, realised) * 0.93
+    nnAll.sort((a, b) => a - b)
+    const realised = nnAll.length ? nnAll[Math.floor(nnAll.length / 2)] : rhythm
+    const nnTwo = (p: Pt) => {
+      let d1 = Infinity
+      let d2 = Infinity
+      for (const q of out) {
+        if (q === p) continue
+        const d = Math.hypot(p.x - q.x, p.y - q.y)
+        if (d < d1) {
+          d2 = d1
+          d1 = d
+        } else if (d < d2) d2 = d
+      }
+      return { d1, d2 }
+    }
     const dropped = new Set<Pt>()
     for (let i = 0; i < out.length; i++) {
       if (dropped.has(out[i])) continue
+      const a2 = nnTwo(out[i])
+      if (!(a2.d1 < a2.d2 * 0.75)) continue // evenly spaced: leave it alone
       for (let j = i + 1; j < out.length; j++) {
         if (dropped.has(out[j])) continue
-        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) >= tooClose) continue
+        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) > a2.d1 + 1e-6) continue
         const ri = rank.get(out[i]) ?? 0
         const rj = rank.get(out[j]) ?? 0
         if (ri < rj) {
