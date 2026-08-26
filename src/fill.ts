@@ -948,9 +948,25 @@ function placeContourEdges(
         const got = placeBetweenAnchors(path, aArc, rawEnd, minSp, pitch, idx, inside, bestR, Lc)
         dbg('edge', got)
         out.push(...got)
+      } else if (uAnch || vAnch) {
+        // Anchored at one end: divide the free stretch EVENLY from that
+        // anchor. Starting one minimum-offset away and then marching at the
+        // target puts a floor-width gap right beside an oversized one at
+        // every corner where a wall meets a banned zone — the tops of a K, a
+        // V, an N, which is where the eye lands first.
+        const u2 = uAnch ? aArc : iv.u
+        const v2 = vAnch ? rawEnd : iv.v
+        if (v2 - u2 > 0.3) {
+          const got = placeBetweenAnchors(
+            path, u2, v2, minSp, pitch, idx, inside, bestR,
+            chordLength(path, u2, v2, target),
+          )
+          dbg('edge', got)
+          out.push(...got)
+        }
       } else {
-        const u = uAnch ? aArc + minSp : iv.u
-        const v = vAnch ? rawEnd - minSp : iv.v
+        const u = iv.u
+        const v = iv.v
         if (v - u > 0.3) {
           const got = placeRun(path, u, v, pitch, idx, inside, target)
           dbg('edge', got)
