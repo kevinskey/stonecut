@@ -1423,6 +1423,71 @@ export function outlineOrSpine(
     }
   }
 
+  // FILL BARE CONTOUR. Stretches of outline can end up with no stone on them
+  // at all: a notch too narrow for a stone inset from each wall falls between
+  // the wall placer (which needs room for two) and the detail-line machinery
+  // (which never sees it, because the channel it belongs to opens outward and
+  // reads as exterior). The outline then visibly stops and restarts — an E's
+  // middle-arm notch, a K's arm junctions.
+  //
+  // This only ADDS, and only where a legal position exists: inset from the
+  // edge, inside the shape, and clear of every stone already placed. It cannot
+  // move or remove anything.
+  {
+    const step = 1
+    const inset = holeMm / 2 + 0.1
+    const covered = rhythm * 0.95
+    const added: Pt[] = []
+    for (const ct of contours) {
+      // walk the contour, collecting runs with nothing near them
+      const samples: { p: Pt; nx: number; ny: number }[] = []
+      for (let k = 0; k < ct.length; k++) {
+        const a = ct[k]
+        const b = ct[(k + 1) % ct.length]
+        const L = Math.hypot(b.x - a.x, b.y - a.y)
+        if (L < 1e-9) continue
+        const nx = -(b.y - a.y) / L
+        const ny = (b.x - a.x) / L
+        for (let t = 0; t < L; t += step)
+          samples.push({ p: { x: a.x + ((b.x - a.x) * t) / L, y: a.y + ((b.y - a.y) * t) / L }, nx, ny })
+      }
+      let run: typeof samples = []
+      const flush = () => {
+        if (run.length >= Math.round(rhythm)) {
+          const n = Math.max(1, Math.round((run.length * step) / rhythm) - 1)
+          for (let i = 1; i <= n; i++) {
+            const s = run[Math.round((i * run.length) / (n + 1))]
+            if (!s) continue
+            for (const sgn of [1, -1]) {
+              const q = { x: s.p.x + s.nx * inset * sgn, y: s.p.y + s.ny * inset * sgn }
+              if (!insideTest(q)) continue
+              if (!idx.canPlace(q)) continue
+              if (added.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < pitch - 1e-6)) continue
+              idx.add(q)
+              added.push(q)
+              break
+            }
+          }
+        }
+        run = []
+      }
+      for (const s of samples) {
+        let m = Infinity
+        for (const o of out) {
+          const dd = Math.hypot(s.p.x - o.x, s.p.y - o.y)
+          if (dd < m) m = dd
+        }
+        if (m > covered) run.push(s)
+        else flush()
+      }
+      flush()
+    }
+    if (added.length) {
+      dbg('patch', added)
+      out.push(...added)
+    }
+  }
+
   // NOTHING DELETES STONES AFTER PLACEMENT.
   //
   // There used to be a pass here that dropped "crowded" pairs and then healed
