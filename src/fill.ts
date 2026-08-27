@@ -881,6 +881,50 @@ interface ContourInfo {
 }
 
 // Phase 0: detect corners on a contour — no stones placed yet.
+
+/**
+ * Drop contour detail finer than a stone.
+ *
+ * A notch or step smaller than the stone cannot be represented by stones at
+ * all, so tracing it only makes the row jog sideways and then come back — a
+ * straight stem picks up a visible kink where the letterform has a small step.
+ * Douglas-Peucker at a third of the hole diameter removes those while leaving
+ * every corner the eye actually reads.
+ */
+function simplifyContour(poly: Pt[], tol: number): Pt[] {
+  if (poly.length < 4) return poly
+  const keep = new Uint8Array(poly.length)
+  keep[0] = 1
+  keep[poly.length - 1] = 1
+  const stack: [number, number][] = [[0, poly.length - 1]]
+  while (stack.length) {
+    const [a, b] = stack.pop() as [number, number]
+    const pa = poly[a]
+    const pb = poly[b]
+    const L = Math.hypot(pb.x - pa.x, pb.y - pa.y)
+    let worst = -1
+    let wi = -1
+    for (let i = a + 1; i < b; i++) {
+      const p = poly[i]
+      const d =
+        L < 1e-9
+          ? Math.hypot(p.x - pa.x, p.y - pa.y)
+          : Math.abs((pb.x - pa.x) * (pa.y - p.y) - (pa.x - p.x) * (pb.y - pa.y)) / L
+      if (d > worst) {
+        worst = d
+        wi = i
+      }
+    }
+    if (worst > tol && wi > 0) {
+      keep[wi] = 1
+      stack.push([a, wi], [wi, b])
+    }
+  }
+  const out: Pt[] = []
+  for (let i = 0; i < poly.length; i++) if (keep[i]) out.push(poly[i])
+  return out.length >= 3 ? out : poly
+}
+
 function analyzeContour(poly: Pt[], pitch: number, rhythm?: number): ContourInfo {
   const target = rhythm ?? pitch * 1.15
   const path = makePath(poly, true)
@@ -1595,7 +1639,9 @@ export function outlineOrSpine(
   wallContours.sort((a, b) => b.length - a.length)
   // corners FIRST across the entire design, then edges — corner anchors
   // never lose their spot to an edge stone from a neighboring contour
-  const contourInfos = wallContours.map((c) => analyzeContour(c, pitch, rhythm))
+  const contourInfos = wallContours.map((c) =>
+    analyzeContour(simplifyContour(c, holeMm / 6), pitch, rhythm),
+  )
   // MERGE THE SHAPES before stoning. Glyphs are drawn as overlapping
   // contours, so a contour can run straight through the interior of the
   // merged silhouette (an E's middle-arm bar crossing the stem). Stones
