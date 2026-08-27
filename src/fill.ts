@@ -115,21 +115,64 @@ export function rasterizeContours(contours: Pt[][], pxPerMm = 6, padMm = 0): Gri
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d')!
-  const path = new Path2D()
-  for (const c of contours) {
-    if (c.length < 3) continue
-    path.moveTo(c[0].x * pxPerMm + pad, c[0].y * pxPerMm + pad)
-    for (let i = 1; i < c.length; i++) path.lineTo(c[i].x * pxPerMm + pad, c[i].y * pxPerMm + pad)
-    path.closePath()
+  // A counter is a contour that sits INSIDE another one; overlapping shapes do
+  // not. That distinction is what the fill rule cannot express on its own.
+  //
+  // Even-odd alone punches a phantom hole wherever two same-winding contours
+  // overlap — an E drawn as a C-shape plus a separate middle-arm bar lost 78mm^2
+  // out of its middle, and the outline traced the hole. Nonzero alone fills a
+  // real counter whenever its loop happens to be wound the same way as its
+  // outer, which is how Google Sans draws a lowercase e: one self-intersecting
+  // contour, 41 grid points that nonzero calls solid and even-odd calls a hole.
+  // Stones then landed inside the counter.
+  //
+  // So: union everything that is not contained, then subtract the contained
+  // ones. Overlaps merge, counters stay holes, whichever way they are wound.
+  const polys = contours.filter((c) => c.length >= 3)
+  const pathOf = (c: Pt[]) => {
+    const p = new Path2D()
+    p.moveTo(c[0].x * pxPerMm + pad, c[0].y * pxPerMm + pad)
+    for (let i = 1; i < c.length; i++) p.lineTo(c[i].x * pxPerMm + pad, c[i].y * pxPerMm + pad)
+    p.closePath()
+    return p
   }
+  const box = polys.map((c) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    for (const p of c) {
+      x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y)
+      x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y)
+    }
+    return { x0, y0, x1, y1 }
+  })
+  // even-odd point test, so a self-intersecting outline reports its own hole
+  const insidePoly = (c: Pt[], q: Pt) => {
+    let inside = false
+    for (let i = 0, k = c.length - 1; i < c.length; k = i++) {
+      const a = c[i]
+      const b = c[k]
+      if ((a.y > q.y) !== (b.y > q.y) && q.x < a.x + ((b.x - a.x) * (q.y - a.y)) / (b.y - a.y))
+        inside = !inside
+    }
+    return inside
+  }
+  const contained = polys.map((c, i) =>
+    polys.some((o, j) => {
+      if (i === j) return false
+      if (box[i].x0 < box[j].x0 || box[i].x1 > box[j].x1) return false
+      if (box[i].y0 < box[j].y0 || box[i].y1 > box[j].y1) return false
+      // a vertex of i, and its centroid, both inside j
+      const cx = c.reduce((s, p) => s + p.x, 0) / c.length
+      const cy = c.reduce((s, p) => s + p.y, 0) / c.length
+      return insidePoly(o, c[0]) && insidePoly(o, { x: cx, y: cy })
+    }),
+  )
   ctx.fillStyle = '#000'
-  // NONZERO, not even-odd. Glyphs are routinely drawn as overlapping
-  // same-winding contours (an E as a C-shape plus a separate middle-arm bar).
-  // Even-odd treats the overlap as 'inside twice = outside' and punches a
-  // phantom hole — measured 78mm^2 inside each E, which the outline then
-  // traced. Real counters (O, B, A) are wound the opposite way, so nonzero
-  // still makes those holes correctly.
-  ctx.fill(path, 'nonzero')
+  for (let i = 0; i < polys.length; i++)
+    if (!contained[i]) ctx.fill(pathOf(polys[i]), 'evenodd')
+  ctx.globalCompositeOperation = 'destination-out'
+  for (let i = 0; i < polys.length; i++)
+    if (contained[i]) ctx.fill(pathOf(polys[i]), 'evenodd')
+  ctx.globalCompositeOperation = 'source-over'
   const data = ctx.getImageData(0, 0, w, h).data
   const bin = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) bin[i] = data[i * 4 + 3] > 127 ? 1 : 0
@@ -1222,6 +1265,38 @@ export function outlineOrSpine(
         tightMask[i] =
           inv[i] && dtInv[i] > 0.5 && (2 * dtInv[i]) / pxPerMm < pitch * 1.95 ? 1 : 0
       }
+    // A COUNTER IS A HOLE — outline it, never thread it. The detail-line
+    // machinery exists for a narrow channel that opens outward (an E's notch
+    // between its arms). An enclosed counter is not that: putting a centre
+    // line through it drops stones inside the hole, which is what filled the
+    // middle of a lowercase e. Flood the outside; whatever the flood cannot
+    // reach is a counter.
+    const reachable = new Uint8Array(w * h)
+    {
+      const stack: number[] = []
+      const push = (i: number) => {
+        if (!reachable[i] && inv[i]) {
+          reachable[i] = 1
+          stack.push(i)
+        }
+      }
+      for (let x = 0; x < w; x++) {
+        push(x)
+        push((h - 1) * w + x)
+      }
+      for (let y = 0; y < h; y++) {
+        push(y * w)
+        push(y * w + w - 1)
+      }
+      while (stack.length) {
+        const i = stack.pop() as number
+        const x = i % w
+        if (x > 0) push(i - 1)
+        if (x < w - 1) push(i + 1)
+        if (i >= w) push(i - w)
+        if (i < w * (h - 1)) push(i + w)
+      }
+    }
     const ch = labelComponents(tightMask, w, h)
     if (ch.count) {
       // one pass: which letter(s) flank each channel + px membership
@@ -1253,6 +1328,9 @@ export function outlineOrSpine(
         // a detail line lives INSIDE one letter; letter-to-letter gaps have
         // two flanking letters and are left alone
         if (multi[lbl] || !flank[lbl] || px.length < 6) continue
+        // enclosed by the letter on every side: a counter, so leave it to the
+        // wall placer to outline
+        if (!px.some((i) => reachable[i])) continue
         // reject clamp-border corner pockets: a REAL valley touching the
         // border (M baseline mouth) has letter on BOTH sides along it; the
         // pocket outside a rounded corner has letter on one side only
