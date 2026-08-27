@@ -1172,9 +1172,13 @@ export function outlineOrSpine(
   // legal but sit at the bare minimum — holes nearly touching, with a
   // fragile strip of template between them down the whole stroke. Below
   // 1.5x pitch a single centred spine is both cleaner and stronger.
-  const isNarrow = (lbl: number) =>
-    style === 'centerline' ||
-    (style === 'auto' && lbl > 0 && 2 * (typicalHalf[lbl] / pxPerMm) < pitch * 1.5)
+  // Whole-letter narrowness is only an explicit choice now. Deciding it
+  // automatically from ONE median stroke width per component cannot describe a
+  // high-contrast face: Playfair's hairlines genuinely cannot hold two wall
+  // rows while its stems easily can, and judging the letter as a whole drew
+  // 51% of a word as skeleton centrelines. Thin PARTS are handled below.
+  const isNarrow = (lbl: number) => style === 'centerline' && lbl > 0
+  void typicalHalf
 
   const out: Pt[] = []
   const narrowLbls = new Set<number>()
@@ -1379,6 +1383,85 @@ export function outlineOrSpine(
         }
       }
     }
+  }
+
+  // THIN PARTS GET A CENTRE LINE; the rest of the letter keeps its walls.
+  //
+  // Two wall rows need the stroke wide enough that a stone on one wall clears a
+  // stone on the other: their centres sit (W - hole - 0.2) apart and that has
+  // to reach the rhythm. Below it the walls collide and the stroke fills with
+  // interleaved junk. Decided per PART, because a serif letter is thin and
+  // thick at once.
+  const spinedMask = new Uint8Array(w * h)
+  {
+    const needW = holeMm + 0.2 + rhythm
+    const wide = new Float32Array(w * h)
+    for (let y = 1; y < h - 1; y++)
+      for (let x = 1; x < w - 1; x++) {
+        const i2 = y * w + x
+        if (!labels[i2]) continue
+        const dv = dt[i2]
+        if (dv <= 0) continue
+        if (
+          !(dv >= dt[i2 - 1] && dv >= dt[i2 + 1] && dv >= dt[i2 - w] && dv >= dt[i2 + w] &&
+            dv >= dt[i2 - w - 1] && dv >= dt[i2 - w + 1] &&
+            dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
+        )
+          continue
+        const rr = dv * dv
+        const val = (2 * dv) / pxPerMm
+        const r0 = Math.ceil(dv)
+        for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
+          const dy2 = yy - y
+          const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
+          const row = yy * w
+          for (let xx = Math.max(0, x - sp2); xx <= Math.min(w - 1, x + sp2); xx++)
+            if (labels[row + xx] && wide[row + xx] < val) wide[row + xx] = val
+        }
+      }
+    const thin = new Uint8Array(w * h)
+    for (let i2 = 0; i2 < w * h; i2++)
+      thin[i2] = labels[i2] && wide[i2] > 0 && wide[i2] < needW ? 1 : 0
+    const tp = labelComponents(thin, w, h)
+    if (tp.count) {
+      const area = new Int32Array(tp.count + 1)
+      for (let i2 = 0; i2 < w * h; i2++) if (tp.labels[i2]) area[tp.labels[i2]]++
+      const minArea = (rhythm * pxPerMm) ** 2 * 0.5
+      const part = new Uint8Array(w * h)
+      for (let r2 = 1; r2 <= tp.count; r2++) {
+        if (area[r2] < minArea) continue
+        for (let i2 = 0; i2 < w * h; i2++) part[i2] = tp.labels[i2] === r2 ? 1 : 0
+        const skel = skeletonize(part, w, h)
+        const paths = traceSkeleton(skel, w, h)
+          .map((p) => smoothPath(p, 3).map(toMm))
+          .sort((a, b) => b.length - a.length)
+        let placedAny = false
+        for (const pth of paths) {
+          let len = 0
+          for (let k = 1; k < pth.length; k++)
+            len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+          // a spine is a LINE; skeleton spurs at junctions are not
+          if (len < rhythm * 1.6) continue
+          const got = placeOpenEven(pth, pitch, idx, rhythm)
+          if (got.length) {
+            dbg('partspine', got)
+            out.push(...got)
+            placedAny = true
+          }
+        }
+        if (placedAny) for (let i2 = 0; i2 < w * h; i2++) if (part[i2]) spinedMask[i2] = 1
+      }
+    }
+  }
+  {
+    const prev = bannedTest
+    const inSpined = (p: Pt): boolean => {
+      const px2 = Math.round(p.x * pxPerMm + padPx)
+      const py2 = Math.round(p.y * pxPerMm + padPx)
+      if (px2 < 0 || py2 < 0 || px2 >= w || py2 >= h) return false
+      return spinedMask[py2 * w + px2] === 1
+    }
+    bannedTest = prev ? (p: Pt) => prev(p) || inSpined(p) : inSpined
   }
 
   // interior test for the dip-inward fallback: hole must stay in material
