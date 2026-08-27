@@ -243,6 +243,7 @@ export default function App() {
         const rhythm = hole + gap
         const idx = new SpacingIndex(hole + hardGap)
         const pts: { x: number; y: number; size?: string; color?: string }[] = []
+        let noFill = false
         const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
         const req = echoRequirement(grid, hole + hardGap, rhythm)
         setCanEcho(req.feasible)
@@ -287,11 +288,27 @@ export default function App() {
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
-          if (!f.length && textMode === 'both')
-            setStatus(
-              'Strokes too light to fill at this size — raise Height, pick a bolder font, or lower Fill "From edge" / fill stone size',
-            )
+          if (!f.length && textMode === 'both') noFill = true
         }
+        // Recompute the advisory EVERY run, including clearing it. Setting it
+        // only when a condition holds leaves the previous design's warning on
+        // screen — GLEE was reporting abcdefg's centre lines.
+        //
+        // Say when a letter is too light to outline: below about
+        // hole + spacing + hole across a stroke, two wall rows cannot both fit
+        // and it is drawn as a single centre line instead. Geometry allows
+        // nothing else, but switching silently reads as a bug — lowercase at
+        // 50mm with SS10 comes out half centre lines.
+        const spines = debugStones.filter((s) => s.cat === 'partspine').length
+        const spinePct = debugStones.length ? spines / debugStones.length : 0
+        setStatus(
+          noFill
+            ? 'Strokes too light to fill at this size — raise Height, pick a bolder font, or lower Fill "From edge" / fill stone size'
+            : spinePct > 0.25 && textMode !== 'fill'
+              ? `${Math.round(spinePct * 100)}% of this design is too light to outline at this size — ` +
+                'those strokes are drawn as a single centre line. Raise Height or pick a smaller stone.'
+              : '',
+        )
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
         ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ ...s, chords: [...s.chords] }))
