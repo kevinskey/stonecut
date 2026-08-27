@@ -545,7 +545,7 @@ function tryEvenLayout(
 ): Pt[] | null {
   const L = bArc - aArc
   if (L <= 1e-9) return null
-  const minSep = rhythm * 0.93
+  const wantSep = rhythm * 0.93
   const tangentAt = (s: number) => {
     const e = Math.min(0.5, Math.max(0.05, L / 20))
     const p0 = pointAt(path, Math.max(0, s - e))
@@ -557,7 +557,14 @@ function tryEvenLayout(
   }
   // Crowding is stones too close ALONG a run. Two rows running parallel — a
   // stroke's two walls — are normal and often closer than a rhythm.
-  const fits = (pts: Pt[], arcs: number[]) => {
+  // Never demand more clearance than the layout itself provides. A span
+  // shorter than two beats divides into gaps smaller than the rhythm — an E
+  // arm's end cap is 8.5mm, so its one stone sits 4.25mm from each corner —
+  // and judging that against a rhythm-width bar would reject the only correct
+  // answer. The bar is for FOREIGN stones intruding on a run, never for the
+  // run's own even spacing.
+  const fits = (pts: Pt[], arcs: number[], sp: number) => {
+    const minSep = Math.min(wantSep, sp)
     for (let i = 0; i < pts.length; i++) {
       if (!idx.canPlace(pts[i])) return false
       const t = tangentAt(arcs[i])
@@ -590,7 +597,7 @@ function tryEvenLayout(
     if (includeEnds) for (let i = 0; i < m; i++) arcs.push(aArc + i * sp)
     else for (let i = 1; i <= m; i++) arcs.push(aArc + i * sp)
     const pts = arcs.map((s) => pointAt(path, s))
-    if (!fits(pts, arcs)) continue
+    if (!fits(pts, arcs, sp)) continue
     for (const p of pts) idx.add(p)
     return pts
   }
@@ -1389,104 +1396,19 @@ export function outlineOrSpine(
     }
   }
 
-  // NO CROWDED PAIRS. Corners, spines, detail lines and wall runs are placed
-  // by different mechanisms; where two of them meet, only the hard spacing
-  // floor keeps their stones apart, so a sharp apex or a spine-to-wall
-  // junction ends up with stones a floor-width apart while the rest of the
-  // letter runs at the rhythm. A cluster at a vertex reads as a mistake --
-  // better to drop the crowder and carry a slightly wider gap.
+  // NOTHING DELETES STONES AFTER PLACEMENT.
   //
-  // Anchors win: a corner defines the letter's shape and never moves. Between
-  // equals the later stone goes, since the earlier one is already spaced
-  // against everything before it.
-  {
-    let kept = out
-    const rank = new Map<Pt, number>()
-    for (const s of debugStones) {
-      const r = s.cat.startsWith('corner') ? 3 : s.cat.startsWith('line') ? 2 : s.cat.startsWith('spine') ? 1 : 0
-      for (const p of out)
-        if (Math.abs(p.x - s.x) < 1e-9 && Math.abs(p.y - s.y) < 1e-9)
-          rank.set(p, Math.max(rank.get(p) ?? 0, r))
-    }
-    // Crowding has a physical definition: a pair JAMMED at the spacing floor
-    // while the rest of the design runs at a rhythm. Nothing else is crowding.
-    //
-    // Two softer rules failed here. A design-wide median punished any run
-    // legitimately denser than average — GLEE's E rows at 4.3mm against a
-    // 4.88mm median lost every other stone, 19% of the design. Comparing a
-    // stone's nearest neighbour to its SECOND nearest failed too: at the end
-    // of a run the second nearest is a diagonal stone on another edge, so a
-    // perfectly-spaced 4.89mm pair was judged against 6.86mm and dropped,
-    // punching the hole in the E's middle arm.
-    //
-    // The floor is the one distance that means something absolute: stones that
-    // close are touching the minimum the index allows, which only happens when
-    // two different runs collide at a junction.
-    const tooClose = pitch * 1.02
-    const nnAll: number[] = []
-    for (const a of out) {
-      let m = Infinity
-      for (const b of out) {
-        if (a === b) continue
-        const d = Math.hypot(a.x - b.x, a.y - b.y)
-        if (d < m) m = d
-      }
-      if (Number.isFinite(m)) nnAll.push(m)
-    }
-    nnAll.sort((a, b) => a - b)
-    const realised = nnAll.length ? nnAll[Math.floor(nnAll.length / 2)] : rhythm
-    const dropped = new Set<Pt>()
-    for (let i = 0; i < out.length; i++) {
-      if (dropped.has(out[i])) continue
-      for (let j = i + 1; j < out.length; j++) {
-        if (dropped.has(out[j])) continue
-        if (Math.hypot(out[i].x - out[j].x, out[i].y - out[j].y) >= tooClose) continue
-        const ri = rank.get(out[i]) ?? 0
-        const rj = rank.get(out[j]) ?? 0
-        if (ri < rj) {
-          dropped.add(out[i])
-          break
-        }
-        dropped.add(out[j])
-      }
-    }
-    if (dropped.size) kept = kept.filter((p) => !dropped.has(p))
+  // There used to be a pass here that dropped "crowded" pairs and then healed
+  // the gaps it made. Three definitions of crowded were tried and every one
+  // deleted correctly-placed stones: against the design median it removed 19%
+  // of a word, against a stone's second-nearest neighbour it punched a hole in
+  // an E's middle arm, and against the spacing floor it emptied every arm's
+  // end cap and left the ends reading open. Each fix exposed the next.
+  //
+  // Crowding is prevented where it happens instead: divideSpan re-divides a
+  // span when a stone would land too near a foreign one, so a junction ends up
+  // with fewer, evenly spaced stones rather than a jammed pair to clean up.
 
-    // RESPACE, don't just remove. Dropping a crowder leaves its gap at double
-    // width, which reads as an inconsistent edge — an N whose stem carries an
-    // even run and then a hole. Heal a double gap by putting a stone back in
-    // the middle of it.
-    //
-    // The midpoint is only valid if it lies ON the same edge: two stones on
-    // one wall have a midpoint at the same depth from the outline, while two
-    // on OPPOSITE walls of a stroke have a midpoint out at the medial axis.
-    // Depth is what tells them apart.
-    const depthAt = (q: Pt) => {
-      const xi = Math.round(q.x * pxPerMm + padPx)
-      const yi = Math.round(q.y * pxPerMm + padPx)
-      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return -1
-      return dt[yi * w + xi] / pxPerMm
-    }
-    const wantDepth = holeMm / 2 + 0.1
-    const healed: Pt[] = []
-    for (let i = 0; i < kept.length; i++)
-      for (let j = i + 1; j < kept.length; j++) {
-        const gap = Math.hypot(kept[i].x - kept[j].x, kept[i].y - kept[j].y)
-        if (gap < realised * 1.55 || gap > realised * 2.6) continue
-        const m = { x: (kept[i].x + kept[j].x) / 2, y: (kept[i].y + kept[j].y) / 2 }
-        const dep = depthAt(m)
-        if (dep < 0 || Math.abs(dep - wantDepth) > 0.6) continue
-        if (!idx.canPlace(m)) continue
-        if (healed.some((q) => Math.hypot(q.x - m.x, q.y - m.y) < realised * 0.93)) continue
-        idx.add(m)
-        healed.push(m)
-      }
-    if (healed.length) {
-      dbg('heal', healed)
-      kept.push(...healed)
-    }
-    return kept
-  }
   return out
 }
 
