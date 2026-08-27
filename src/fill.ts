@@ -1419,7 +1419,11 @@ export function outlineOrSpine(
       const paths = traceSkeleton(skel, w, h)
         .map((p) => smoothPath(p).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths) out.push(...placeOpenEven(p, pitch, idx, rhythm))
+      for (const p of paths) {
+        const got = placeOpenEven(p, pitch, idx, rhythm)
+        dbg('narrowspine', got)
+        out.push(...got)
+      }
     }
   }
 
