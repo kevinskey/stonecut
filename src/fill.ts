@@ -676,6 +676,18 @@ function placeBetweenAnchors(
     const even = tryEvenLayout(path, aArc, bArc, false, pitch, r, idx)
     if (even) return even
   }
+  {
+    // A sharp corner demands its neighbours keep an offset. Making the WHOLE
+    // span re-divide to honour that collapses the count -- a 35mm span wanting
+    // 6 stones dropped to 3, an 8.75mm rhythm against the letter's 4.8mm, and
+    // the run read as half empty. Inset the span by the offset and divide THAT
+    // evenly instead: the ends sit exactly where the corner allows and the
+    // interior keeps the beat.
+    if (minSp > 0 && bArc - aArc > 2 * minSp + pitch) {
+      const even2 = tryEvenLayout(path, aArc + minSp, bArc - minSp, true, pitch, r, idx)
+      if (even2) return even2
+    }
+  }
   const Lc = chordE ?? E
   const aPt = pointAt(path, aArc)
   const bPt = pointAt(path, bArc)
