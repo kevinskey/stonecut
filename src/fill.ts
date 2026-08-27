@@ -907,7 +907,8 @@ function placeContourCorners(
   banned?: (p: Pt) => boolean,
   rhythm?: number,
 ) {
-  const target = rhythm ?? pitch * 1.15
+  void rhythm
+  void pitch
   if (info.fallback || !info.path) return
   for (const cn of info.corners) {
     if (banned?.(cn.apex)) continue
@@ -916,6 +917,29 @@ function placeContourCorners(
     out.push(cn.apex)
     dbg('corner', [cn.apex])
   }
+}
+
+/**
+ * Tip spines: a short run in along the bisector of a sharp convex corner, so a
+ * narrow tip reads as filled rather than as a single point.
+ *
+ * Placed AFTER every wall, deliberately. Run before them it cannot see what is
+ * coming, and at a sharp corner the walls then arrive one beat along each edge
+ * and land a floor-width from it — corner, tip spine and first wall stone in a
+ * knot, which is what a V's apex and top corners looked like. Placed last it
+ * simply declines where there is no room.
+ */
+function placeContourTipSpines(
+  info: ContourInfo,
+  pitch: number,
+  idx: SpacingIndex,
+  out: Pt[],
+  banned?: (p: Pt) => boolean,
+  rhythm?: number,
+) {
+  const target = rhythm ?? pitch * 1.15
+  void banned
+  if (info.fallback || !info.path) return
   // tip spines at sharp convex corners
   for (const cn of info.corners) {
     if (cn.alpha > 1.31) continue
@@ -931,6 +955,8 @@ function placeContourCorners(
     for (let s = target * 1.02; s * halfSin < target * 0.95 && s < target * 6.3; s += target * 1.02) {
       const p = { x: cn.apex.x + bis.x * s, y: cn.apex.y + bis.y * s }
       if (!pointInPoly(info.poly, p)) break
+      // clear the RHYTHM from the walls, not merely the floor
+      if (idx.within(p, target * 0.93).length) continue
       if (idx.canPlace(p)) {
         idx.add(p)
         out.push(p)
@@ -1383,6 +1409,7 @@ export function outlineOrSpine(
     : interiorTest
   for (const info of contourInfos) placeContourCorners(info, pitch, idx, out, gate, rhythm)
   for (const info of contourInfos) placeContourEdges(info, pitch, idx, out, insideTest, gate, rhythm, uniformRhythm)
+  for (const info of contourInfos) placeContourTipSpines(info, pitch, idx, out, gate, rhythm)
 
   if (narrowLbls.size) {
     const compMask = new Uint8Array(w * h)
@@ -1543,6 +1570,7 @@ export function offsetRows(
     const info = analyzeContour(ring, pitch, rhythmMm)
     placeContourCorners(info, pitch, idx, out, undefined, rhythmMm)
     placeContourEdges(info, pitch, idx, out, undefined, undefined, rhythmMm, uniform)
+    placeContourTipSpines(info, pitch, idx, out, undefined, rhythmMm)
   }
   return out
 }
