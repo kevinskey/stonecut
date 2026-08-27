@@ -90,6 +90,14 @@ export class SpacingIndex {
       }
     return hit
   }
+  /** Take a stone back out — used when a pass places one and then finds it
+   *  illegal, so the space is not left reserved. */
+  remove(p: Pt) {
+    const b = this.map.get(this.key(Math.floor(p.x / this.cell), Math.floor(p.y / this.cell)))
+    if (!b) return
+    const i = b.findIndex((o) => Math.abs(o.x - p.x) < 1e-9 && Math.abs(o.y - p.y) < 1e-9)
+    if (i >= 0) b.splice(i, 1)
+  }
   add(p: Pt, r: number = this.defaultR) {
     const k = this.key(Math.floor(p.x / this.cell), Math.floor(p.y / this.cell))
     const e = { x: p.x, y: p.y, r }
@@ -1044,7 +1052,10 @@ function placeContourEdges(
 ) {
   const target = rhythm ?? pitch * 1.15
   if (info.fallback || !info.path) {
-    out.push(...walkPoly(info.poly, true, pitch, idx))
+    // no usable corner analysis: walk the loop at an even division
+    const got = walkPoly(info.poly, true, pitch, idx)
+    dbg('loop', got)
+    out.push(...got)
     return
   }
   const path = info.path
@@ -1526,7 +1537,21 @@ export function outlineOrSpine(
             len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
           // a spine is a LINE; skeleton spurs at junctions are not
           if (len < rhythm * 1.6) continue
-          const got = placeOpenEven(pth, pitch, idx, rhythm)
+          // A skeleton runs out to the boundary at a stroke's end, so its last
+          // stones land ON the edge — measured at 0.05mm from the contour,
+          // half the stone hanging off the letter. Every stone has to sit at
+          // least its own radius inside, the same rule as everywhere else.
+          const deep = (q: Pt) => {
+            const xi = Math.round(q.x * pxPerMm + padPx)
+            const yi = Math.round(q.y * pxPerMm + padPx)
+            if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+            return dt[yi * w + xi] / pxPerMm >= holeMm / 2 + 0.1
+          }
+          const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+            if (deep(q)) return true
+            idx.remove(q)
+            return false
+          })
           if (got.length) {
             dbg('partspine', got)
             out.push(...got)
