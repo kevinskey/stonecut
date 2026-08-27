@@ -1394,7 +1394,13 @@ export function outlineOrSpine(
   // thick at once.
   const spinedMask = new Uint8Array(w * h)
   {
-    const needW = holeMm + 0.2 + rhythm
+    // Spine only where two rows CANNOT fit, not merely where they would be
+    // tighter than the rhythm. A lowercase e's bar is about 8mm: its two wall
+    // rows would sit 4.4mm apart, above the floor, so it should be outlined.
+    // Judging it against the rhythm instead sent it to a centre line and put
+    // stones down the middle of the bar while its own outline stayed bare --
+    // which reads as extra interior holes in outline mode.
+    const needW = holeMm + 0.2 + pitch
     const wide = new Float32Array(w * h)
     for (let y = 1; y < h - 1; y++)
       for (let x = 1; x < w - 1; x++) {
