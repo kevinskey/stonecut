@@ -1737,6 +1737,26 @@ export function outlineOrSpine(
               if (!insideTest(q)) continue
               if (!idx.canPlace(q)) continue
               if (added.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < pitch - 1e-6)) continue
+              // A patch must land ON the line of the stones around it. Inset
+              // from a short wall beside a junction it lands beside the line
+              // instead — an E's stem column runs at x=9.43 and its patch sat
+              // at 7.63, reading as a stone knocked out of the row. Filling a
+              // gap is the job; making a jog is not.
+              {
+                const near = out
+                  .map((o) => ({ o, d: Math.hypot(o.x - q.x, o.y - q.y) }))
+                  .sort((m, n) => m.d - n.d)
+                  .slice(0, 2)
+                if (near.length === 2) {
+                  const [a2, b2] = [near[0].o, near[1].o]
+                  const L2 = Math.hypot(b2.x - a2.x, b2.y - a2.y)
+                  const off =
+                    L2 < 1e-9
+                      ? Infinity
+                      : Math.abs((b2.x - a2.x) * (a2.y - q.y) - (a2.x - q.x) * (b2.y - a2.y)) / L2
+                  if (off > 1.2) continue
+                }
+              }
               idx.add(q)
               added.push(q)
               break
