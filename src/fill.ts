@@ -1707,7 +1707,27 @@ export function outlineOrSpine(
       }
       let run: typeof samples = []
       const flush = () => {
-        if (run.length >= Math.round(rhythm)) {
+        // Only patch a run that is roughly STRAIGHT. A bare stretch that wraps
+        // around a notch -- the step where an E's middle arm meets its stem --
+        // is not a missing piece of edge, and filling it walks stones around
+        // the notch and off the stem's line. Measured on an E: the inner edge
+        // sits at x=9.43 while three patches landed at 6.24, 7.63 and 5.47.
+        if (run.length >= 3) {
+          const a = run[0].p
+          const b = run[run.length - 1].p
+          const chord = Math.hypot(b.x - a.x, b.y - a.y)
+          let arc = 0
+          for (let i = 1; i < run.length; i++)
+            arc += Math.hypot(run[i].p.x - run[i - 1].p.x, run[i].p.y - run[i - 1].p.y)
+          if (arc > 0 && chord / arc < 0.93) {
+            run = []
+            return
+          }
+        }
+        // and only a SUBSTANTIAL missing stretch. A short bare run near a
+        // junction is not a hole in an edge, it is the edge ending; filling it
+        // drops a stray beside the line rather than on it.
+        if (run.length >= Math.round(rhythm * 1.6)) {
           const n = Math.max(1, Math.round((run.length * step) / rhythm) - 1)
           for (let i = 1; i <= n; i++) {
             const s = run[Math.round((i * run.length) / (n + 1))]
