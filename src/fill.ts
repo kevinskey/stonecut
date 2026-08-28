@@ -20,6 +20,9 @@ import type { Pt } from './model'
 
 // diagnostic registry: every stone tagged by the subsystem that placed it
 export const debugStones: { cat: string; x: number; y: number }[] = []
+/** Stroke widths (mm) that were too narrow to outline and got a centre line.
+ *  Lets the UI say how much bigger the design has to be to outline properly. */
+export const spinedWidths: number[] = []
 export const debugSpans: { at: string; chords: number[]; r?: number; m0?: number; mFinal?: number; Lc?: number; E?: number; need?: number; att?: string }[] = []
 function dbg(cat: string, pts: Pt[]) {
   for (const p of pts) debugStones.push({ cat, x: p.x, y: p.y })
@@ -1261,6 +1264,7 @@ export function outlineOrSpine(
 ): Pt[] {
   debugStones.length = 0
   debugSpans.length = 0
+  spinedWidths.length = 0
   void contours
   const { bin, w, h, pxPerMm, padPx } = grid
   const pitch = holeMm + gapMm
@@ -1647,7 +1651,18 @@ export function outlineOrSpine(
             placedAny = true
           }
         }
-        if (placedAny) for (let i2 = 0; i2 < w * h; i2++) if (part[i2]) spinedMask[i2] = 1
+        if (placedAny) {
+          const ws: number[] = []
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (part[i2]) {
+              spinedMask[i2] = 1
+              if (wide[i2] > 0) ws.push(wide[i2])
+            }
+          if (ws.length) {
+            ws.sort((a, b) => a - b)
+            spinedWidths.push(ws[Math.floor(ws.length / 2)])
+          }
+        }
       }
     }
   }

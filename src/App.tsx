@@ -3,7 +3,7 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, debugSpans, debugStones, echoRequirement, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, debugSpans, debugStones, spinedWidths, echoRequirement, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { analyzeImage, imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
@@ -301,12 +301,29 @@ export default function App() {
         // 50mm with SS10 comes out half centre lines.
         const spines = debugStones.filter((s) => s.cat === 'partspine').length
         const spinePct = debugStones.length ? spines / debugStones.length : 0
+        // Say exactly how much bigger it has to be. Two wall rows need the
+        // stroke to reach hole + 0.2 + (hole + spacing); the narrowest stroke
+        // we had to draw as a centre line says how far short we are, and the
+        // height scales linearly with it.
+        let advice = 'Raise Height or pick a smaller stone.'
+        if (spinedWidths.length) {
+          const narrowest = Math.min(...spinedWidths)
+          const needW = hole + 0.2 + hole + hardGap
+          const needH = Math.ceil((textHeight * needW) / narrowest)
+          // largest catalogue stone whose two rows would fit the narrowest stroke
+          const fits = Object.entries(sizes)
+            .filter(([, s]) => narrowest >= s.holeMm + 0.2 + s.holeMm + hardGapOf(gap))
+            .sort((a, b) => b[1].holeMm - a[1].holeMm)[0]
+          advice =
+            `Outlining needs about ${needH} mm at this stone` +
+            (fits ? `, or ${fits[0]} at this height.` : '.')
+        }
         setStatus(
           noFill
             ? 'Strokes too light to fill at this size — raise Height, pick a bolder font, or lower Fill "From edge" / fill stone size'
             : spinePct > 0.25 && textMode !== 'fill'
               ? `${Math.round(spinePct * 100)}% of this design is too light to outline at this size — ` +
-                'those strokes are drawn as a single centre line. Raise Height or pick a smaller stone.'
+                `those strokes are drawn as a single centre line. ${advice}`
               : '',
         )
         setPreviewStones(pts)
