@@ -1229,7 +1229,7 @@ function placeContourEdges(
 export type OutlineStyle = 'auto' | 'walls' | 'centerline'
 
 export function outlineOrSpine(
-  contours: Pt[][],
+  contours: Pt[][], // source pieces; walls come from the MERGED outline below
   grid: Grid,
   holeMm: number,
   gapMm: number,
@@ -1241,6 +1241,7 @@ export function outlineOrSpine(
 ): Pt[] {
   debugStones.length = 0
   debugSpans.length = 0
+  void contours
   const { bin, w, h, pxPerMm, padPx } = grid
   const pitch = holeMm + gapMm
   const rhythm = rhythmMm ?? pitch * 1.15
@@ -1293,7 +1294,19 @@ export function outlineOrSpine(
   const out: Pt[] = []
   const narrowLbls = new Set<number>()
   const wallContours: Pt[][] = []
-  for (const c of contours) {
+  // Walls are placed from the MERGED outline, not the source contours.
+  //
+  // A glyph is routinely drawn as overlapping pieces — this E is a C-shape
+  // plus a separate rectangle for its middle arm. Corners created by the merge
+  // belong to neither piece: the apex where the arm's top edge meets the stem's
+  // inner edge exists only once they are unioned, so nothing anchored a stone
+  // there and the row stepped 7.26mm across it against a 4.53mm rhythm. The
+  // merged outline has those corners, and has no buried seams to mistake for
+  // edges.
+  const mergedOutline = marchingSquares(grid.bin, w, h).map((ct) =>
+    ct.map((v) => ({ x: (v.x - padPx) / pxPerMm, y: (v.y - padPx) / pxPerMm })),
+  )
+  for (const c of mergedOutline) {
     const lbl = labelOf(c)
     if (isNarrow(lbl)) narrowLbls.add(lbl)
     else wallContours.push(c)
@@ -1692,7 +1705,17 @@ export function outlineOrSpine(
     const inset = holeMm / 2 + 0.1
     const covered = rhythm * 0.95
     const added: Pt[] = []
-    for (const ct of contours) {
+    // Walk the MERGED outline, not the source contours. A glyph drawn as
+    // overlapping pieces -- this E is a C-shape plus a separate rectangle for
+    // its middle arm -- has corners that exist only after the pieces merge:
+    // the apex where the arm's top edge meets the stem's inner edge belongs to
+    // neither piece, so nothing ever placed a stone there and the row jumped
+    // 7.26mm across it against a 4.53mm rhythm. The merged boundary has that
+    // corner, and has no internal seams to mistake for edges.
+    const merged = marchingSquares(grid.bin, w, h).map((ct) =>
+      ct.map((v) => ({ x: (v.x - padPx) / pxPerMm, y: (v.y - padPx) / pxPerMm })),
+    )
+    for (const ct of merged) {
       // walk the contour, collecting runs with nothing near them
       const samples: { p: Pt; nx: number; ny: number }[] = []
       for (let k = 0; k < ct.length; k++) {
