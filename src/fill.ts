@@ -593,10 +593,11 @@ function tryEvenLayout(
   pitch: number,
   rhythm: number,
   idx: SpacingIndex,
+  sepOverride?: number,
 ): Pt[] | null {
   const L = bArc - aArc
   if (L <= 1e-9) return null
-  const wantSep = rhythm * 0.93
+  const wantSep = sepOverride ?? rhythm * 0.93
   const tangentAt = (s: number) => {
     const e = Math.min(0.5, Math.max(0.05, L / 20))
     const p0 = pointAt(path, Math.max(0, s - e))
@@ -687,6 +688,16 @@ function placeBetweenAnchors(
       const even2 = tryEvenLayout(path, aArc + minSp, bArc - minSp, true, pitch, r, idx)
       if (even2) return even2
     }
+  }
+  {
+    // Relax to the physical floor before giving up. Falling back costs a stone
+    // and the span then realises a much slower beat: an E's arm undersides
+    // came out at 5.52mm while its top and bottom edges ran 4.50mm, so rows
+    // that should match were 22% apart. Keeping the count at a tighter
+    // clearance is the lesser evil -- a consistent beat across the letter is
+    // what the eye reads.
+    const even3 = tryEvenLayout(path, aArc, bArc, false, pitch, r, idx, pitch)
+    if (even3) return even3
   }
   const Lc = chordE ?? E
   const aPt = pointAt(path, aArc)
@@ -1139,6 +1150,15 @@ function placeContourEdges(
   // uniform mode: ALL spans share one group → one beat across the letter.
   if (uniform) for (const sg of segs) sg.group = 0
   const groupR = new Map<number, number>()
+  // Uniform rhythm means ONE beat for the letter, not one beat per group.
+  // Letting the search move it +-12% per group is what made an E's arm
+  // undersides run 5.52mm while its top and bottom edges ran 4.50mm -- each
+  // row even in itself, the rows 22% apart, which is what reads as
+  // inconsistent. Fixed at the target, every span takes round(L / target) and
+  // the realised beats stay within a few percent of each other.
+  if (uniform) {
+    for (const sg of segs) groupR.set(sg.group, target)
+  } else
   for (const gid of [...new Set(segs.map((sg) => sg.group))]) {
     const gsegs = segs.filter((sg) => sg.group === gid)
     let gr = target
