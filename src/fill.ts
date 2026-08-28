@@ -1705,6 +1705,15 @@ export function outlineOrSpine(
         for (let t = 0; t < L; t += step)
           samples.push({ p: { x: a.x + ((b.x - a.x) * t) / L, y: a.y + ((b.y - a.y) * t) / L }, nx, ny })
       }
+      // Skip INTERNAL SEAMS. A glyph is often drawn as overlapping pieces --
+      // this E is a C-shape plus a separate rectangle for its middle arm --
+      // and the buried edge of a piece is still in the contour list even
+      // though the material is continuous across it. Measured on the E: a wall
+      // at x=5.24 running 9mm, entirely inside the stem. It is not an edge of
+      // the letter and must not be stoned. Material on BOTH sides is the test.
+      const seam = (s: { p: Pt; nx: number; ny: number }) =>
+        insideTest({ x: s.p.x + s.nx * inset, y: s.p.y + s.ny * inset }) &&
+        insideTest({ x: s.p.x - s.nx * inset, y: s.p.y - s.ny * inset })
       let run: typeof samples = []
       const flush = () => {
         // Only patch a run that is roughly STRAIGHT. A bare stretch that wraps
@@ -1771,7 +1780,7 @@ export function outlineOrSpine(
           const dd = Math.hypot(s.p.x - o.x, s.p.y - o.y)
           if (dd < m) m = dd
         }
-        if (m > covered) run.push(s)
+        if (m > covered && !seam(s)) run.push(s)
         else flush()
       }
       flush()
