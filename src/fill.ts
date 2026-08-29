@@ -23,6 +23,10 @@ export const debugStones: { cat: string; x: number; y: number }[] = []
 /** Stroke widths (mm) that were too narrow to outline and got a centre line.
  *  Lets the UI say how much bigger the design has to be to outline properly. */
 export const spinedWidths: number[] = []
+/** Chord lengths (mm) of stroke-end spans left with no cap stone because a
+ *  centered one would break the spacing floor. Lets the UI suggest the
+ *  height or stone size that would close them. */
+export const capGaps: number[] = []
 export const debugSpans: { at: string; chords: number[]; r?: number; m0?: number; mFinal?: number; Lc?: number; E?: number; need?: number; att?: string }[] = []
 function dbg(cat: string, pts: Pt[]) {
   for (const p of pts) debugStones.push({ cat, x: p.x, y: p.y })
@@ -137,8 +141,13 @@ export function rasterizeContours(contours: Pt[][], pxPerMm = 6, padMm = 0): Gri
   // contour, 41 grid points that nonzero calls solid and even-odd calls a hole.
   // Stones then landed inside the counter.
   //
-  // So: union everything that is not contained, then subtract the contained
-  // ones. Overlaps merge, counters stay holes, whichever way they are wound.
+  // So: paint by NESTING DEPTH, alternating. Depth 0 (not contained) fills,
+  // depth 1 (a counter) subtracts, depth 2 fills again, and so on, shallow
+  // to deep. Overlaps merge (both depth 0), counters stay holes, whichever
+  // way they are wound — and double-outline display fonts work: ClubSport
+  // draws a letter as two nested rings (4 contours deep); the old binary
+  // "subtract everything contained" erased the inner ring entirely, so the
+  // second outline never got a single stone.
   const polys = contours.filter((c) => c.length >= 3)
   const pathOf = (c: Pt[]) => {
     const p = new Path2D()
@@ -166,23 +175,28 @@ export function rasterizeContours(contours: Pt[][], pxPerMm = 6, padMm = 0): Gri
     }
     return inside
   }
-  const contained = polys.map((c, i) =>
-    polys.some((o, j) => {
-      if (i === j) return false
-      if (box[i].x0 < box[j].x0 || box[i].x1 > box[j].x1) return false
-      if (box[i].y0 < box[j].y0 || box[i].y1 > box[j].y1) return false
+  const centroid = polys.map((c) => ({
+    x: c.reduce((s, p) => s + p.x, 0) / c.length,
+    y: c.reduce((s, p) => s + p.y, 0) / c.length,
+  }))
+  const depth = polys.map((c, i) => {
+    let d = 0
+    for (let j = 0; j < polys.length; j++) {
+      if (i === j) continue
+      if (box[i].x0 < box[j].x0 || box[i].x1 > box[j].x1) continue
+      if (box[i].y0 < box[j].y0 || box[i].y1 > box[j].y1) continue
       // a vertex of i, and its centroid, both inside j
-      const cx = c.reduce((s, p) => s + p.x, 0) / c.length
-      const cy = c.reduce((s, p) => s + p.y, 0) / c.length
-      return insidePoly(o, c[0]) && insidePoly(o, { x: cx, y: cy })
-    }),
-  )
+      if (insidePoly(polys[j], c[0]) && insidePoly(polys[j], centroid[i])) d++
+    }
+    return d
+  })
   ctx.fillStyle = '#000'
-  for (let i = 0; i < polys.length; i++)
-    if (!contained[i]) ctx.fill(pathOf(polys[i]), 'evenodd')
-  ctx.globalCompositeOperation = 'destination-out'
-  for (let i = 0; i < polys.length; i++)
-    if (contained[i]) ctx.fill(pathOf(polys[i]), 'evenodd')
+  const maxDepth = depth.reduce((a, b) => Math.max(a, b), 0)
+  for (let dl = 0; dl <= maxDepth; dl++) {
+    ctx.globalCompositeOperation = dl % 2 ? 'destination-out' : 'source-over'
+    for (let i = 0; i < polys.length; i++)
+      if (depth[i] === dl) ctx.fill(pathOf(polys[i]), 'evenodd')
+  }
   ctx.globalCompositeOperation = 'source-over'
   const data = ctx.getImageData(0, 0, w, h).data
   const bin = new Uint8Array(w * h)
@@ -831,6 +845,15 @@ function placeBetweenAnchors(
         return [p]
       }
     }
+    // NO STONE OFF THE LINE — not even at a stroke end. A span often just
+    // misses holding its centered stone (an Open Sans E arm is 8.3mm against
+    // an 8.44mm requirement; Roboto's is 7.5mm) and the end reads open, but
+    // a dipped stone was tried and read as a mistake. Record the gap instead
+    // so the UI can say exactly what height or stone size closes it.
+    {
+      const chL = Math.hypot(bPt.x - aPt.x, bPt.y - aPt.y)
+      if (chL >= r * 1.25) capGaps.push(chL)
+    }
     return []
   }
 
@@ -1265,6 +1288,7 @@ export function outlineOrSpine(
   debugStones.length = 0
   debugSpans.length = 0
   spinedWidths.length = 0
+  capGaps.length = 0
   void contours
   const { bin, w, h, pxPerMm, padPx } = grid
   const pitch = holeMm + gapMm
@@ -1312,12 +1336,44 @@ export function outlineOrSpine(
   // high-contrast face: Playfair's hairlines genuinely cannot hold two wall
   // rows while its stems easily can, and judging the letter as a whole drew
   // 51% of a word as skeleton centrelines. Thin PARTS are handled below.
+  // STROKE-WIDTH MAP, shared by every pass below: for each material pixel,
+  // the width of the stroke it belongs to (diameter of the largest inscribed
+  // disk covering it).
+  const needW = pitch * 1.1
+  const wide = new Float32Array(w * h)
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i2 = y * w + x
+      if (!labels[i2]) continue
+      const dv = dt[i2]
+      if (dv <= 0) continue
+      if (
+        !(dv >= dt[i2 - 1] && dv >= dt[i2 + 1] && dv >= dt[i2 - w] && dv >= dt[i2 + w] &&
+          dv >= dt[i2 - w - 1] && dv >= dt[i2 - w + 1] &&
+          dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
+      )
+        continue
+      const rr = dv * dv
+      const val = (2 * dv) / pxPerMm
+      const r0 = Math.ceil(dv)
+      for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
+        const dy2 = yy - y
+        const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
+        const row = yy * w
+        for (let xx = Math.max(0, x - sp2); xx <= Math.min(w - 1, x + sp2); xx++)
+          if (labels[row + xx] && wide[row + xx] < val) wide[row + xx] = val
+      }
+    }
   const isNarrow = (lbl: number) => style === 'centerline' && lbl > 0
   void typicalHalf
 
   const out: Pt[] = []
   const narrowLbls = new Set<number>()
   const wallContours: Pt[][] = []
+  // ring bands (uniformly narrow closed loops with exactly two boundary
+  // contours) get a VECTOR midline instead of a pixel skeleton — see below
+  const bandRings: { outer: Pt[]; inner: Pt[] }[] = []
+  const bandLbls = new Set<number>()
   // Walls are placed from the MERGED outline, not the source contours.
   //
   // A glyph is routinely drawn as overlapping pieces — this E is a C-shape
@@ -1331,6 +1387,19 @@ export function outlineOrSpine(
     ct.map((v) => ({ x: (v.x - padPx) / pxPerMm, y: (v.y - padPx) / pxPerMm })),
   )
   for (const c of mergedOutline) {
+    // Drawing debris smaller than a stone — hand-drawn fonts carry sub-mm
+    // specks — can't be represented by a stone; its "centered stone" was a
+    // stray dot floating beside the letter.
+    {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+      for (const p of c) {
+        if (p.x < x0) x0 = p.x
+        if (p.x > x1) x1 = p.x
+        if (p.y < y0) y0 = p.y
+        if (p.y > y1) y1 = p.y
+      }
+      if (x1 - x0 < holeMm && y1 - y0 < holeMm) continue
+    }
     const lbl = labelOf(c)
     if (isNarrow(lbl)) narrowLbls.add(lbl)
     else wallContours.push(c)
@@ -1577,39 +1646,73 @@ export function outlineOrSpine(
   const spinedMask = new Uint8Array(w * h)
   {
     // Spine only where two rows CANNOT fit, not merely where they would be
-    // tighter than the rhythm. A lowercase e's bar is about 8mm: its two wall
-    // rows would sit 4.4mm apart, above the floor, so it should be outlined.
-    // Judging it against the rhythm instead sent it to a centre line and put
-    // stones down the middle of the bar while its own outline stayed bare --
-    // which reads as extra interior holes in outline mode.
-    const needW = holeMm + 0.2 + pitch
-    const wide = new Float32Array(w * h)
-    for (let y = 1; y < h - 1; y++)
-      for (let x = 1; x < w - 1; x++) {
-        const i2 = y * w + x
-        if (!labels[i2]) continue
-        const dv = dt[i2]
-        if (dv <= 0) continue
-        if (
-          !(dv >= dt[i2 - 1] && dv >= dt[i2 + 1] && dv >= dt[i2 - w] && dv >= dt[i2 + w] &&
-            dv >= dt[i2 - w - 1] && dv >= dt[i2 - w + 1] &&
-            dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
-        )
-          continue
-        const rr = dv * dv
-        const val = (2 * dv) / pxPerMm
-        const r0 = Math.ceil(dv)
-        for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
-          const dy2 = yy - y
-          const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
-          const row = yy * w
-          for (let xx = Math.max(0, x - sp2); xx <= Math.min(w - 1, x + sp2); xx++)
-            if (labels[row + xx] && wide[row + xx] < val) wide[row + xx] = val
-        }
-      }
+    // tighter than the rhythm. Wall stones sit centred ON the contour line,
+    // so rows on a W-wide stroke are W apart — W only has to clear the
+    // spacing floor (with a little slack so directly-opposed stones don't
+    // land at the bare minimum and zigzag). The old formula added the hole
+    // width on top, as if rows were inset inside the stroke; that judged the
+    // 7.6mm bar of a Google Sans G "too thin", banned its walls, and walked
+    // two skeleton stones diagonally through it while its top edge sat bare
+    // for 19mm.
     const thin = new Uint8Array(w * h)
     for (let i2 = 0; i2 < w * h; i2++)
       thin[i2] = labels[i2] && wide[i2] > 0 && wide[i2] < needW ? 1 : 0
+    // A BAND-LIKE component — a double-outline font's ring, uniformly narrow
+    // the whole way round — is spined as a WHOLE. Judged in thin patches, the
+    // stretches of a hand-drawn ring that bulge past the threshold kept
+    // their walls while the rest went to a centre line, and the row wove
+    // between the two treatments. Uniformity is the test: a serif letter
+    // mixes hairlines with wide stems (p90 far above the median) and is
+    // untouched, keeping the per-part behaviour it was tuned for.
+    {
+      const wsBy = new Map<number, number[]>()
+      for (let i2 = 0; i2 < w * h; i2++)
+        if (labels[i2] && wide[i2] > 0) {
+          let a = wsBy.get(labels[i2])
+          if (!a) wsBy.set(labels[i2], (a = []))
+          a.push(wide[i2])
+        }
+      for (const [lbl, ws] of wsBy) {
+        ws.sort((a, b) => a - b)
+        const med = ws[Math.floor(ws.length / 2)]
+        const p90 = ws[Math.floor(ws.length * 0.9)]
+        if (!(med < needW && p90 < needW * 1.4)) continue
+        // a RING band — closed loop, exactly two boundary contours — gets
+        // its midline from the smooth vector contours (below), which keeps
+        // corners crisp and rows even; a pixel skeleton of a hand-drawn
+        // band wiggles with every bump of the drawn edge. Anything else
+        // falls back to the skeleton spine. Trace THIS component's own
+        // boundary for the test — attributing shared merged-outline
+        // contours to components sampled the wrong label near junctions.
+        const mask = new Uint8Array(w * h)
+        for (let i2 = 0; i2 < w * h; i2++) mask[i2] = labels[i2] === lbl ? 1 : 0
+        const bc = marchingSquares(mask, w, h)
+          .map((ct) => ct.map((v) => ({ x: (v.x - padPx) / pxPerMm, y: (v.y - padPx) / pxPerMm })))
+          .filter((ct) => {
+            let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+            for (const p of ct) {
+              if (p.x < x0) x0 = p.x
+              if (p.x > x1) x1 = p.x
+              if (p.y < y0) y0 = p.y
+              if (p.y > y1) y1 = p.y
+            }
+            return x1 - x0 >= holeMm || y1 - y0 >= holeMm
+          })
+        if (bc.length === 2) {
+          const [a, b] = bc
+          bandRings.push(a.length >= b.length ? { outer: a, inner: b } : { outer: b, inner: a })
+          bandLbls.add(lbl)
+          // midline replaces both walls AND the skeleton spine for this ring
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (labels[i2] === lbl) {
+              spinedMask[i2] = 1
+              thin[i2] = 0
+            }
+        } else {
+          for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 1
+        }
+      }
+    }
     const tp = labelComponents(thin, w, h)
     if (tp.count) {
       const area = new Int32Array(tp.count + 1)
@@ -1619,32 +1722,96 @@ export function outlineOrSpine(
       for (let r2 = 1; r2 <= tp.count; r2++) {
         if (area[r2] < minArea) continue
         for (let i2 = 0; i2 < w * h; i2++) part[i2] = tp.labels[i2] === r2 ? 1 : 0
+        // the part's typical stroke width, BEFORE placing — the spine keeps
+        // or drops stones against it
+        let medianW = 0
+        {
+          const ws: number[] = []
+          for (let i2 = 0; i2 < w * h; i2++) if (part[i2] && wide[i2] > 0) ws.push(wide[i2])
+          if (ws.length) {
+            ws.sort((a, b) => a - b)
+            medianW = ws[Math.floor(ws.length / 2)]
+          }
+        }
         const skel = skeletonize(part, w, h)
+        // Heavy smoothing: the skeleton of a hand-drawn band wiggles with
+        // every bump of the drawn edge, and a stone row amplifies each
+        // wiggle into a visible jog. Stones only need the line's SHAPE.
         const paths = traceSkeleton(skel, w, h)
-          .map((p) => smoothPath(p, 3).map(toMm))
+          .map((p) => smoothPath(p, 7).map(toMm))
           .sort((a, b) => b.length - a.length)
         let placedAny = false
         for (const pth of paths) {
           let len = 0
           for (let k = 1; k < pth.length; k++)
             len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
-          // a spine is a LINE; skeleton spurs at junctions are not
+          // a spine is a LINE; skeleton spurs at junctions are not — and once
+          // a primary line is down, a secondary branch has to be substantial
+          // to join it (junction stubs jumbled the middle of a G)
           if (len < rhythm * 1.6) continue
+          if (placedAny && len < rhythm * 2.4) continue
           // A skeleton runs out to the boundary at a stroke's end, so its last
-          // stones land ON the edge — measured at 0.05mm from the contour,
-          // half the stone hanging off the letter. Every stone has to sit at
-          // least its own radius inside, the same rule as everywhere else.
+          // stones land ON the edge — half the stone hanging off the letter.
+          // Trim those by judging depth against the PART'S OWN width, not the
+          // stone's. Requiring the hole to sit fully in material (hole/2)
+          // disqualified every stone on a band narrower than the hole — a
+          // ClubSport ring is ~1.7mm against a 3.4mm hole — so the spine
+          // half-placed, walls filled the rest, and the row wove drunkenly
+          // between the band's two edges. The template is a full sheet: a
+          // hole wider than the band is structurally fine and reads as the
+          // band's line. A stone centred on the band has dt ≈ half the
+          // band width; one sliding off a tip reads far below that.
+          const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medianW * 0.35))
           const deep = (q: Pt) => {
             const xi = Math.round(q.x * pxPerMm + padPx)
             const yi = Math.round(q.y * pxPerMm + padPx)
             if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
-            return dt[yi * w + xi] / pxPerMm >= holeMm / 2 + 0.1
+            return dt[yi * w + xi] / pxPerMm >= minDeep
           }
           const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
-            if (deep(q)) return true
-            idx.remove(q)
-            return false
+            if (!deep(q)) {
+              idx.remove(q)
+              return false
+            }
+            // where two spine paths meet (a bar joining a ring), stones from
+            // different paths crowd at the legal floor and read as a clump —
+            // hold FOREIGN stones to near the rhythm. Own-row neighbours sit
+            // at the rhythm and pass.
+            const tooClose = idx
+              .within(q, rhythm * 0.85)
+              .some((o) => Math.hypot(o.x - q.x, o.y - q.y) > 1e-9)
+            if (tooClose) {
+              idx.remove(q)
+              return false
+            }
+            return true
           })
+          // TIGHTEN THE ROW. Obstacle-dodging and skeleton seams leave the
+          // odd stone a fraction off the line of its neighbours, which the
+          // eye picks out instantly. Snap those back onto the chord through
+          // their neighbours. Only SMALL offsets qualify: a real corner
+          // stone sits far off its neighbours' chord and must stay put.
+          for (let pass = 0; pass < 2; pass++)
+            for (let i = 1; i < got.length - 1; i++) {
+              const a = got[i - 1]
+              const b = got[i + 1]
+              const q = got[i]
+              const dx = b.x - a.x
+              const dy = b.y - a.y
+              const L2 = dx * dx + dy * dy
+              if (L2 < 1e-9) continue
+              const t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / L2
+              const f = { x: a.x + t * dx, y: a.y + t * dy }
+              const off = Math.hypot(f.x - q.x, f.y - q.y)
+              if (off < 0.25 || off > 1.2) continue
+              if (!deep(f)) continue
+              idx.remove(q)
+              if (idx.canPlace(f)) {
+                q.x = f.x
+                q.y = f.y
+              }
+              idx.add(q)
+            }
           if (got.length) {
             dbg('partspine', got)
             out.push(...got)
@@ -1652,16 +1819,8 @@ export function outlineOrSpine(
           }
         }
         if (placedAny) {
-          const ws: number[] = []
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (part[i2]) {
-              spinedMask[i2] = 1
-              if (wide[i2] > 0) ws.push(wide[i2])
-            }
-          if (ws.length) {
-            ws.sort((a, b) => a - b)
-            spinedWidths.push(ws[Math.floor(ws.length / 2)])
-          }
+          for (let i2 = 0; i2 < w * h; i2++) if (part[i2]) spinedMask[i2] = 1
+          if (medianW > 0) spinedWidths.push(medianW)
         }
       }
     }
@@ -1671,8 +1830,16 @@ export function outlineOrSpine(
     const inSpined = (p: Pt): boolean => {
       const px2 = Math.round(p.x * pxPerMm + padPx)
       const py2 = Math.round(p.y * pxPerMm + padPx)
-      if (px2 < 0 || py2 < 0 || px2 >= w || py2 >= h) return false
-      return spinedMask[py2 * w + px2] === 1
+      // 3×3 neighborhood: a contour vertex rounds to either side of the
+      // boundary pixel, and a miss let wall stones back onto spined bands
+      for (let dy2 = -1; dy2 <= 1; dy2++)
+        for (let dx2 = -1; dx2 <= 1; dx2++) {
+          const x2 = px2 + dx2
+          const y2 = py2 + dy2
+          if (x2 < 0 || y2 < 0 || x2 >= w || y2 >= h) continue
+          if (spinedMask[y2 * w + x2] === 1) return true
+        }
+      return false
     }
     bannedTest = prev ? (p: Pt) => prev(p) || inSpined(p) : inSpined
   }
@@ -1684,10 +1851,38 @@ export function outlineOrSpine(
     if (px < 0 || py < 0 || px >= w || py >= h) return false
     return dt[py * w + px] / pxPerMm >= holeMm / 2 + 0.1
   }
-  wallContours.sort((a, b) => b.length - a.length)
+  // BAND MIDLINES — placed before walls so walls re-space around them.
+  // The midline is the midpoint locus between the ring's two vector
+  // contours, lightly smoothed, then run through the SAME corner-anchored
+  // placement as an ordinary outline: corners stay crisp and the beat is
+  // harmonized, neither of which a pixel-skeleton spine could give.
+  for (const ring of bandRings) {
+    const mid: Pt[] = []
+    for (const p of ring.outer) {
+      let bx = 0, by = 0, bd = Infinity
+      for (const q of ring.inner) {
+        const dd = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
+        if (dd < bd) { bd = dd; bx = q.x; by = q.y }
+      }
+      mid.push({ x: (p.x + bx) / 2, y: (p.y + by) / 2 })
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      const n = mid.length
+      const sm = mid.map((p, i) => ({
+        x: (mid[(i + n - 1) % n].x + 2 * p.x + mid[(i + 1) % n].x) / 4,
+        y: (mid[(i + n - 1) % n].y + 2 * p.y + mid[(i + 1) % n].y) / 4,
+      }))
+      mid.splice(0, n, ...sm)
+    }
+    const info = analyzeContour(simplifyContour(mid, holeMm / 6), pitch, rhythm)
+    placeContourCorners(info, pitch, idx, out, undefined, rhythm)
+    placeContourEdges(info, pitch, idx, out, insideTest, undefined, rhythm, uniformRhythm)
+  }
+  const wallList = wallContours.filter((c) => !bandLbls.has(labelOf(c)))
+  wallList.sort((a, b) => b.length - a.length)
   // corners FIRST across the entire design, then edges — corner anchors
   // never lose their spot to an edge stone from a neighboring contour
-  const contourInfos = wallContours.map((c) =>
+  const contourInfos = wallList.map((c) =>
     analyzeContour(simplifyContour(c, holeMm / 6), pitch, rhythm),
   )
   // MERGE THE SHAPES before stoning. Glyphs are drawn as overlapping
@@ -1838,7 +2033,9 @@ export function outlineOrSpine(
           const dd = Math.hypot(s.p.x - o.x, s.p.y - o.y)
           if (dd < m) m = dd
         }
-        if (m > covered && !seam(s)) run.push(s)
+        // banned stretches (spined bands, detail-line zones) are bare BY
+        // DESIGN — patching them puts wall stones back beside the line
+        if (m > covered && !seam(s) && !bannedTest?.(s.p)) run.push(s)
         else flush()
       }
       flush()
@@ -1846,6 +2043,152 @@ export function outlineOrSpine(
     if (added.length) {
       dbg('patch', added)
       out.push(...added)
+    }
+  }
+
+  // FILL BARE TAPERS. Script strokes taper: the wall placer stops where two
+  // rows no longer fit and the thin-part spine only covers regions that were
+  // thin at classification time, so the tapering tail of a Lobster E or a
+  // script exit stroke ends up with no stones at all. Sweep for NARROW
+  // material that ended up farther than a beat from every stone and run a
+  // line down its middle — narrow only, so the intentionally-empty interior
+  // of a wide letter stays empty.
+  if (style === 'auto') {
+    // distance from every pixel to the nearest placed stone
+    const sBin = new Uint8Array(w * h)
+    sBin.fill(1)
+    for (const q of out) {
+      const px = Math.round(q.x * pxPerMm + padPx)
+      const py = Math.round(q.y * pxPerMm + padPx)
+      if (px >= 0 && py >= 0 && px < w && py < h) sBin[py * w + px] = 0
+    }
+    const dStone = distanceTransform({ bin: sBin, w, h, pxPerMm, padPx })
+    // The width cap only shields the interiors of genuinely WIDE letters
+    // (walled strokes are already protected by the distance test: material
+    // between two wall rows is never a beat from every stone). Spined
+    // regions are NOT excluded — a spine that failed to place is exactly
+    // the bare bowl this pass exists for.
+    const bare = new Uint8Array(w * h)
+    for (let i2 = 0; i2 < w * h; i2++)
+      bare[i2] =
+        labels[i2] && wide[i2] > 0 && wide[i2] < needW * 1.6 &&
+        dStone[i2] / pxPerMm > rhythm * 0.95
+          ? 1
+          : 0
+    const bc = labelComponents(bare, w, h)
+    if (bc.count) {
+      const area = new Int32Array(bc.count + 1)
+      for (let i2 = 0; i2 < w * h; i2++) if (bc.labels[i2]) area[bc.labels[i2]]++
+      const minArea = (pitch * pxPerMm) ** 2 * 0.2
+      const blob = new Uint8Array(w * h)
+      for (let r2 = 1; r2 <= bc.count; r2++) {
+        if (area[r2] < minArea) continue
+        let medW = 0
+        {
+          const ws2: number[] = []
+          for (let i2 = 0; i2 < w * h; i2++) {
+            blob[i2] = bc.labels[i2] === r2 ? 1 : 0
+            if (blob[i2] && wide[i2] > 0) ws2.push(wide[i2])
+          }
+          if (ws2.length) {
+            ws2.sort((a2, b2) => a2 - b2)
+            medW = ws2[Math.floor(ws2.length / 2)]
+          }
+        }
+        const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medW * 0.35))
+        const okDeep = (q: Pt) => {
+          const xi = Math.round(q.x * pxPerMm + padPx)
+          const yi = Math.round(q.y * pxPerMm + padPx)
+          if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+          return dt[yi * w + xi] / pxPerMm >= minDeep
+        }
+        const skel = skeletonize(blob, w, h)
+        const paths = traceSkeleton(skel, w, h)
+          .map((p) => smoothPath(p, 5).map(toMm))
+          .sort((a2, b2) => b2.length - a2.length)
+        for (const pth of paths) {
+          let len = 0
+          for (let k = 1; k < pth.length; k++)
+            len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+          if (len < pitch * 0.7) continue
+          const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+            // NOT gated on bannedTest: the spined-region mask inside it is
+            // exactly the failed area this sweep exists to rescue, and the
+            // distance test already keeps a full beat from every real stone
+            if (!okDeep(q)) {
+              idx.remove(q)
+              return false
+            }
+            // hold near-rhythm distance to stones from other rows so the
+            // taper line JOINS the existing rows instead of clumping them
+            const tooClose = idx
+              .within(q, rhythm * 0.8)
+              .some((o) => Math.hypot(o.x - q.x, o.y - q.y) > 1e-9)
+            if (tooClose) {
+              idx.remove(q)
+              return false
+            }
+            return true
+          })
+          if (got.length) {
+            dbg('taper', got)
+            out.push(...got)
+          }
+        }
+      }
+    }
+  }
+
+  // STRAIGHTEN AND RESPACE. Serif fonts read "raggedy" not because rows are
+  // missing but because single stones sit a fraction off their row's line or
+  // beat — bracket transitions, obstacle dodges, span seams. Pull any stone
+  // with row context on both sides toward its neighbours' midpoint, which
+  // straightens the line and evens the two gaps at once. Guards:
+  //   - corner anchors never move (they ARE the geometry);
+  //   - neighbours must flank the stone (a row, not a junction pair);
+  //   - the move must keep the stone at its original depth relative to the
+  //     edge (dt), so genuine curves — where the midpoint cuts inward — and
+  //     concave notches — where it floats off the letter — are left alone.
+  {
+    const cornerKeys = new Set(
+      debugStones.filter((s) => s.cat === 'corner').map((s) => `${s.x.toFixed(2)},${s.y.toFixed(2)}`),
+    )
+    const dtOf = (p: Pt): number => {
+      const px = Math.round(p.x * pxPerMm + padPx)
+      const py = Math.round(p.y * pxPerMm + padPx)
+      if (px < 0 || py < 0 || px >= w || py >= h) return Infinity
+      return dt[py * w + px] / pxPerMm
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      for (const q of out) {
+        if (cornerKeys.has(`${q.x.toFixed(2)},${q.y.toFixed(2)}`)) continue
+        let a: Pt | null = null
+        let b: Pt | null = null
+        let da = Infinity
+        let db = Infinity
+        for (const o of out) {
+          if (o === q) continue
+          const dd = Math.hypot(o.x - q.x, o.y - q.y)
+          if (dd < da) { db = da; b = a; da = dd; a = o }
+          else if (dd < db) { db = dd; b = o }
+        }
+        if (!a || !b) continue
+        if (da > rhythm * 1.45 || db > rhythm * 1.45) continue
+        // flanking, not clustered on one side
+        if ((a.x - q.x) * (b.x - q.x) + (a.y - q.y) * (b.y - q.y) > 0) continue
+        const f = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+        const off = Math.hypot(f.x - q.x, f.y - q.y)
+        if (off < 0.2 || off > 1.0) continue
+        const dq = dtOf(q)
+        const df = dtOf(f)
+        if (!isFinite(df) || Math.abs(df - dq) > 0.45) continue
+        idx.remove(q)
+        if (idx.canPlace(f)) {
+          q.x = f.x
+          q.y = f.y
+        }
+        idx.add(q)
+      }
     }
   }
 

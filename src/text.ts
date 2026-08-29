@@ -10,10 +10,7 @@ export function textToContours(
   letterSpacing: number,
 ): { contours: Pt[][]; widthMm: number } {
   const fontSize = 100
-  const path = font.getPath(text, 0, 0, fontSize, {
-    kerning: true,
-    letterSpacing: letterSpacing / 10,
-  } as opentype.RenderOptions)
+  const path = getPathSafe(font, text, fontSize, letterSpacing / 10)
   const contours = flattenPath(path.commands, 2)
   // scale so overall bbox height == heightMm
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -28,6 +25,44 @@ export function textToContours(
     c.map((p) => ({ x: (p.x - minX) * scale, y: (p.y - minY) * scale })),
   )
   return { contours: out, widthMm: (maxX - minX) * scale }
+}
+
+// font.getPath runs the text through GSUB shaping (ligatures, ccmp), and
+// opentype.js throws on lookup tables it doesn't support — Roboto v51 and
+// ~160 other Google fonts died there and rendered zero stones. Fall back to
+// per-character glyph lookup, which reads the cmap directly and skips GSUB
+// entirely: ligatures are lost, but every glyph renders.
+function getPathSafe(
+  font: opentype.Font,
+  text: string,
+  fontSize: number,
+  letterSpacing: number,
+): opentype.Path {
+  try {
+    return font.getPath(text, 0, 0, fontSize, {
+      kerning: true,
+      letterSpacing,
+    } as opentype.RenderOptions)
+  } catch {
+    const path = new opentype.Path()
+    const scale = fontSize / font.unitsPerEm
+    let x = 0
+    let prev: opentype.Glyph | null = null
+    for (const ch of text) {
+      const g = font.charToGlyph(ch)
+      if (prev) {
+        // kerning can also hit unsupported GPOS lookups — a pair without
+        // kerning beats a font without letters
+        try {
+          x += font.getKerningValue(prev, g) * scale
+        } catch { /* skip pair */ }
+      }
+      path.commands.push(...g.getPath(x, 0, fontSize).commands)
+      x += (g.advanceWidth ?? 0) * scale + letterSpacing * fontSize
+      prev = g
+    }
+    return path
+  }
 }
 
 // Flatten opentype path commands (M/L/Q/C/Z) into polylines.

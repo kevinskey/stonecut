@@ -3,8 +3,9 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, debugSpans, debugStones, spinedWidths, echoRequirement, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
+import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
 import { download, toGPGL, toHPGL, toSVG } from './export'
 import { sendToCutter } from './usb'
@@ -88,6 +89,13 @@ export default function App() {
   const [selFont, setSelFont] = useState('')
   const [weight, setWeight] = useState<'bold' | 'regular'>('bold')
   const fontCache = useRef(new Map<string, opentype.Font>())
+  // installed custom fonts (IndexedDB) — presented as GFont rows with a
+  // "custom:" id so search, chips and arrow-key browsing treat them like
+  // any catalog font
+  const [customFonts, setCustomFonts] = useState<string[]>([])
+  useEffect(() => {
+    listFonts().then(setCustomFonts).catch(() => {})
+  }, [])
   useEffect(() => {
     fetch('/gfonts.json')
       .then((r) => r.json())
@@ -97,6 +105,29 @@ export default function App() {
 
   const loadGFont = useCallback(
     async (gf: GFont, w: 'bold' | 'regular') => {
+      if (gf.id.startsWith('custom:')) {
+        const name = gf.f
+        setSelFont(gf.id)
+        const cached = fontCache.current.get(gf.id)
+        if (cached) {
+          setFont(cached)
+          setFontName(name)
+          setStatus(`Font: ${name}`)
+          return
+        }
+        try {
+          const buf = await getFont(name)
+          if (!buf) throw new Error('missing')
+          const parsed = parseFontBuffer(buf)
+          fontCache.current.set(gf.id, parsed)
+          setFont(parsed)
+          setFontName(name)
+          setStatus(`Font: ${name}`)
+        } catch {
+          setStatus(`Could not load ${name}`)
+        }
+        return
+      }
       const url = (w === 'bold' ? gf.b ?? gf.r : gf.r ?? gf.b) ?? ''
       if (!url) {
         setStatus(`${gf.f}: no usable weight`)
@@ -124,13 +155,20 @@ export default function App() {
     },
     [],
   )
-  const fontMatches = useMemo(
-    () =>
-      gfonts.filter(
-        (f) => (fontCat === 'all' || f.c === fontCat) && f.f.toLowerCase().includes(fontSearch.toLowerCase()),
-      ),
-    [gfonts, fontCat, fontSearch],
-  )
+  const fontMatches = useMemo(() => {
+    const q = fontSearch.toLowerCase()
+    const customs: GFont[] =
+      fontCat === 'all' || fontCat === 'custom'
+        ? customFonts
+            .filter((n) => n.toLowerCase().includes(q))
+            .map((n) => ({ id: `custom:${n}`, f: n, c: 'custom', p: 0, r: null, b: null }))
+        : []
+    if (fontCat === 'custom') return customs
+    return [
+      ...customs,
+      ...gfonts.filter((f) => (fontCat === 'all' || f.c === fontCat) && f.f.toLowerCase().includes(q)),
+    ]
+  }, [gfonts, customFonts, fontCat, fontSearch])
   useEffect(() => { setHiIdx(-1) }, [fontSearch, fontCat])
   useEffect(() => {
     document.querySelector('.fontlist .hi')?.scrollIntoView({ block: 'nearest' })
@@ -244,22 +282,21 @@ export default function App() {
         const idx = new SpacingIndex(hole + hardGap)
         const pts: { x: number; y: number; size?: string; color?: string }[] = []
         let noFill = false
-        const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
-        const req = echoRequirement(grid, hole + hardGap, rhythm)
-        setCanEcho(req.feasible)
-        setEchoUpsize(req.feasible ? null : Math.ceil(textHeight * req.scale * 1.03))
-        if (outlineDesign === 'double' && !req.feasible)
-          setStatus(`Double outline needs wider strokes at this size`)
+        // ghost and double both put a row OUTSIDE the letter — pad the grid
+        // so the outer row isn't clipped at the raster edge
+        const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+        setCanEcho(true)
+        setEchoUpsize(null)
         let outline: { x: number; y: number }[] = []
         if (textMode !== 'fill') {
           if (outlineDesign === 'ghost') {
             outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
           } else {
             outline = outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
-            // an echo that can't form a full inner ring would emit fragments,
-            // which read as mistakes — refuse it and prompt to upsize instead
-            if (outlineDesign === 'double' && req.feasible)
-              outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+            // the echo row floats OUTSIDE the edge row — outside always has
+            // room, unlike the old inside echo that needed wide strokes
+            if (outlineDesign === 'double')
+              outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
           }
         }
         pts.push(...outline)
@@ -308,14 +345,33 @@ export default function App() {
         let advice = 'Raise Height or pick a smaller stone.'
         if (spinedWidths.length) {
           const narrowest = Math.min(...spinedWidths)
-          const needW = hole + 0.2 + hole + hardGap
+          // wall stones sit ON the contour, so two rows need the stroke to
+          // clear the pitch (with the same slack fill.ts uses)
+          const needW = (hole + hardGap) * 1.1
           const needH = Math.ceil((textHeight * needW) / narrowest)
           // largest catalogue stone whose two rows would fit the narrowest stroke
           const fits = Object.entries(sizes)
-            .filter(([, s]) => narrowest >= s.holeMm + 0.2 + s.holeMm + hardGapOf(gap))
+            .filter(([, s]) => narrowest >= (s.holeMm + hardGapOf(gap)) * 1.1)
             .sort((a, b) => b[1].holeMm - a[1].holeMm)[0]
           advice =
             `Outlining needs about ${needH} mm at this stone` +
+            (fits ? `, or ${fits[0]} at this height.` : '.')
+        }
+        // Stroke ends whose cap stone can't legally sit on the line stay
+        // open — say exactly what closes them. A centered cap needs the end
+        // edge to reach two pitches; height scales linearly, and a smaller
+        // stone shrinks the pitch instead.
+        let capMsg = ''
+        if (capGaps.length && textMode !== 'fill') {
+          const worst = Math.min(...capGaps)
+          const needC = 2 * (hole + hardGap) * 1.005
+          const needH = Math.ceil((textHeight * needC) / worst)
+          const fits = Object.entries(sizes)
+            .filter(([, s]) => worst >= 2 * (s.holeMm + hardGapOf(gap)) * 1.005)
+            .sort((a, b) => b[1].holeMm - a[1].holeMm)[0]
+          capMsg =
+            `${capGaps.length} stroke end${capGaps.length === 1 ? '' : 's'} ha${capGaps.length === 1 ? 's' : 've'} no room ` +
+            `for an end stone — needs about ${needH} mm Height` +
             (fits ? `, or ${fits[0]} at this height.` : '.')
         }
         setStatus(
@@ -324,7 +380,7 @@ export default function App() {
             : spinePct > 0.25 && textMode !== 'fill'
               ? `${Math.round(spinePct * 100)}% of this design is too light to outline at this size — ` +
                 `those strokes are drawn as a single centre line. ${advice}`
-              : '',
+              : capMsg,
         )
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
@@ -357,7 +413,7 @@ export default function App() {
           } else {
             outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
             if (outlineDesign === 'double')
-              outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+              outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
           }
         }
         pts.push(...outline)
@@ -408,15 +464,15 @@ export default function App() {
     const rhythm = hole + gap
     const idx = new SpacingIndex(hole + hardGap)
     const pts: { x: number; y: number; size?: string; color?: string }[] = []
-    const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' ? rhythm + hole : 0.5)
+    const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
     let outline: { x: number; y: number }[] = []
     if (textMode !== 'fill') {
       if (outlineDesign === 'ghost') {
         outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
       } else {
         outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
-        if (outlineDesign === 'double' && echoRequirement(grid, hole + hardGap, rhythm).feasible)
-          outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+        if (outlineDesign === 'double')
+          outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
       }
     }
     pts.push(...outline)
@@ -459,8 +515,8 @@ export default function App() {
           outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
         } else {
           outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
-          if (outlineDesign === 'double' && echoRequirement(raster.grid, hole + hardGap, rhythm).feasible)
-            outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, false, uniformRhythm))
+          if (outlineDesign === 'double')
+            outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
         }
       }
       pts.push(...outline)
@@ -676,7 +732,7 @@ export default function App() {
                   )}
                 </div>
                 <div className="chiprow">
-                  {['all', 'display', 'sans-serif', 'serif', 'handwriting', 'monospace'].map((c) => (
+                  {['all', ...(customFonts.length ? ['custom'] : []), 'display', 'sans-serif', 'serif', 'handwriting', 'monospace'].map((c) => (
                     <button key={c} className={`chip ${fontCat === c ? 'active' : ''}`} onClick={() => setFontCat(c)}>{c}</button>
                   ))}
                 </div>
@@ -696,19 +752,58 @@ export default function App() {
                       >
                         {f.f}
                         <span>{f.c}</span>
+                        {f.id.startsWith('custom:') && (
+                          <span
+                            className="delx"
+                            title={`Remove ${f.f}`}
+                            onClick={async (e) => {
+                              e.stopPropagation()
+                              await deleteFont(f.f).catch(() => {})
+                              fontCache.current.delete(f.id)
+                              setCustomFonts(await listFonts().catch(() => []))
+                              if (selFont === f.id) { setSelFont(''); setFont(null); setFontName('') }
+                              setStatus(`Removed ${f.f}`)
+                            }}
+                          >✕</span>
+                        )}
                       </button>
                     ))
                   )}
                 </div>
                 <p className="hint">↑ ↓ browse fonts live on canvas · Enter / Esc to close</p>
-                <label className="filebtn">Upload custom font (.ttf / .otf)
-                  <input type="file" accept=".ttf,.otf,.woff" onChange={async (e) => {
-                    const f = e.target.files?.[0]
-                    if (!f) return
-                    try {
-                      setFont(await loadFontFile(f)); setFontName(f.name); setSelFont(''); setFontOpen(false)
-                      setStatus(`Font loaded: ${f.name}`)
-                    } catch { setStatus('Could not parse that font') }
+                <label className="filebtn">Install fonts (.ttf / .otf — multiple ok)
+                  <input type="file" accept=".ttf,.otf,.woff" multiple onChange={async (e) => {
+                    const files = [...(e.target.files ?? [])]
+                    e.target.value = '' // same files can be re-picked later
+                    if (!files.length) return
+                    // parse first — a file that opentype can't read is
+                    // rejected up front, never installed
+                    let ok = 0
+                    const bad: string[] = []
+                    let last: { name: string; font: opentype.Font } | null = null
+                    for (const f of files) {
+                      const name = f.name.replace(/\.(ttf|otf|woff)$/i, '')
+                      try {
+                        const parsed = await loadFontFile(f)
+                        await saveFont(name, await f.arrayBuffer())
+                        fontCache.current.set(`custom:${name}`, parsed)
+                        last = { name, font: parsed }
+                        ok++
+                      } catch {
+                        bad.push(f.name)
+                      }
+                    }
+                    setCustomFonts(await listFonts().catch(() => []))
+                    if (last) {
+                      setFont(last.font)
+                      setFontName(last.name)
+                      setSelFont(`custom:${last.name}`)
+                    }
+                    setStatus(
+                      `Installed ${ok} font${ok === 1 ? '' : 's'}` +
+                      (bad.length ? ` · could not parse: ${bad.join(', ')}` : ''),
+                    )
+                    if (ok && !bad.length) setFontOpen(false)
                   }} />
                 </label>
               </div>
@@ -789,7 +884,7 @@ export default function App() {
               <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
                 <option value="single">Single outline</option>
                 <option value="double">
-                  {canEcho ? 'Double — echo row inside' : 'Double — needs upsize'}
+                  {canEcho ? 'Double — echo row outside' : 'Double — needs upsize'}
                 </option>
                 <option value="ghost">Ghost — floats outside</option>
                 <option value="centerline">Single-line lettering</option>
