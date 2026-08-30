@@ -566,6 +566,7 @@ export default function App() {
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
+  const stoneCanvasRef = useRef<HTMLCanvasElement>(null)
   const wrapRef = useRef<HTMLElement>(null)
   const [avail, setAvail] = useState({ w: 1200, h: 800 })
   useEffect(() => {
@@ -700,6 +701,48 @@ export default function App() {
   const previewH = previewLive && textPreview ? previewOffsetY + textHeight + 20 : 0
   const canvasW = Math.max(job.widthMm + 20, previewW, avail.w / zoom)
   const canvasH = Math.max(job.heightMm + 20, previewH, (avail.h - 36) / zoom)
+
+  // BITMAP STONE LAYER. Thousands of SVG <circle> nodes made the browser
+  // repaint the whole vector tree on every scroll and re-reconcile it on
+  // every state change — large designs crawled. One canvas paint replaces
+  // all of them; the SVG keeps only the grid, preview path, and events.
+  useEffect(() => {
+    const cv = stoneCanvasRef.current
+    if (!cv) return
+    const cssW = canvasW * zoom
+    const cssH = canvasH * zoom
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    cv.style.width = `${cssW}px`
+    cv.style.height = `${cssH}px`
+    cv.width = Math.round(cssW * dpr)
+    cv.height = Math.round(cssH * dpr)
+    const ctx = cv.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, cssW, cssH)
+    const dot = (x: number, y: number, r: number, fill: string, alpha: number, ring?: string) => {
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = fill
+      ctx.beginPath()
+      ctx.arc(x, y, r, 0, Math.PI * 2)
+      ctx.fill()
+      if (ring) {
+        ctx.globalAlpha = 1
+        ctx.strokeStyle = ring
+        ctx.lineWidth = 2
+        ctx.stroke()
+      }
+    }
+    for (const p of imagePreview ?? [])
+      dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
+    if (previewLive)
+      for (const p of previewStones ?? [])
+        dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
+    stones.forEach((s, i) =>
+      dot(s.x * zoom, s.y * zoom, (holeOf(s) / 2) * zoom, s.color ?? stoneColor[s.size] ?? '#8cf', 0.85, selection.has(i) ? '#fff' : undefined),
+    )
+    ctx.globalAlpha = 1
+  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor])
 
   const previewPath = useMemo(() => {
     if (!textPreview) return ''
@@ -1034,6 +1077,10 @@ export default function App() {
           <input type="range" min={1.5} max={30} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} />
           <span>{zoom.toFixed(1)} px/mm</span>
         </div>
+        {/* stones render on a bitmap: one paint instead of thousands of SVG
+            DOM circles, which made scrolling large designs crawl. The SVG
+            on top keeps the grid, the preview path, and mouse events. */}
+        <div style={{ position: 'relative', width: canvasW * zoom, height: canvasH * zoom }}>
         <svg
           ref={svgRef}
           width={canvasW * zoom}
@@ -1049,28 +1096,6 @@ export default function App() {
             </pattern>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
-          {imagePreview?.map((p, i) => (
-            <circle
-              key={`ip${i}`}
-              cx={(p.x + 10) * zoom}
-              cy={(p.y + previewOffsetY) * zoom}
-              r={((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom}
-              fill={p.color ?? '#8fb0ff'}
-              fillOpacity={0.55}
-              pointerEvents="none"
-            />
-          ))}
-          {previewLive && previewStones?.map((p, i) => (
-            <circle
-              key={`pv${i}`}
-              cx={(p.x + 10) * zoom}
-              cy={(p.y + previewOffsetY) * zoom}
-              r={((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom}
-              fill={p.color ?? '#8fb0ff'}
-              fillOpacity={0.55}
-              pointerEvents="none"
-            />
-          ))}
           {previewLive && previewPath && (
             <path
               d={previewPath}
@@ -1083,19 +1108,12 @@ export default function App() {
               pointerEvents="none"
             />
           )}
-          {stones.map((s, i) => (
-            <circle
-              key={i}
-              cx={s.x * zoom}
-              cy={s.y * zoom}
-              r={(holeOf(s) / 2) * zoom}
-              fill={s.color ?? stoneColor[s.size] ?? '#8cf'}
-              fillOpacity={0.85}
-              stroke={selection.has(i) ? '#fff' : 'none'}
-              strokeWidth={2}
-            />
-          ))}
         </svg>
+        <canvas
+          ref={stoneCanvasRef}
+          style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}
+        />
+        </div>
       </main>
     </div>
   )
