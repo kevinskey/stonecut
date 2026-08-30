@@ -72,6 +72,10 @@ const bareMask = new Uint8Array(w * h)
 for (let i = 0; i < w * h; i++) {
   if (!bin[i]) continue
   if (dt[i] / pxPerMm > pitch) continue // deep inside a wide stroke: no stones expected
+  // sub-stone shards (hairline drawing debris under ~0.8mm thick) are
+  // deliberately unrepresented — the app filters them as debris — so they
+  // don't count as bare either
+  if (dt[i] / pxPerMm < 0.4) continue
   const d = dStone[i] / pxPerMm
   bareDist.push(d)
   if (d > rhythm * 1.15) bareMask[i] = 1

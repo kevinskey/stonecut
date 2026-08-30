@@ -2094,7 +2094,11 @@ export function outlineOrSpine(
     if (bc.count) {
       const area = new Int32Array(bc.count + 1)
       for (let i2 = 0; i2 < w * h; i2++) if (bc.labels[i2]) area[bc.labels[i2]]++
-      const minArea = (pitch * pxPerMm) ** 2 * 0.2
+      // generous: the area gate only screens noise specks — whether a blob
+      // can actually hold a stone is decided by placement legality, and a
+      // 0.2 gate skipped real 3mm-square holes recurring in every glyph of
+      // a cartoon face
+      const minArea = (pitch * pxPerMm) ** 2 * 0.1
       const blob = new Uint8Array(w * h)
       for (let r2 = 1; r2 <= bc.count; r2++) {
         if (area[r2] < minArea) continue
@@ -2125,20 +2129,7 @@ export function outlineOrSpine(
         const paths = traceSkeleton(skel, w, h)
           .map((p) => smoothPath(p, 5).map(toMm))
           .sort((a2, b2) => b2.length - a2.length)
-        if ((globalThis as { SC_TRACE?: boolean }).SC_TRACE) {
-          let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity, n = 0
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (blob[i2]) {
-              n++
-              const bx = (i2 % w - padPx) / pxPerMm
-              const by = (Math.floor(i2 / w) - padPx) / pxPerMm
-              if (bx < bx0) bx0 = bx
-              if (bx > bx1) bx1 = bx
-              if (by < by0) by0 = by
-              if (by > by1) by1 = by
-            }
-          console.error(`[blob ${r2}] ${n}px x${bx0.toFixed(1)}..${bx1.toFixed(1)} y${by0.toFixed(1)}..${by1.toFixed(1)} medDt=${medDt.toFixed(2)} paths=${paths.length} lens=${paths.map((p2) => { let l = 0; for (let k = 1; k < p2.length; k++) l += Math.hypot(p2[k].x - p2[k - 1].x, p2[k].y - p2[k - 1].y); return l.toFixed(1) }).join(',')}`)
-        }
+        let blobPlaced = false
         for (const pth of paths) {
           let len = 0
           for (let k = 1; k < pth.length; k++)
@@ -2159,6 +2150,29 @@ export function outlineOrSpine(
           if (got.length) {
             dbg('taper', got)
             out.push(...got)
+            blobPlaced = true
+          }
+        }
+        // A compact blob whose skeleton is too short for a line — a serif
+        // TIP, the pointed end of a thin stroke — still deserves its stone:
+        // place ONE at the blob's deepest legal point. This is the "thin
+        // strokes with points" case; without it every extralight serif's
+        // tips sat bare.
+        if (!blobPlaced) {
+          let bi = -1
+          let bd = -1
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (blob[i2] && dt[i2] > bd) {
+              bd = dt[i2]
+              bi = i2
+            }
+          if (bi >= 0) {
+            const q = { x: (bi % w - padPx) / pxPerMm, y: (Math.floor(bi / w) - padPx) / pxPerMm }
+            if (okDeep(q) && idx.canPlace(q)) {
+              idx.add(q)
+              dbg('taper', [q])
+              out.push(q)
+            }
           }
         }
       }
