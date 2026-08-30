@@ -71,7 +71,7 @@ const bareDist = []
 const bareMask = new Uint8Array(w * h)
 for (let i = 0; i < w * h; i++) {
   if (!bin[i]) continue
-  if (dt[i] / pxPerMm > pitch) continue // deep inside a wide stroke: no stones expected
+  if (dt[i] / pxPerMm > pitch * 0.55) continue // deep inside a wide stroke: no stones expected (same cap as the sweep)
   // sub-stone shards (hairline drawing debris under ~0.8mm thick) are
   // deliberately unrepresented — the app filters them as debris — so they
   // don't count as bare either

@@ -2275,12 +2275,13 @@ export function outlineOrSpine(
     for (let i2 = 0; i2 < w * h; i2++)
       bare[i2] =
         labels[i2] &&
-        // edge zone reaches a full pitch deep. (In principle that touches
-        // the centreline of an exactly-8mm stem between two good wall rows,
-        // but across the 152-font suite the shallower caps left far more
-        // real holes than that edge case could ever cost: clean fonts
-        // 46/152 at full pitch vs 10-12 with 0.75-0.9 caps.)
-        ((wide[i2] > 0 && wide[i2] < needW * 1.6) || dt[i2] <= pitch * pxPerMm) &&
+        // The edge zone is SHALLOW (0.55 pitch): a missing boundary row
+        // always leaves bare pixels right at the edge, so rescuing deeper
+        // is never needed — and at display sizes the ring of pixels just
+        // under a pitch deep inside a huge letter was getting rescued into
+        // stone rings floating mid-stroke. (The harness metric uses the
+        // SAME cap; when they disagreed, every cap experiment misread.)
+        ((wide[i2] > 0 && wide[i2] < needW * 1.6) || dt[i2] <= pitch * 0.55 * pxPerMm) &&
         dStone[i2] / pxPerMm > rhythm * 0.95
           ? 1
           : 0
