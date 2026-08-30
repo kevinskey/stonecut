@@ -1371,8 +1371,12 @@ export function outlineOrSpine(
   const narrowLbls = new Set<number>()
   const wallContours: Pt[][] = []
   // ring bands (uniformly narrow closed loops with exactly two boundary
-  // contours) get a VECTOR midline instead of a pixel skeleton — see below
+  // contours) get a VECTOR midline instead of a pixel skeleton — see below.
+  // Open strokes (script letters: ONE boundary contour) get their midline
+  // from the same vector: opposite sides of the contour paired point-by-
+  // point. "Just follow the vector" — the drawn path, not a pixel skeleton.
   const bandRings: { outer: Pt[]; inner: Pt[] }[] = []
+  const openBands: { contour: Pt[]; medW: number }[] = []
   const bandLbls = new Set<number>()
   // Walls are placed from the MERGED outline, not the source contours.
   //
@@ -1708,6 +1712,18 @@ export function outlineOrSpine(
               spinedMask[i2] = 1
               thin[i2] = 0
             }
+        } else if (bc.length === 1 && med < needW * 0.85) {
+          // an OPEN narrow stroke — a script letter — follows its vector.
+          // Only when CLEARLY below two-row width: at the boundary the wall
+          // rows were already fine (Syncopate regressed when this claimed
+          // its at-the-limit strokes).
+          openBands.push({ contour: bc[0], medW: med })
+          bandLbls.add(lbl)
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (labels[i2] === lbl) {
+              spinedMask[i2] = 1
+              thin[i2] = 0
+            }
         } else {
           for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 1
         }
@@ -1877,6 +1893,114 @@ export function outlineOrSpine(
     const info = analyzeContour(simplifyContour(mid, holeMm / 6), pitch, rhythm)
     placeContourCorners(info, pitch, idx, out, undefined, rhythm)
     placeContourEdges(info, pitch, idx, out, insideTest, undefined, rhythm, uniformRhythm)
+  }
+  // OPEN-BAND MIDLINES — script strokes trace their own vector. The single
+  // boundary contour runs up one side of the stroke and back down the
+  // other; pairing each sample with its nearest opposite-side partner (far
+  // in arc, near in space) puts the midpoint on the stroke's centreline.
+  // Chaining the midpoint cloud rebuilds the drawn path — smooth, because
+  // the source is the font's vectors, not pixels.
+  for (const band of openBands) {
+    // resample the contour at ~0.6mm
+    const src = band.contour
+    const pts: Pt[] = []
+    for (let k = 0; k < src.length; k++) {
+      const a = src[k]
+      const b = src[(k + 1) % src.length]
+      const L = Math.hypot(b.x - a.x, b.y - a.y)
+      const steps = Math.max(1, Math.round(L / 0.6))
+      for (let s = 0; s < steps; s++)
+        pts.push({ x: a.x + ((b.x - a.x) * s) / steps, y: a.y + ((b.y - a.y) * s) / steps })
+    }
+    const n = pts.length
+    if (n < 8) continue
+    // cumulative arc for arc-distance tests
+    const cum = new Float64Array(n + 1)
+    for (let k = 0; k < n; k++) {
+      const b = pts[(k + 1) % n]
+      cum[k + 1] = cum[k] + Math.hypot(b.x - pts[k].x, b.y - pts[k].y)
+    }
+    const total = cum[n]
+    const minArc = Math.max(3, band.medW * 2.2)
+    // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid)
+    const cloudKeys = new Set<string>()
+    const cloud: Pt[] = []
+    for (let i = 0; i < n; i++) {
+      let bj = -1
+      let bd = Infinity
+      for (let j = 0; j < n; j++) {
+        let arc = Math.abs(cum[j] - cum[i])
+        arc = Math.min(arc, total - arc)
+        if (arc < minArc) continue
+        const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
+        if (dd < bd) {
+          bd = dd
+          bj = j
+        }
+      }
+      if (bj < 0) continue
+      // a true opposite partner sits about a stroke-width away; a far-off
+      // "nearest" means i is at a tip or junction mouth — skip it
+      if (Math.sqrt(bd) > band.medW * 1.8) continue
+      const m = { x: (pts[i].x + pts[bj].x) / 2, y: (pts[i].y + pts[bj].y) / 2 }
+      const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
+      if (cloudKeys.has(key)) continue
+      cloudKeys.add(key)
+      cloud.push(m)
+    }
+    // greedy-chain the cloud into open polylines
+    const used = new Uint8Array(cloud.length)
+    const chains: Pt[][] = []
+    for (let seed = 0; seed < cloud.length; seed++) {
+      if (used[seed]) continue
+      used[seed] = 1
+      const chain = [cloud[seed]]
+      for (const dir of [1, -1]) {
+        void dir
+        for (;;) {
+          const tip = dir === 1 ? chain[chain.length - 1] : chain[0]
+          let bi = -1
+          let bd2 = 1.44 // (1.2mm)^2 max link
+          for (let c2 = 0; c2 < cloud.length; c2++) {
+            if (used[c2]) continue
+            const dd = (cloud[c2].x - tip.x) ** 2 + (cloud[c2].y - tip.y) ** 2
+            if (dd < bd2) {
+              bd2 = dd
+              bi = c2
+            }
+          }
+          if (bi < 0) break
+          used[bi] = 1
+          if (dir === 1) chain.push(cloud[bi])
+          else chain.unshift(cloud[bi])
+        }
+      }
+      if (chain.length >= 3) chains.push(chain)
+    }
+    const minDeep2 = Math.min(holeMm / 2 + 0.1, Math.max(0.25, band.medW * 0.3))
+    const deepOk = (q: Pt) => {
+      const xi = Math.round(q.x * pxPerMm + padPx)
+      const yi = Math.round(q.y * pxPerMm + padPx)
+      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+      return dt[yi * w + xi] / pxPerMm >= minDeep2
+    }
+    chains.sort((a, b) => b.length - a.length)
+    for (const chain of chains) {
+      const sm = smoothPath(chain, 2)
+      let len = 0
+      for (let k = 1; k < sm.length; k++)
+        len += Math.hypot(sm[k].x - sm[k - 1].x, sm[k].y - sm[k - 1].y)
+      if (len < pitch * 0.7) continue
+      const got = placeOpenEven(sm, pitch, idx, rhythm).filter((q) => {
+        if (deepOk(q)) return true
+        idx.remove(q)
+        return false
+      })
+      if (got.length) {
+        dbg('vectorline', got)
+        out.push(...got)
+      }
+    }
   }
   const wallList = wallContours.filter((c) => !bandLbls.has(labelOf(c)))
   wallList.sort((a, b) => b.length - a.length)
