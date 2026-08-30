@@ -2053,7 +2053,9 @@ export function outlineOrSpine(
   // material that ended up farther than a beat from every stone and run a
   // line down its middle — narrow only, so the intentionally-empty interior
   // of a wide letter stays empty.
-  if (style === 'auto') {
+  // two passes: the first pass's stitches shrink the bare regions and leave
+  // small residuals at the seams; the second pass mops those up
+  for (let sweepPass = 0; sweepPass < 2 && style === 'auto'; sweepPass++) {
     // distance from every pixel to the nearest placed stone
     const sBin = new Uint8Array(w * h)
     sBin.fill(1)
@@ -2095,7 +2097,10 @@ export function outlineOrSpine(
             medW = ws2[Math.floor(ws2.length / 2)]
           }
         }
-        const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medW * 0.35))
+        // rescue stones judge depth loosely: the BLOB's skeleton (the bare
+        // region minus clearance bites) wanders off the stroke's centreline,
+        // and a strict depth bar dropped half the rescue line
+        const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medW * 0.2))
         const okDeep = (q: Pt) => {
           const xi = Math.round(q.x * pxPerMm + padPx)
           const yi = Math.round(q.y * pxPerMm + padPx)
@@ -2119,15 +2124,8 @@ export function outlineOrSpine(
               idx.remove(q)
               return false
             }
-            // hold near-rhythm distance to stones from other rows so the
-            // taper line JOINS the existing rows instead of clumping them
-            const tooClose = idx
-              .within(q, rhythm * 0.8)
-              .some((o) => Math.hypot(o.x - q.x, o.y - q.y) > 1e-9)
-            if (tooClose) {
-              idx.remove(q)
-              return false
-            }
+            // the spacing floor (canPlace) governs the stitch to existing
+            // rows; a rhythm-width bar here over-trimmed the rescue line
             return true
           })
           if (got.length) {
