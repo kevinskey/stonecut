@@ -3,7 +3,7 @@ import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
-import { SpacingIndex, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
@@ -374,13 +374,23 @@ export default function App() {
             `for an end stone — needs about ${needH} mm Height` +
             (fits ? `, or ${fits[0]} at this height.` : '.')
         }
+        // The physics wall: letters whose strokes sit closer together than
+        // the spacing floor can't be beaded at ANY placement quality — a
+        // tiny script's lowercase at SS10 simply doesn't fit. Say it.
+        const bareMsg =
+          bareFrac > 0.2 && textMode !== 'fill'
+            ? `${Math.round(bareFrac * 100)}% of these letters can't hold stones at this size — ` +
+              `details sit closer together than the stones are allowed to be. ` +
+              `Raise Height (try ${Math.ceil(textHeight * 1.8)} mm) or pick a smaller stone.`
+            : ''
         setStatus(
           noFill
             ? 'Strokes too light to fill at this size — raise Height, pick a bolder font, or lower Fill "From edge" / fill stone size'
-            : spinePct > 0.25 && textMode !== 'fill'
-              ? `${Math.round(spinePct * 100)}% of this design is too light to outline at this size — ` +
-                `those strokes are drawn as a single centre line. ${advice}`
-              : capMsg,
+            : bareMsg ||
+              (spinePct > 0.25 && textMode !== 'fill'
+                ? `${Math.round(spinePct * 100)}% of this design is too light to outline at this size — ` +
+                  `those strokes are drawn as a single centre line. ${advice}`
+                : capMsg),
         )
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]

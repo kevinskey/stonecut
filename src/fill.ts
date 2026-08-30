@@ -27,6 +27,11 @@ export const spinedWidths: number[] = []
  *  centered one would break the spacing floor. Lets the UI suggest the
  *  height or stone size that would close them. */
 export const capGaps: number[] = []
+/** Fraction (0..1) of the design's stoneable material left more than a
+ *  beat from every stone after all placement. High values mean the
+ *  LETTERS are too small for the stone — parallel strokes closer together
+ *  than the spacing floor — which no placer can fix; only size can. */
+export let bareFrac = 0
 export const debugSpans: { at: string; chords: number[]; r?: number; m0?: number; mFinal?: number; Lc?: number; E?: number; need?: number; att?: string }[] = []
 function dbg(cat: string, pts: Pt[]) {
   for (const p of pts) debugStones.push({ cat, x: p.x, y: p.y })
@@ -2441,6 +2446,31 @@ export function outlineOrSpine(
         idx.add(q)
       }
     }
+  }
+
+  // COVERAGE REPORT. What fraction of the stoneable material (edge zones
+  // and narrow strokes, minus sub-stone debris) ended up more than a beat
+  // from every stone? A high fraction is the physics wall — letters whose
+  // strokes sit closer together than the spacing floor — and the UI must
+  // SAY so instead of silently under-placing a tiny script.
+  {
+    const sBin = new Uint8Array(w * h).fill(1)
+    for (const q of out) {
+      const px = Math.round(q.x * pxPerMm + padPx)
+      const py = Math.round(q.y * pxPerMm + padPx)
+      if (px >= 0 && py >= 0 && px < w && py < h) sBin[py * w + px] = 0
+    }
+    const dStone = distanceTransform({ bin: sBin, w, h, pxPerMm, padPx })
+    let total = 0
+    let bare = 0
+    for (let i = 0; i < w * h; i++) {
+      if (!bin[i]) continue
+      const d = dt[i] / pxPerMm
+      if (d < 0.4 || d > pitch) continue
+      total++
+      if (dStone[i] / pxPerMm > rhythm * 1.15) bare++
+    }
+    bareFrac = total ? bare / total : 0
   }
 
   // NOTHING DELETES STONES AFTER PLACEMENT.
