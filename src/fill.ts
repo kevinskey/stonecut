@@ -1943,6 +1943,16 @@ export function outlineOrSpine(
       // "nearest" means i is at a tip or junction mouth — skip it
       if (Math.sqrt(bd) > band.medW * 1.8) continue
       const m = { x: (pts[i].x + pts[bj].x) / 2, y: (pts[i].y + pts[bj].y) / 2 }
+      // and the midpoint of a TRUE pair sits at the stroke's centre — about
+      // half the pair distance deep. A false pair across a junction's
+      // diagonal has a shallow midpoint; keeping those made limb lines
+      // zigzag between edges.
+      {
+        const xi = Math.round(m.x * pxPerMm + padPx)
+        const yi = Math.round(m.y * pxPerMm + padPx)
+        if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue
+        if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * 0.33) continue
+      }
       const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
       if (cloudKeys.has(key)) continue
       cloudKeys.add(key)
@@ -1976,6 +1986,32 @@ export function outlineOrSpine(
         }
       }
       if (chain.length >= 3) chains.push(chain)
+    }
+    // SPLICE chains whose ends nearly meet — a crossing or joint breaks the
+    // chain there, and an unspliced break becomes a gap in the bead line
+    for (let merged = true; merged; ) {
+      merged = false
+      outer: for (let a2 = 0; a2 < chains.length; a2++)
+        for (let b2 = a2 + 1; b2 < chains.length; b2++) {
+          const A = chains[a2]
+          const B = chains[b2]
+          const ends = [
+            [A[A.length - 1], B[0], 0],
+            [A[A.length - 1], B[B.length - 1], 1],
+            [A[0], B[0], 2],
+            [A[0], B[B.length - 1], 3],
+          ] as [Pt, Pt, number][]
+          for (const [p, q, mode] of ends) {
+            if (Math.hypot(p.x - q.x, p.y - q.y) > 2.2) continue
+            if (mode === 0) chains[a2] = A.concat(B)
+            else if (mode === 1) chains[a2] = A.concat([...B].reverse())
+            else if (mode === 2) chains[a2] = [...A].reverse().concat(B)
+            else chains[a2] = [...B].concat(A)
+            chains.splice(b2, 1)
+            merged = true
+            break outer
+          }
+        }
     }
     const minDeep2 = Math.min(holeMm / 2 + 0.1, Math.max(0.25, band.medW * 0.3))
     const deepOk = (q: Pt) => {
