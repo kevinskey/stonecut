@@ -1674,13 +1674,22 @@ export function outlineOrSpine(
     // mixes hairlines with wide stems (p90 far above the median) and is
     // untouched, keeping the per-part behaviour it was tuned for.
     {
+      // one pass collects widths AND member pixels per component; every
+      // per-label loop below iterates members, never the whole grid
       const wsBy = new Map<number, number[]>()
+      const lblMem = new Map<number, number[]>()
       for (let i2 = 0; i2 < w * h; i2++)
-        if (labels[i2] && wide[i2] > 0) {
-          let a = wsBy.get(labels[i2])
-          if (!a) wsBy.set(labels[i2], (a = []))
-          a.push(wide[i2])
+        if (labels[i2]) {
+          let m2 = lblMem.get(labels[i2])
+          if (!m2) lblMem.set(labels[i2], (m2 = []))
+          m2.push(i2)
+          if (wide[i2] > 0) {
+            let a = wsBy.get(labels[i2])
+            if (!a) wsBy.set(labels[i2], (a = []))
+            a.push(wide[i2])
+          }
         }
+      const lblMask = new Uint8Array(w * h)
       for (const [lbl, ws] of wsBy) {
         ws.sort((a, b) => a - b)
         const med = ws[Math.floor(ws.length / 2)]
@@ -1693,9 +1702,9 @@ export function outlineOrSpine(
         // falls back to the skeleton spine. Trace THIS component's own
         // boundary for the test — attributing shared merged-outline
         // contours to components sampled the wrong label near junctions.
-        const mask = new Uint8Array(w * h)
-        for (let i2 = 0; i2 < w * h; i2++) mask[i2] = labels[i2] === lbl ? 1 : 0
-        const bc = marchingSquares(mask, w, h)
+        const mem2 = lblMem.get(lbl) ?? []
+        for (const i2 of mem2) lblMask[i2] = 1
+        const bc = marchingSquares(lblMask, w, h)
           .map((ct) => ct.map((v) => ({ x: (v.x - padPx) / pxPerMm, y: (v.y - padPx) / pxPerMm })))
           .filter((ct) => {
             let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
@@ -1716,11 +1725,10 @@ export function outlineOrSpine(
           bandRings.push(a.length >= b.length ? { outer: a, inner: b } : { outer: b, inner: a })
           bandLbls.add(lbl)
           // midline replaces both walls AND the skeleton spine for this ring
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (labels[i2] === lbl) {
-              spinedMask[i2] = 1
-              thin[i2] = 0
-            }
+          for (const i2 of mem2) {
+            spinedMask[i2] = 1
+            thin[i2] = 0
+          }
         } else if (med < needW * 0.85) {
           // a narrow STROKE follows its vector — open paths, loops and
           // counters together. The WHOLE component is offered to the
@@ -1730,10 +1738,12 @@ export function outlineOrSpine(
           // single line. Only midpoints that actually land mask out walls,
           // so the component's contours stay in the wall list.
           openBands.push({ contours: bc, medW: med })
-          for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 0
+          for (const i2 of mem2) thin[i2] = 0
         } else {
-          for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 1
+          for (const i2 of mem2) thin[i2] = 1
         }
+        // clear the shared mask for the next label
+        for (const i2 of mem2) lblMask[i2] = 0
       }
     }
     const tp = labelComponents(thin, w, h)
@@ -2255,7 +2265,12 @@ export function outlineOrSpine(
   // of a wide letter stays empty.
   // two passes: the first pass's stitches shrink the bare regions and leave
   // small residuals at the seams; the second pass mops those up
-  for (let sweepPass = 0; sweepPass < 2 && style === 'auto'; sweepPass++) {
+  let sweepPlaced = true
+  for (let sweepPass = 0; sweepPass < 2 && style === 'auto' && sweepPlaced; sweepPass++) {
+    // second pass mops up seams the first pass exposed — but only if the
+    // first pass actually placed something; each pass costs a full
+    // distance transform and large designs were freezing the preview
+    sweepPlaced = false
     // distance from every pixel to the nearest placed stone
     const sBin = new Uint8Array(w * h)
     sBin.fill(1)
@@ -2287,28 +2302,34 @@ export function outlineOrSpine(
           : 0
     const bc = labelComponents(bare, w, h)
     if (bc.count) {
-      const area = new Int32Array(bc.count + 1)
-      for (let i2 = 0; i2 < w * h; i2++) if (bc.labels[i2]) area[bc.labels[i2]]++
+      // ONE pass collects every blob's member pixels; all per-blob work
+      // below iterates members only. The previous per-blob full-grid scans
+      // (five of them, times up to ~100 blobs, times every preview
+      // recompute) locked the app on large designs.
+      const members = new Map<number, number[]>()
+      for (let i2 = 0; i2 < w * h; i2++) {
+        const l2 = bc.labels[i2]
+        if (!l2) continue
+        let arr = members.get(l2)
+        if (!arr) members.set(l2, (arr = []))
+        arr.push(i2)
+      }
       // generous: the area gate only screens noise specks — whether a blob
       // can actually hold a stone is decided by placement legality, and a
       // 0.2 gate skipped real 3mm-square holes recurring in every glyph of
       // a cartoon face
       const minArea = (pitch * pxPerMm) ** 2 * 0.1
       const blob = new Uint8Array(w * h)
-      for (let r2 = 1; r2 <= bc.count; r2++) {
-        if (area[r2] < minArea) continue
+      for (const [r2, mem] of members) {
+        if (mem.length < minArea) continue
         let medDt = 0
         {
           const ds: number[] = []
-          for (let i2 = 0; i2 < w * h; i2++) {
-            blob[i2] = bc.labels[i2] === r2 ? 1 : 0
-            if (blob[i2]) ds.push(dt[i2] / pxPerMm)
-          }
-          if (ds.length) {
-            ds.sort((a2, b2) => a2 - b2)
-            medDt = ds[Math.floor(ds.length / 2)]
-          }
+          for (const i2 of mem) ds.push(dt[i2] / pxPerMm)
+          ds.sort((a2, b2) => a2 - b2)
+          medDt = ds[Math.floor(ds.length / 2)]
         }
+        void r2
         // A blob flanked by LIVE ROWS on both perpendicular sides is the
         // middle of a stroke whose walls already read — threading a third
         // column down such a stem turned a single outline into a fill.
@@ -2316,24 +2337,21 @@ export function outlineOrSpine(
         // stroke segment is deep too, but has no rows beside it.
         {
           // principal axis of the blob
-          let sx = 0, sy = 0, n2 = 0
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (blob[i2]) {
-              sx += i2 % w
-              sy += Math.floor(i2 / w)
-              n2++
-            }
-          const cx = sx / n2
-          const cy = sy / n2
+          let sx = 0, sy = 0
+          for (const i2 of mem) {
+            sx += i2 % w
+            sy += Math.floor(i2 / w)
+          }
+          const cx = sx / mem.length
+          const cy = sy / mem.length
           let xx = 0, xy = 0, yy2 = 0
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (blob[i2]) {
-              const dx2 = (i2 % w) - cx
-              const dy2 = Math.floor(i2 / w) - cy
-              xx += dx2 * dx2
-              xy += dx2 * dy2
-              yy2 += dy2 * dy2
-            }
+          for (const i2 of mem) {
+            const dx2 = (i2 % w) - cx
+            const dy2 = Math.floor(i2 / w) - cy
+            xx += dx2 * dx2
+            xy += dx2 * dy2
+            yy2 += dy2 * dy2
+          }
           const ang = 0.5 * Math.atan2(2 * xy, xx - yy2)
           // perpendicular to the blob's long axis, in px
           const px2 = -Math.sin(ang)
@@ -2341,8 +2359,9 @@ export function outlineOrSpine(
           const reach = rhythm * 1.2 * pxPerMm
           let both = 0
           let checked = 0
-          for (let i2 = 0; i2 < w * h; i2 += 7)
-            if (blob[i2]) {
+          for (let k2 = 0; k2 < mem.length; k2 += 7) {
+            const i2 = mem[k2]
+            {
               checked++
               const bx = i2 % w
               const by = Math.floor(i2 / w)
@@ -2358,6 +2377,7 @@ export function outlineOrSpine(
               }
               if (hitA && hitB) both++
             }
+          }
           if (checked && both / checked > 0.7) continue
         }
         // a rescue stone may sit as SHALLOW as the material it rescues: a
@@ -2371,6 +2391,7 @@ export function outlineOrSpine(
           if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
           return dt[yi * w + xi] / pxPerMm >= minDeep
         }
+        for (const i2 of mem) blob[i2] = 1
         const skel = skeletonize(blob, w, h)
         const paths = traceSkeleton(skel, w, h)
           .map((p) => smoothPath(p, 5).map(toMm))
@@ -2397,6 +2418,7 @@ export function outlineOrSpine(
             dbg('taper', got)
             out.push(...got)
             blobPlaced = true
+            sweepPlaced = true
           }
         }
         // A compact blob whose skeleton is too short for a line — a serif
@@ -2407,8 +2429,8 @@ export function outlineOrSpine(
         if (!blobPlaced) {
           let bi = -1
           let bd = -1
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (blob[i2] && dt[i2] > bd) {
+          for (const i2 of mem)
+            if (dt[i2] > bd) {
               bd = dt[i2]
               bi = i2
             }
@@ -2418,9 +2440,12 @@ export function outlineOrSpine(
               idx.add(q)
               dbg('taper', [q])
               out.push(q)
+              sweepPlaced = true
             }
           }
         }
+        // clear this blob's mask for the next iteration (shared array)
+        for (const i2 of mem) blob[i2] = 0
       }
     }
   }
