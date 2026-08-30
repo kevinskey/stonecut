@@ -61,7 +61,20 @@ function loadImage(file: File): Promise<HTMLImageElement> {
     const url = URL.createObjectURL(file)
     const img = new Image()
     img.onload = () => { URL.revokeObjectURL(url); resolve(img) }
-    img.onerror = reject
+    // rejecting with the raw event printed as "[object Event]" — name the
+    // actual problem. HEIC (iPhone photos) is the common case: it passes
+    // the image/* picker filter but Chrome cannot decode it.
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      const heic = /\.hei[cf]$/i.test(file.name) || /hei[cf]/i.test(file.type)
+      reject(
+        new Error(
+          heic
+            ? `${file.name} is an iPhone HEIC photo — Chrome can't decode it. Export it as PNG or JPG first.`
+            : `couldn't decode ${file.name}${file.type ? ` (${file.type})` : ''} — use PNG, JPG, or SVG.`,
+        ),
+      )
+    }
     img.src = url
   })
 }
