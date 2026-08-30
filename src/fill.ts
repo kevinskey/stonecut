@@ -2009,7 +2009,13 @@ export function outlineOrSpine(
                   .map((o) => ({ o, d: Math.hypot(o.x - q.x, o.y - q.y) }))
                   .sort((m, n) => m.d - n.d)
                   .slice(0, 2)
-                if (near.length === 2) {
+                // Judge the jog only against stones that could be this
+                // patch's OWN row neighbours. When even the second-nearest
+                // stone is over a beat away, the "line" is the opposite
+                // wall across the stroke — a script stroke wide enough for
+                // two rows whose second row never formed — and the patch is
+                // a missing row, not a jog.
+                if (near.length === 2 && near[1].d < rhythm * 1.05) {
                   const [a2, b2] = [near[0].o, near[1].o]
                   const L2 = Math.hypot(b2.x - a2.x, b2.y - a2.y)
                   const off =
@@ -2065,15 +2071,22 @@ export function outlineOrSpine(
       if (px >= 0 && py >= 0 && px < w && py < h) sBin[py * w + px] = 0
     }
     const dStone = distanceTransform({ bin: sBin, w, h, pxPerMm, padPx })
-    // The width cap only shields the interiors of genuinely WIDE letters
-    // (walled strokes are already protected by the distance test: material
-    // between two wall rows is never a beat from every stone). Spined
-    // regions are NOT excluded — a spine that failed to place is exactly
-    // the bare bowl this pass exists for.
+    // Bare NARROW strokes and the bare EDGE ZONE of any stroke qualify;
+    // only the deep interior of a wide stroke is exempt (outline mode
+    // leaves it empty on purpose). Walled strokes are already protected by
+    // the distance test — material between two live rows is never a beat
+    // from every stone. Spined regions are NOT excluded — a spine that
+    // failed to place is exactly the bare bowl this pass exists for.
     const bare = new Uint8Array(w * h)
     for (let i2 = 0; i2 < w * h; i2++)
       bare[i2] =
-        labels[i2] && wide[i2] > 0 && wide[i2] < needW * 1.6 &&
+        labels[i2] &&
+        // edge zone reaches a full pitch deep. (In principle that touches
+        // the centreline of an exactly-8mm stem between two good wall rows,
+        // but across the 152-font suite the shallower caps left far more
+        // real holes than that edge case could ever cost: clean fonts
+        // 46/152 at full pitch vs 10-12 with 0.75-0.9 caps.)
+        ((wide[i2] > 0 && wide[i2] < needW * 1.6) || dt[i2] <= pitch * pxPerMm) &&
         dStone[i2] / pxPerMm > rhythm * 0.95
           ? 1
           : 0
@@ -2085,22 +2098,23 @@ export function outlineOrSpine(
       const blob = new Uint8Array(w * h)
       for (let r2 = 1; r2 <= bc.count; r2++) {
         if (area[r2] < minArea) continue
-        let medW = 0
+        let medDt = 0
         {
-          const ws2: number[] = []
+          const ds: number[] = []
           for (let i2 = 0; i2 < w * h; i2++) {
             blob[i2] = bc.labels[i2] === r2 ? 1 : 0
-            if (blob[i2] && wide[i2] > 0) ws2.push(wide[i2])
+            if (blob[i2]) ds.push(dt[i2] / pxPerMm)
           }
-          if (ws2.length) {
-            ws2.sort((a2, b2) => a2 - b2)
-            medW = ws2[Math.floor(ws2.length / 2)]
+          if (ds.length) {
+            ds.sort((a2, b2) => a2 - b2)
+            medDt = ds[Math.floor(ds.length / 2)]
           }
         }
-        // rescue stones judge depth loosely: the BLOB's skeleton (the bare
-        // region minus clearance bites) wanders off the stroke's centreline,
-        // and a strict depth bar dropped half the rescue line
-        const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medW * 0.2))
+        // a rescue stone may sit as SHALLOW as the material it rescues: a
+        // bare edge sliver (a stroke's second wall row that never formed)
+        // hugs the boundary, and any depth bar keyed to stroke width
+        // disqualified every stone that could cover it
+        const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.25, medDt * 0.6))
         const okDeep = (q: Pt) => {
           const xi = Math.round(q.x * pxPerMm + padPx)
           const yi = Math.round(q.y * pxPerMm + padPx)
@@ -2111,6 +2125,20 @@ export function outlineOrSpine(
         const paths = traceSkeleton(skel, w, h)
           .map((p) => smoothPath(p, 5).map(toMm))
           .sort((a2, b2) => b2.length - a2.length)
+        if ((globalThis as { SC_TRACE?: boolean }).SC_TRACE) {
+          let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity, n = 0
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (blob[i2]) {
+              n++
+              const bx = (i2 % w - padPx) / pxPerMm
+              const by = (Math.floor(i2 / w) - padPx) / pxPerMm
+              if (bx < bx0) bx0 = bx
+              if (bx > bx1) bx1 = bx
+              if (by < by0) by0 = by
+              if (by > by1) by1 = by
+            }
+          console.error(`[blob ${r2}] ${n}px x${bx0.toFixed(1)}..${bx1.toFixed(1)} y${by0.toFixed(1)}..${by1.toFixed(1)} medDt=${medDt.toFixed(2)} paths=${paths.length} lens=${paths.map((p2) => { let l = 0; for (let k = 1; k < p2.length; k++) l += Math.hypot(p2[k].x - p2[k - 1].x, p2[k].y - p2[k - 1].y); return l.toFixed(1) }).join(',')}`)
+        }
         for (const pth of paths) {
           let len = 0
           for (let k = 1; k < pth.length; k++)
