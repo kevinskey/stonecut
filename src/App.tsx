@@ -199,6 +199,31 @@ export default function App() {
 
   // image panel
   const [imageFile, setImageFile] = useState<File | null>(null)
+  // ---- T-Shirt Brothers shape library (art-library API via dev proxy) ----
+  interface TsbShape { id: number; name: string; image_url: string; category: string }
+  const [tsbOpen, setTsbOpen] = useState(false)
+  const [tsbCats, setTsbCats] = useState<{ name: string; count: number }[]>([])
+  const [tsbCat, setTsbCat] = useState('')
+  const [tsbShapes, setTsbShapes] = useState<TsbShape[]>([])
+  const tsbThumb = (url: string) =>
+    url.replace('https://tshirtbrothers.atl1.cdn.digitaloceanspaces.com', '/tsb-cdn')
+  useEffect(() => {
+    if (!tsbOpen || tsbCats.length) return
+    fetch('/tsb-api/design/art-categories')
+      .then((r) => r.json())
+      .then((cats: { name: string; count: number }[]) => {
+        setTsbCats(cats.filter((c) => c.count > 0))
+        if (cats.length) setTsbCat(cats[0].name)
+      })
+      .catch(() => setStatus('Could not reach the T-Shirt Brothers shape library'))
+  }, [tsbOpen, tsbCats.length])
+  useEffect(() => {
+    if (!tsbOpen || !tsbCat) return
+    fetch(`/tsb-api/design/art-library?category=${encodeURIComponent(tsbCat)}&limit=30`)
+      .then((r) => r.json())
+      .then(setTsbShapes)
+      .catch(() => setStatus('Could not load shapes'))
+  }, [tsbOpen, tsbCat])
   const [imgWidth, setImgWidth] = useState(100)
   const [imgThreshold, setImgThreshold] = useState(128)
   const [imgInvert, setImgInvert] = useState(false)
@@ -1005,6 +1030,65 @@ export default function App() {
           </label>
           <label className="row"><input type="checkbox" checked={imgInvert} onChange={(e) => setImgInvert(e.target.checked)} /> Invert (light areas get stones)</label>
           <label className="row"><input type="checkbox" checked={imgAlphaKey} onChange={(e) => setImgAlphaKey(e.target.checked)} /> Use transparency (opaque art = design)</label>
+          <button
+            onClick={() => setTsbOpen((o) => !o)}
+            style={{ width: '100%', marginBottom: 6 }}
+          >
+            {tsbOpen ? 'Hide TSB shape library' : 'Browse my TSB shape library…'}
+          </button>
+          {tsbOpen && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="chiprow" style={{ maxHeight: 74, overflow: 'auto' }}>
+                {tsbCats.map((c) => (
+                  <button
+                    key={c.name}
+                    className={`chip ${tsbCat === c.name ? 'active' : ''}`}
+                    onClick={() => setTsbCat(c.name)}
+                  >
+                    {c.name} ({c.count})
+                  </button>
+                ))}
+              </div>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: 6,
+                  maxHeight: 240,
+                  overflow: 'auto',
+                  marginTop: 6,
+                }}
+              >
+                {tsbShapes.map((s) => (
+                  <img
+                    key={s.id}
+                    src={tsbThumb(s.image_url)}
+                    title={s.name}
+                    loading="lazy"
+                    style={{ width: '100%', background: '#fff', borderRadius: 6, cursor: 'pointer' }}
+                    onClick={async () => {
+                      try {
+                        setStatus(`Loading ${s.name}…`)
+                        const blob = await fetch(tsbThumb(s.image_url)).then((r) => {
+                          if (!r.ok) throw new Error(String(r.status))
+                          return r.blob()
+                        })
+                        const f = new File([blob], `${s.name}.png`, { type: blob.type || 'image/png' })
+                        setImageFile(f)
+                        const a = await analyzeImage(f)
+                        setImgThreshold(a.threshold)
+                        setImgInvert(a.invert)
+                        setImgAlphaKey(a.alphaKey)
+                        setStatus(`${s.name} — ${a.note}`)
+                      } catch {
+                        setStatus(`Could not load ${s.name}`)
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
             <input type="file" accept="image/*" onChange={async (e) => {
               const f = e.target.files?.[0] ?? null
