@@ -2274,6 +2274,57 @@ export function outlineOrSpine(
             medDt = ds[Math.floor(ds.length / 2)]
           }
         }
+        // A blob flanked by LIVE ROWS on both perpendicular sides is the
+        // middle of a stroke whose walls already read — threading a third
+        // column down such a stem turned a single outline into a fill.
+        // Judged by actual stone presence, not depth: a genuinely unstoned
+        // stroke segment is deep too, but has no rows beside it.
+        {
+          // principal axis of the blob
+          let sx = 0, sy = 0, n2 = 0
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (blob[i2]) {
+              sx += i2 % w
+              sy += Math.floor(i2 / w)
+              n2++
+            }
+          const cx = sx / n2
+          const cy = sy / n2
+          let xx = 0, xy = 0, yy2 = 0
+          for (let i2 = 0; i2 < w * h; i2++)
+            if (blob[i2]) {
+              const dx2 = (i2 % w) - cx
+              const dy2 = Math.floor(i2 / w) - cy
+              xx += dx2 * dx2
+              xy += dx2 * dy2
+              yy2 += dy2 * dy2
+            }
+          const ang = 0.5 * Math.atan2(2 * xy, xx - yy2)
+          // perpendicular to the blob's long axis, in px
+          const px2 = -Math.sin(ang)
+          const py2 = Math.cos(ang)
+          const reach = rhythm * 1.2 * pxPerMm
+          let both = 0
+          let checked = 0
+          for (let i2 = 0; i2 < w * h; i2 += 7)
+            if (blob[i2]) {
+              checked++
+              const bx = i2 % w
+              const by = Math.floor(i2 / w)
+              let hitA = false
+              let hitB = false
+              for (let s = pxPerMm; s <= reach; s += 2) {
+                const ax = Math.round(bx + px2 * s)
+                const ay = Math.round(by + py2 * s)
+                const bx2 = Math.round(bx - px2 * s)
+                const by3 = Math.round(by - py2 * s)
+                if (ax >= 0 && ay >= 0 && ax < w && ay < h && dStone[ay * w + ax] < 1.5) hitA = true
+                if (bx2 >= 0 && by3 >= 0 && bx2 < w && by3 < h && dStone[by3 * w + bx2] < 1.5) hitB = true
+              }
+              if (hitA && hitB) both++
+            }
+          if (checked && both / checked > 0.7) continue
+        }
         // a rescue stone may sit as SHALLOW as the material it rescues: a
         // bare edge sliver (a stroke's second wall row that never formed)
         // hugs the boundary, and any depth bar keyed to stroke width
