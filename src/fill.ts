@@ -1723,16 +1723,14 @@ export function outlineOrSpine(
             }
         } else if (med < needW * 0.85) {
           // a narrow STROKE follows its vector — open paths, loops and
-          // counters together. Only when CLEARLY below two-row width: at
-          // the boundary the wall rows were already fine (Syncopate
-          // regressed when this claimed its at-the-limit strokes).
+          // counters together. The WHOLE component is offered to the
+          // pairing pass, but the single-line-vs-walls decision is made
+          // PER PAIR by local width: a cursive capital wide enough for two
+          // rows keeps its walls while its connected lowercase runs as a
+          // single line. Only midpoints that actually land mask out walls,
+          // so the component's contours stay in the wall list.
           openBands.push({ contours: bc, medW: med })
-          bandLbls.add(lbl)
-          for (let i2 = 0; i2 < w * h; i2++)
-            if (labels[i2] === lbl) {
-              spinedMask[i2] = 1
-              thin[i2] = 0
-            }
+          for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 0
         } else {
           for (let i2 = 0; i2 < w * h; i2++) if (labels[i2] === lbl) thin[i2] = 1
         }
@@ -1960,6 +1958,10 @@ export function outlineOrSpine(
       // a true opposite partner sits about a stroke-width away; a far-off
       // "nearest" means i is at a tip or junction mouth — skip it
       if (Math.sqrt(bd) > band.medW * 1.8) continue
+      // PER-PAIR width decision: wide enough here for two wall rows means
+      // NO midpoint — the walls keep this stretch (a cursive capital joined
+      // to a thin lowercase was getting a midline plus rescue rows)
+      if (Math.sqrt(bd) >= needW * 0.85) continue
       const m = { x: (pts[i].x + pts[bj].x) / 2, y: (pts[i].y + pts[bj].y) / 2 }
       // and the midpoint of a TRUE pair sits at the stroke's centre — about
       // half the pair distance deep. A false pair across a junction's
@@ -1970,6 +1972,20 @@ export function outlineOrSpine(
         const yi = Math.round(m.y * pxPerMm + padPx)
         if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue
         if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * 0.33) continue
+      }
+      // walls stand down exactly where the single line takes over: paint
+      // the mask as a disk covering the local stroke around this midpoint
+      {
+        const mr = Math.ceil((Math.sqrt(bd) / 2 + 0.5) * pxPerMm)
+        const mx = Math.round(m.x * pxPerMm + padPx)
+        const my = Math.round(m.y * pxPerMm + padPx)
+        for (let dy2 = -mr; dy2 <= mr; dy2++)
+          for (let dx2 = -mr; dx2 <= mr; dx2++) {
+            if (dx2 * dx2 + dy2 * dy2 > mr * mr) continue
+            const x2 = mx + dx2
+            const y2 = my + dy2
+            if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h) spinedMask[y2 * w + x2] = 1
+          }
       }
       const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
       if (cloudKeys.has(key)) continue
