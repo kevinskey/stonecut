@@ -1381,7 +1381,7 @@ export function outlineOrSpine(
   // from the same vector: opposite sides of the contour paired point-by-
   // point. "Just follow the vector" — the drawn path, not a pixel skeleton.
   const bandRings: { outer: Pt[]; inner: Pt[] }[] = []
-  const openBands: { contour: Pt[]; medW: number }[] = []
+  const openBands: { contours: Pt[][]; medW: number }[] = []
   const bandLbls = new Set<number>()
   // Walls are placed from the MERGED outline, not the source contours.
   //
@@ -1707,7 +1707,11 @@ export function outlineOrSpine(
             }
             return x1 - x0 >= holeMm || y1 - y0 >= holeMm
           })
-        if (bc.length === 2) {
+        if (bc.length === 2 && Math.min(bc[0].length, bc[1].length) >= Math.max(bc[0].length, bc[1].length) * 0.25) {
+          // a true RING: two boundary contours of comparable length. (A
+          // cursive word with one tiny loop counter also has two contours —
+          // pairing its giant outer against the little loop produced
+          // garbage, hence the length-ratio gate.)
           const [a, b] = bc
           bandRings.push(a.length >= b.length ? { outer: a, inner: b } : { outer: b, inner: a })
           bandLbls.add(lbl)
@@ -1717,12 +1721,12 @@ export function outlineOrSpine(
               spinedMask[i2] = 1
               thin[i2] = 0
             }
-        } else if (bc.length === 1 && med < needW * 0.85) {
-          // an OPEN narrow stroke — a script letter — follows its vector.
-          // Only when CLEARLY below two-row width: at the boundary the wall
-          // rows were already fine (Syncopate regressed when this claimed
-          // its at-the-limit strokes).
-          openBands.push({ contour: bc[0], medW: med })
+        } else if (med < needW * 0.85) {
+          // a narrow STROKE follows its vector — open paths, loops and
+          // counters together. Only when CLEARLY below two-row width: at
+          // the boundary the wall rows were already fine (Syncopate
+          // regressed when this claimed its at-the-limit strokes).
+          openBands.push({ contours: bc, medW: med })
           bandLbls.add(lbl)
           for (let i2 = 0; i2 < w * h; i2++)
             if (labels[i2] === lbl) {
@@ -1906,26 +1910,33 @@ export function outlineOrSpine(
   // Chaining the midpoint cloud rebuilds the drawn path — smooth, because
   // the source is the font's vectors, not pixels.
   for (const band of openBands) {
-    // resample the contour at ~0.6mm
-    const src = band.contour
+    // resample EVERY contour of the component at ~0.6mm; a sample knows
+    // which contour it came from and its arc position on it. The opposite
+    // side of a stroke can be the same contour (an open stroke folds back)
+    // or a different one (a loop's counter) — both pair the same way.
     const pts: Pt[] = []
-    for (let k = 0; k < src.length; k++) {
-      const a = src[k]
-      const b = src[(k + 1) % src.length]
-      const L = Math.hypot(b.x - a.x, b.y - a.y)
-      const steps = Math.max(1, Math.round(L / 0.6))
-      for (let s = 0; s < steps; s++)
-        pts.push({ x: a.x + ((b.x - a.x) * s) / steps, y: a.y + ((b.y - a.y) * s) / steps })
+    const cid: number[] = []
+    const arcs: number[] = []
+    const totals: number[] = []
+    for (let ci = 0; ci < band.contours.length; ci++) {
+      const src = band.contours[ci]
+      let arc = 0
+      for (let k = 0; k < src.length; k++) {
+        const a = src[k]
+        const b = src[(k + 1) % src.length]
+        const L = Math.hypot(b.x - a.x, b.y - a.y)
+        const steps = Math.max(1, Math.round(L / 0.6))
+        for (let s = 0; s < steps; s++) {
+          pts.push({ x: a.x + ((b.x - a.x) * s) / steps, y: a.y + ((b.y - a.y) * s) / steps })
+          cid.push(ci)
+          arcs.push(arc + (L * s) / steps)
+        }
+        arc += L
+      }
+      totals[ci] = arc
     }
     const n = pts.length
     if (n < 8) continue
-    // cumulative arc for arc-distance tests
-    const cum = new Float64Array(n + 1)
-    for (let k = 0; k < n; k++) {
-      const b = pts[(k + 1) % n]
-      cum[k + 1] = cum[k] + Math.hypot(b.x - pts[k].x, b.y - pts[k].y)
-    }
-    const total = cum[n]
     const minArc = Math.max(3, band.medW * 2.2)
     // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid)
     const cloudKeys = new Set<string>()
@@ -1934,9 +1945,11 @@ export function outlineOrSpine(
       let bj = -1
       let bd = Infinity
       for (let j = 0; j < n; j++) {
-        let arc = Math.abs(cum[j] - cum[i])
-        arc = Math.min(arc, total - arc)
-        if (arc < minArc) continue
+        if (cid[j] === cid[i]) {
+          let arc = Math.abs(arcs[j] - arcs[i])
+          arc = Math.min(arc, totals[cid[i]] - arc)
+          if (arc < minArc) continue
+        }
         const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
         if (dd < bd) {
           bd = dd
