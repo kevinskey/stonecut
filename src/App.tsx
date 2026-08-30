@@ -440,6 +440,14 @@ export default function App() {
           const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
         }
+        // same physics advisory text gets: artwork lines thinner than the
+        // stone floor can't be traced, and silence read as a broken trace
+        if (imgMode !== 'fill' && bareFrac > 0.2)
+          setStatus(
+            `${Math.round(bareFrac * 100)}% of this artwork can't hold stones at this size — ` +
+            `its lines sit closer together than the stones are allowed to be. ` +
+            `Raise Width (try ${Math.ceil(imgWidth * 1.8)} mm) or pick a smaller stone.`,
+          )
         setImagePreview(pts)
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
