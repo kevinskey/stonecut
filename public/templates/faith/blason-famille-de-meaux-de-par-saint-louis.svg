@@ -1,0 +1,32 @@
+<svg width="600" height="660" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<defs>
+<radialGradient id="sheen" cx="221" cy="226" fx="221" fy="226" r="300" gradientTransform="matrix(1.353218,0,0,1.348928,-77,-85)" gradientUnits="userSpaceOnUse">
+<stop stop-color="#FFF" stop-opacity=".31"/>
+<stop offset="0.19" stop-color="#FFF" stop-opacity=".25"/>
+<stop offset="0.6" stop-color="#6B6B6B" stop-opacity=".13"/>
+<stop offset="1" stop-color="#000" stop-opacity=".13"/>
+</radialGradient>
+</defs>
+<g fill="#FFF">
+<path id="shield" d="M1.5 1.5h597V280A570 445 0 0 1 300 658.5 570 445 0 0 1 1.5 280Z"/>
+</g>
+
+<g id="motif" transform="translate(300,543.25)">
+	<g id="m">
+		<path id="m" d="M-20.2-43.66a20.7 21.6 0 0 1 40.4 0c1.68 7 2.3 10.36 7.7 15.76s8.76 6.02 15.76 7.7a21.6 20.7 0 0 1 0 40.4c-7 1.68-10.36 2.3-15.76 7.7s-6.02 8.76-7.7 15.76a20.7 21.6 0 0 1-40.4 0c-1.68-7-2.3-10.36-7.7-15.76s-8.76-6.02-15.76-7.7a21.6 20.7 0 0 1 0-40.4c7-1.68 10.36-2.3 15.76-7.7s6.02-8.76 7.7-15.76" fill="none" stroke="#000" stroke-width="8.2"/>
+		<g id="n2">
+			<path id="n" d="M-2.9-63.92c1.79-1.85 5.34-5.6 6.74-6.66 1.55-1.12 2.84-.55 1.81 1.62L2.49-63.45M27.4-23.43c-2.8-.34-8.1-.84-11.1-1.24-2.23-.26-1.77-2.2-.2-2.43l7.13-1"/>
+			<use xlink:href="#n" transform="rotate(90)"/>
+		</g>
+		<use xlink:href="#n2" transform="rotate(180)"/>
+	</g>
+	<use xlink:href="#m" transform="rotate(45)"/>
+</g>
+<g id="motif2">
+	<use xlink:href="#motif" x="-182.32" y="-428.75"/>
+	<use xlink:href="#motif" x="-182.32" y="-211"/>
+</g>
+<use xlink:href="#motif2" x="364.64"/>
+
+<use xlink:href="#shield" fill="url(#sheen)" stroke="#000" stroke-width="3"/>
+</svg>

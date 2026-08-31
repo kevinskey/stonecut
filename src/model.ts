@@ -3,6 +3,7 @@ export interface Stone {
   y: number // mm, center
   size: string // key into stone size table
   color?: string // display/design color (multi-color templates)
+  layer?: 'outline' | 'fill' // cut separation — templates are cut per layer
 }
 
 export interface StoneSpec {

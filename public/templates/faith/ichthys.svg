@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns:svg="http://www.w3.org/2000/svg" xmlns="http://www.w3.org/2000/svg"
+version="1.1" width="360" height="160">
+<title>Diagram of a fish containing the word &quot;Ichthys&quot;</title>
+<path d="M 340,15 C 215,185 90,145 20,75 C 90,15 215,-25 340,140"
+style="fill:none;stroke:black;stroke-width:12;stroke-linecap:round"
+id="shape" /><text x="73" y="93"
+style="font-size:50px;text-align:start;text-anchor:start;font-family:Times New Roman">ΙΧΘΥΣ</text></svg>

@@ -20,7 +20,7 @@ const MARGIN = 5 // mm margin around design in exports
 // how wide the design spacing is set
 const hardGapOf = (spacing: number) => Math.max(0.5, Math.min(spacing, 1.2))
 
-function Section({ title, defaultOpen = true, children }: {
+function Section({ title, defaultOpen = false, children }: {
   title: string
   defaultOpen?: boolean
   children: React.ReactNode
@@ -43,11 +43,16 @@ function loadPresets(): MaterialPreset[] {
 
 export default function App() {
   const [stones, setStones] = useState<Stone[]>([])
+  const stonesRef = useRef<Stone[]>([])
+  // last image commit — while untouched, generation-setting changes REGENERATE
+  // it in place instead of only affecting the next add
+  const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[] } | null>(null)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => ({ ...DEFAULT_SIZES }))
   const [curSize, setCurSize] = useState('SS10')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
+  const [addSize, setAddSize] = useState<'auto' | string>('auto') // stone size for manual adds
   const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline'>('single')
   const [strokePolicy, setStrokePolicy] = useState<'auto' | 'walls'>('auto')
   const [uniformRhythm, setUniformRhythm] = useState(true)
@@ -55,10 +60,18 @@ export default function App() {
   const [fillStyle, setFillStyle] = useState<'grid' | 'brick'>('brick')
   const [fillSize, setFillSize] = useState('SS6')
   const [fillColor, setFillColor] = useState('#7ec8e3')
+  const [outlineColor, setOutlineColor] = useState('#85d653')
   const [echoUpsize, setEchoUpsize] = useState<number | null>(null)
   const outlineStyle: 'auto' | 'walls' | 'centerline' =
     outlineDesign === 'centerline' ? 'centerline' : strokePolicy
   const [zoom, setZoom] = useState(6) // px per mm
+  // artboard: the physical sheet, sized in true inches (1in = 25.4mm)
+  const [boardWIn, setBoardWIn] = useState(() => +(localStorage.getItem('stonecut.boardW') ?? 12))
+  const [boardHIn, setBoardHIn] = useState(() => +(localStorage.getItem('stonecut.boardH') ?? 12))
+  useEffect(() => { localStorage.setItem('stonecut.boardW', String(boardWIn)) }, [boardWIn])
+  useEffect(() => { localStorage.setItem('stonecut.boardH', String(boardHIn)) }, [boardHIn])
+  const boardWmm = boardWIn * 25.4
+  const boardHmm = boardHIn * 25.4
   const [status, setStatus] = useState('Ready')
 
   // text panel
@@ -200,6 +213,41 @@ export default function App() {
   // image panel
   const [imageFile, setImageFile] = useState<File | null>(null)
   // ---- T-Shirt Brothers shape library (art-library API via dev proxy) ----
+  interface TemplateItem { name: string; file: string; license: string; source: string }
+  interface TemplateCat { slug: string; label: string; items: TemplateItem[] }
+  const [tplCats, setTplCats] = useState<TemplateCat[]>([])
+  const [tplCat, setTplCat] = useState('')
+  useEffect(() => {
+    fetch('/templates/index.json')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((m: { categories: TemplateCat[] }) => {
+        const cats = m.categories.filter((c) => c.items.length > 0)
+        setTplCats(cats)
+        if (cats.length) setTplCat(cats[0].slug)
+      })
+      .catch(() => {}) // templates are optional — the section just stays empty
+  }, [])
+  const loadTemplate = async (t: TemplateItem) => {
+    try {
+      setStatus(`Loading ${t.name}…`)
+      const blob = await fetch(`/templates/${t.file}`).then((r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.blob()
+      })
+      const f = new File([blob], `${t.name}.svg`, { type: 'image/svg+xml' })
+      setImageFile(f)
+      const a = await analyzeImage(f)
+      setImgThreshold(a.threshold)
+      setImgInvert(a.invert)
+      setImgAlphaKey(a.alphaKey)
+      setImgLinework(a.linework)
+      applyStrokeStyle(a)
+      setStatus(`${t.name} — ${a.note}`)
+    } catch {
+      setStatus(`Could not load ${t.name}`)
+    }
+  }
+
   interface TsbShape { id: number; name: string; image_url: string; category: string }
   const [tsbOpen, setTsbOpen] = useState(false)
   const [tsbCats, setTsbCats] = useState<{ name: string; count: number }[]>([])
@@ -285,7 +333,59 @@ export default function App() {
       return null
     }
   }, [font, text, textHeight, letterSpacing])
-  const previewOffsetY = stones.length ? bbox.maxY + 10 : 10
+  // The preview's Y offset is PINNED when a preview session starts, not
+  // derived live from the bbox. Deriving it live meant every manually added
+  // hole grew the bbox and shoved the whole previewed design away from the
+  // cursor — placing a hole on top of the artwork was impossible.
+  const [previewBaseY, setPreviewBaseY] = useState<number | null>(null)
+  const layoutRef = useRef({ len: 0, maxY: 0 })
+  useEffect(() => {
+    layoutRef.current = { len: stones.length, maxY: bbox.maxY }
+    stonesRef.current = stones
+  })
+  const pinPreviewBase = useCallback(() => {
+    setPreviewBaseY((prev) => prev ?? (layoutRef.current.len ? layoutRef.current.maxY + 10 : 10))
+  }, [])
+  const previewOffsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+
+  // Line art wants ONE row of stones down each stroke, not a wall row on both
+  // edges. When the analyzed artwork's typical stroke is too narrow to hold
+  // two readable rows at the current stone pitch, switch Outline design to
+  // centerline; solid artwork returns to single outline (double/ghost choices
+  // are left alone).
+  const applyStrokeStyle = useCallback(
+    (a: { strokePx: number; strokeDeciles?: number[]; strokeMax?: number; sampleW: number }) => {
+      if (!a.strokePx || !a.sampleW) return
+      const toMm = (px: number) => px * (imgWidth / a.sampleW)
+      const pitch = (sizes[curSize]?.holeMm ?? 3.4) + gap
+      // Style auto-matches the artwork. "Wide share" is the fraction of the
+      // design thick enough to hold fill rows: a music note's solid head
+      // reads wide even though its thin stem drags the p90 down, so it fills;
+      // a basketball's uniform strokes read narrow everywhere, so it gets a
+      // centerline outline with no fill.
+      // Absolute widths cannot separate art types — a chunky icon's strokes
+      // overlap a music note's head in millimetres. SHAPE statistics can:
+      // pure line art is thin-dominant AND uniform (its p96 width is just a
+      // junction bulge, ~2x its median), while blob-bearing art (note heads,
+      // mascot bodies on thin limbs) is thin-dominant but NOT uniform. Solid
+      // art isn't thin-dominant at all.
+      const deciles = a.strokeDeciles ?? []
+      const p50 = toMm(deciles[4] ?? a.strokePx)
+      const thinDominant = p50 < pitch * 1.6
+      const blobby = p50 > 0 && toMm(a.strokeMax ?? 0) / p50 >= 2.5
+      if (thinDominant && !blobby) {
+        // uniform line drawing: one row of stones per line, nothing to fill
+        setOutlineDesign('centerline')
+        setImgMode('outline')
+      } else {
+        // solid or mixed art: walls + fill; thin limbs still get single rows
+        // from the per-part machinery in outlineOrSpine
+        setOutlineDesign((prev) => (prev === 'centerline' ? 'single' : prev))
+        setImgMode('both')
+      }
+    },
+    [imgWidth, sizes, curSize, gap],
+  )
 
   // live stone preview: settings changes (size, gap, style) re-stone the
   // preview automatically, debounced so typing stays smooth. Committing hides
@@ -294,7 +394,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -325,7 +425,7 @@ export default function App() {
               outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
           }
         }
-        pts.push(...outline)
+        pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
         // While the font picker is open you're comparing letterforms, and the
         // fill is by far the most expensive stage — computing it on every
         // arrow-key step blocked the main thread for over a second and made
@@ -350,7 +450,7 @@ export default function App() {
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
-          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
           if (!f.length && textMode === 'both') noFill = true
         }
         // Recompute the advisory EVERY run, including clearing it. Setting it
@@ -418,6 +518,7 @@ export default function App() {
                   `those strokes are drawn as a single centre line. ${advice}`
                 : capMsg),
         )
+        pinPreviewBase()
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
         ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ ...s, chords: [...s.chords] }))
@@ -428,12 +529,21 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
   useEffect(() => {
     if (!imageFile) return
+    // while the committed design is still regenerable in place, settings
+    // changes morph IT (effect below) — a second preview stacked underneath
+    // only confused things
+    if (
+      lastImageRef.current &&
+      lastImageRef.current.file === imageFile &&
+      stonesRef.current === lastImageRef.current.after
+    )
+      return
     const t = window.setTimeout(async () => {
       try {
         const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
@@ -452,7 +562,7 @@ export default function App() {
               outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
           }
         }
-        pts.push(...outline)
+        pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
         if (imgMode !== 'outline') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
           const fGap = hardGapOf(gap)
@@ -464,7 +574,7 @@ export default function App() {
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
           for (const p of outline) fIdx.add(p, hole / 2)
           const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
-          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
         }
         // same physics advisory text gets: artwork lines thinner than the
         // stone floor can't be traced, and silence read as a broken trace
@@ -474,6 +584,7 @@ export default function App() {
             `its lines sit closer together than the stones are allowed to be. ` +
             `Raise Width (try ${Math.ceil(imgWidth * 1.8)} mm) or pick a smaller stone.`,
           )
+        pinPreviewBase()
         setImagePreview(pts)
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
@@ -483,12 +594,12 @@ export default function App() {
     }, 350)
     return () => window.clearTimeout(t)
   }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
-      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
+      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
-    (pts: { x: number; y: number; size?: string; color?: string }[], offsetY: number) => {
-      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color }))
+    (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number) => {
+      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline' }))
       mutate((prev) => {
         // half-gap threshold: safety net for merges only — relaxed fills sit
         // slightly under full pitch by design and must not get culled here
@@ -519,7 +630,7 @@ export default function App() {
           outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
       }
     }
-    pts.push(...outline)
+    pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
     if (textMode !== 'outline') {
       const fHole = sizes[fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
@@ -535,13 +646,16 @@ export default function App() {
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
       const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
-      pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+      pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
-    const offsetY = stones.length ? bbox.maxY + 10 : 10
+    // commit exactly where the preview showed; release the pin so the next
+    // preview session stacks below the committed stones
+    const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
     addGenerated(pts, offsetY)
+    setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, previewBaseY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -552,7 +666,7 @@ export default function App() {
       const hardGap = hardGapOf(gap)
       const rhythm = hole + gap
       const idx = new SpacingIndex(hole + hardGap)
-      const pts: { x: number; y: number; size?: string; color?: string }[] = []
+      const pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[] = []
       let outline: { x: number; y: number }[] = []
       if (imgMode !== 'fill') {
         if (outlineDesign === 'ghost') {
@@ -563,7 +677,7 @@ export default function App() {
             outline = outline.concat(offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
         }
       }
-      pts.push(...outline)
+      pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
       if (imgMode !== 'outline') {
         const fHole = sizes[fillSize]?.holeMm ?? 2.5
         const fGap = hardGapOf(gap)
@@ -575,20 +689,56 @@ export default function App() {
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
         for (const p of outline) fIdx.add(p, hole / 2)
         const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
-        pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor })))
+        pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
       }
-      const offsetY = stones.length ? bbox.maxY + 10 : 10
-      addGenerated(pts, offsetY)
+      const last = lastImageRef.current
+      const replacing = !!(last && last.file === imageFile && stones === last.after)
+      const base = replacing ? last.before : stones
+      const offsetY = replacing
+        ? last.offsetY
+        : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+      const fresh: Stone[] = pts.map((p) => ({
+        x: p.x + 10,
+        y: p.y + offsetY,
+        size: p.size ?? curSize,
+        color: p.color,
+        layer: p.layer ?? 'outline',
+      }))
+      const kept = removeCollisions(
+        [...base, ...fresh],
+        (st) => sizes[st.size]?.holeMm ?? 3,
+        hardGapOf(gap) * 0.5,
+      )
+      if (!replacing) pushUndo(stones) // regens share the original undo point
+      setStones(kept)
+      lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept }
+      setPreviewBaseY(null)
       setImagePreview(null)
       setStatus(
         pts.length
-          ? `Added ${pts.length} stones from image`
+          ? `${replacing ? 'Regenerated' : 'Added'} ${pts.length} stones from image`
           : 'No stones — the artwork read as background. Try the Invert box or move the Threshold slider.',
       )
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+
+  // Live regeneration: while the last image commit is untouched, any
+  // generation-setting change re-runs it in place (debounced like a preview).
+  const generateImageRef = useRef<() => Promise<void>>(async () => {})
+  useEffect(() => {
+    generateImageRef.current = generateImage
+  })
+  useEffect(() => {
+    const last = lastImageRef.current
+    if (!last || last.file !== imageFile || stonesRef.current !== last.after) return
+    const t = window.setTimeout(() => {
+      void generateImageRef.current()
+    }, 400)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -603,6 +753,9 @@ export default function App() {
     return () => ro.disconnect()
   }, [])
   const drag = useRef<{ startX: number; startY: number; moved: boolean; orig: Stone[] } | null>(null)
+  // marquee: drag over empty canvas in Select mode to box-select stones
+  const marqueeRef = useRef<{ x0: number; y0: number; additive: boolean } | null>(null)
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
   const toMm = useCallback(
     (e: { clientX: number; clientY: number }) => {
@@ -615,14 +768,52 @@ export default function App() {
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
       const p = toMm(e)
-      const hit = stones.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) <= holeOf(s) / 2 + 0.5)
+      // Add mode gets NO hit slop: dense fills sit closer together than the
+      // 0.5mm select-mode slop, so with slop every click in a gap "hit" a
+      // neighbour and erased it — adding a hole between stones was impossible.
+      const slop = tool === 'add' ? 0 : 0.5
+      const hit = stones.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) <= holeOf(s) / 2 + slop)
       if (tool === 'add') {
-        if (hit === -1) mutate((prev) => [...prev, { x: p.x, y: p.y, size: curSize }])
+        if (hit === -1) {
+          // "auto" matches whatever field the click lands in: a click inside
+          // the fill picks up the fill stone's size and colour, a click along
+          // the outline picks up the outline stone's — manual repairs blend in
+          // instead of dropping an outline-sized stone into an SS6 fill
+          let size = addSize === 'auto' ? curSize : addSize
+          let color: string | undefined
+          let layer: 'outline' | 'fill' = 'outline'
+          if (stones.length) {
+            // Nearest stone PER LAYER, outline favoured: a click in a gap ON
+            // the outline ring is closer to the fill stone just inside it
+            // than to its outline neighbours along the ring, so a plain
+            // nearest-stone match painted outline repairs in fill colour.
+            let bo = -1
+            let boD = 15
+            let bf = -1
+            let bfD = 15
+            for (let i = 0; i < stones.length; i++) {
+              const d = Math.hypot(stones[i].x - p.x, stones[i].y - p.y)
+              if ((stones[i].layer ?? 'outline') === 'fill') {
+                if (d < bfD) { bfD = d; bf = i }
+              } else if (d < boD) { boD = d; bo = i }
+            }
+            const best = bo >= 0 && (bf < 0 || boD <= bfD + 3) ? bo : bf
+            if (best >= 0) {
+              // blend in with the field being clicked into: layer and colour
+              // always follow the neighbour; size follows it only in Auto
+              layer = stones[best].layer ?? 'outline'
+              color = stones[best].color
+              if (addSize === 'auto') size = stones[best].size
+            }
+          }
+          mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer }])
+        }
         else mutate((prev) => prev.filter((_, i) => i !== hit)) // click existing stone in add mode = remove
         return
       }
       if (hit === -1) {
         if (!e.shiftKey) setSelection(new Set())
+        marqueeRef.current = { x0: p.x, y0: p.y, additive: e.shiftKey }
         return
       }
       setSelection((prev) => {
@@ -632,11 +823,16 @@ export default function App() {
       })
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
     },
-    [toMm, stones, tool, curSize, holeOf, mutate],
+    [toMm, stones, tool, curSize, addSize, holeOf, mutate],
   )
 
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
+      if (marqueeRef.current && tool === 'select') {
+        const p = toMm(e)
+        setMarquee({ x0: marqueeRef.current.x0, y0: marqueeRef.current.y0, x1: p.x, y1: p.y })
+        return
+      }
       if (!drag.current || tool !== 'select' || selection.size === 0) return
       const p = toMm(e)
       const dx = p.x - drag.current.startX
@@ -652,7 +848,55 @@ export default function App() {
     [toMm, tool, selection, pushUndo],
   )
 
-  const onCanvasUp = useCallback(() => { drag.current = null }, [])
+  const onCanvasUp = useCallback(() => {
+    drag.current = null
+    const mq = marqueeRef.current
+    marqueeRef.current = null
+    if (mq && marquee) {
+      const x0 = Math.min(mq.x0, marquee.x1)
+      const x1 = Math.max(mq.x0, marquee.x1)
+      const y0 = Math.min(mq.y0, marquee.y1)
+      const y1 = Math.max(mq.y0, marquee.y1)
+      if (x1 - x0 > 0.5 || y1 - y0 > 0.5) {
+        setSelection((prev) => {
+          const next = mq.additive ? new Set(prev) : new Set<number>()
+          stones.forEach((st, i) => {
+            if (st.x >= x0 && st.x <= x1 && st.y >= y0 && st.y <= y1) next.add(i)
+          })
+          return next
+        })
+      }
+    }
+    setMarquee(null)
+  }, [marquee, stones])
+
+  // double-click a stone: select every stone chained to it — outline and fill
+  // link at ~3.75mm, neighbouring stones at the rhythm, while a separate
+  // design sits 10mm+ away and stays unselected
+  const onCanvasDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      const p = toMm(e)
+      const start = stones.findIndex((st) => Math.hypot(st.x - p.x, st.y - p.y) <= holeOf(st) / 2 + 0.5)
+      if (start < 0) return
+      const link = (a: Stone, b: Stone) =>
+        Math.hypot(a.x - b.x, a.y - b.y) <= (holeOf(a) + holeOf(b)) / 2 + gap + 2.5
+      const inSet = new Set<number>([start])
+      const queue = [start]
+      while (queue.length) {
+        const i = queue.pop() as number
+        for (let j = 0; j < stones.length; j++) {
+          if (inSet.has(j)) continue
+          if (link(stones[i], stones[j])) {
+            inSet.add(j)
+            queue.push(j)
+          }
+        }
+      }
+      setSelection(inSet)
+      setStatus(`Selected design: ${inSet.size} stones — Del removes it`)
+    },
+    [toMm, stones, holeOf, gap],
+  )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -700,9 +944,25 @@ export default function App() {
   }, [preset])
 
   // ---------- cut / export ----------
+  // Cut layers: outline and fill are separate physical cuts, but BOTH use the
+  // full design's frame so the two templates register when stacked.
+  const [cutLayer, setCutLayer] = useState<'all' | 'outline' | 'fill'>('all')
+  const cutJob = useMemo(
+    () =>
+      cutLayer === 'all'
+        ? job
+        : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer) },
+    [job, cutLayer],
+  )
+  const layerCounts = useMemo(() => {
+    let o = 0
+    let f = 0
+    for (const st of stones) ((st.layer ?? 'outline') === 'fill' ? f++ : o++)
+    return { o, f }
+  }, [stones])
   const cutData = useCallback(
-    () => (format === 'gpgl' ? toGPGL(job, preset) : toHPGL(job, preset)),
-    [format, job, preset],
+    () => (format === 'gpgl' ? toGPGL(cutJob, preset) : toHPGL(cutJob, preset)),
+    [format, cutJob, preset],
   )
 
   const doSend = useCallback(async () => {
@@ -718,6 +978,87 @@ export default function App() {
     }
   }, [stones.length, cutData])
 
+  // The fill colour picker recolours the EXISTING fill layer live — colour
+  // was baked into each stone at generation, so the picker otherwise only
+  // affected future stones ("fill color changes doesnt work"). No undo entry:
+  // dragging the picker fires a change per frame.
+  useEffect(() => {
+    setStones((prev) => {
+      if (!prev.some((st) => (st.layer ?? 'outline') === 'fill' && st.color !== fillColor)) return prev
+      const next = prev.map((st) =>
+        (st.layer ?? 'outline') === 'fill' ? { ...st, color: fillColor } : st,
+      )
+      // recolouring must not break the regenerate-in-place link
+      if (lastImageRef.current && lastImageRef.current.after === prev)
+        lastImageRef.current = { ...lastImageRef.current, after: next }
+      return next
+    })
+  }, [fillColor])
+  useEffect(() => {
+    setStones((prev) => {
+      if (!prev.some((st) => (st.layer ?? 'outline') === 'outline' && st.color !== outlineColor)) return prev
+      const next = prev.map((st) =>
+        (st.layer ?? 'outline') === 'outline' ? { ...st, color: outlineColor } : st,
+      )
+      // recolouring must not break the regenerate-in-place link
+      if (lastImageRef.current && lastImageRef.current.after === prev)
+        lastImageRef.current = { ...lastImageRef.current, after: next }
+      return next
+    })
+  }, [outlineColor])
+
+  // Even out fill spacing after manual edits: fill stones closer than their
+  // legal pitch (to anything) push apart in small damped steps; outline
+  // stones never move, so the design's edge stays exactly where it was cut.
+  const respaceFill = useCallback(() => {
+    mutate((prev) => {
+      const pts = prev.map((st) => ({ ...st }))
+      const orig = prev
+      const holeMm = (st: Stone) => sizes[st.size]?.holeMm ?? 3
+      const hardGap = hardGapOf(gap)
+      const maxDrift = (sizes[fillSize]?.holeMm ?? 2.5) + gap // stay near home
+      for (let it = 0; it < 80; it++) {
+        let moved = false
+        for (let i = 0; i < pts.length; i++) {
+          if ((pts[i].layer ?? 'outline') !== 'fill') continue
+          let dx = 0
+          let dy = 0
+          for (let j = 0; j < pts.length; j++) {
+            if (j === i) continue
+            const ddx = pts[i].x - pts[j].x
+            const ddy = pts[i].y - pts[j].y
+            const d = Math.hypot(ddx, ddy)
+            const need = (holeMm(pts[i]) + holeMm(pts[j])) / 2 + hardGap
+            if (d > need) continue
+            if (d < 1e-9) {
+              dx += 0.05 * ((i % 3) - 1)
+              dy += 0.05 * (((i + 1) % 3) - 1)
+              moved = true
+              continue
+            }
+            const push = ((need - d) / 2) * 0.85
+            dx += (ddx / d) * push
+            dy += (ddy / d) * push
+            moved = true
+          }
+          if (dx || dy) {
+            const nx = pts[i].x + dx
+            const ny = pts[i].y + dy
+            // a stone that would have to travel far has no legal home — leave
+            // it; the user can delete it rather than have it wander
+            if (Math.hypot(nx - orig[i].x, ny - orig[i].y) <= maxDrift) {
+              pts[i].x = nx
+              pts[i].y = ny
+            }
+          }
+        }
+        if (!moved) break
+      }
+      return pts
+    })
+    setStatus('Fill respaced — crowded fill stones eased apart')
+  }, [mutate, sizes, gap, fillSize])
+
   const sizeKeys = Object.keys(sizes)
   const stoneColor: Record<string, string> = {}
   sizeKeys.forEach((k, i) => { stoneColor[k] = `hsl(${(i * 47) % 360} 70% 60%)` })
@@ -725,8 +1066,8 @@ export default function App() {
   // workspace always fills the viewport; grows past it when the design does
   const previewW = previewLive && textPreview ? textPreview.widthMm + 30 : 0
   const previewH = previewLive && textPreview ? previewOffsetY + textHeight + 20 : 0
-  const canvasW = Math.max(job.widthMm + 20, previewW, avail.w / zoom)
-  const canvasH = Math.max(job.heightMm + 20, previewH, (avail.h - 36) / zoom)
+  const canvasW = Math.max(job.widthMm + 20, previewW, avail.w / zoom, boardWmm + 20)
+  const canvasH = Math.max(job.heightMm + 20, previewH, (avail.h - 36) / zoom, boardHmm + 20)
 
   // BITMAP STONE LAYER. Thousands of SVG <circle> nodes made the browser
   // repaint the whole vector tree on every scroll and re-reconcile it on
@@ -765,10 +1106,10 @@ export default function App() {
       for (const p of previewStones ?? [])
         dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
     stones.forEach((s, i) =>
-      dot(s.x * zoom, s.y * zoom, (holeOf(s) / 2) * zoom, s.color ?? stoneColor[s.size] ?? '#8cf', 0.85, selection.has(i) ? '#fff' : undefined),
+      dot(s.x * zoom, s.y * zoom, (holeOf(s) / 2) * zoom, s.color ?? ((s.layer ?? 'outline') === 'fill' ? fillColor : outlineColor), 0.85, selection.has(i) ? '#fff' : undefined),
     )
     ctx.globalAlpha = 1
-  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor])
+  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor])
 
   const previewPath = useMemo(() => {
     if (!textPreview) return ''
@@ -786,7 +1127,7 @@ export default function App() {
     <div className="app">
       <aside className="panel">
         <h1>StoneCut</h1>
-        <div className="statusbar">{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm</div>
+        <div className="statusbar">{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
 
 
         <Section title="Text">
@@ -932,13 +1273,18 @@ export default function App() {
           )}
         </Section>
         <Section title="Stones">
-          <label>Size
-            <select value={curSize} onChange={(e) => setCurSize(e.target.value)}>
-              {sizeKeys.map((k) => (
-                <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>
-              ))}
-            </select>
-          </label>
+          <div className="grid2">
+            <label>Size
+              <select value={curSize} onChange={(e) => setCurSize(e.target.value)}>
+                {sizeKeys.map((k) => (
+                  <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>
+                ))}
+              </select>
+            </label>
+            <label>Color
+              <input type="color" value={outlineColor} onChange={(e) => setOutlineColor(e.target.value)} />
+            </label>
+          </div>
           <div className="grid2">
             <label>Hole ⌀ (mm)
               <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
@@ -1013,6 +1359,54 @@ export default function App() {
           </label>
         </Section>
 
+        <Section title="Templates" defaultOpen={false}>
+          <p className="hint">
+            {tplCats.reduce((n, c) => n + c.items.length, 0)} public-domain designs — click one to
+            load it as the working image, then tune style and width in the Image section.
+          </p>
+          <div className="chiprow" style={{ maxHeight: 74, overflow: 'auto' }}>
+            {tplCats.map((c) => (
+              <button
+                key={c.slug}
+                className={`chip ${tplCat === c.slug ? 'active' : ''}`}
+                onClick={() => setTplCat(c.slug)}
+              >
+                {c.label} ({c.items.length})
+              </button>
+            ))}
+          </div>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: 6,
+              maxHeight: 300,
+              overflow: 'auto',
+              marginTop: 6,
+            }}
+          >
+            {(tplCats.find((c) => c.slug === tplCat)?.items ?? []).map((t) => (
+              <img
+                key={t.file}
+                src={`/templates/${t.file}`}
+                title={t.name}
+                loading="lazy"
+                style={{
+                  width: '100%',
+                  aspectRatio: '1',
+                  objectFit: 'contain',
+                  background: '#fff',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  padding: 4,
+                  boxSizing: 'border-box',
+                }}
+                onClick={() => loadTemplate(t)}
+              />
+            ))}
+          </div>
+        </Section>
+
         <Section title="Image">
           <div className="grid2">
             <label>Width (mm)
@@ -1082,6 +1476,7 @@ export default function App() {
                         setImgInvert(a.invert)
                         setImgAlphaKey(a.alphaKey)
                         setImgLinework(a.linework)
+                        applyStrokeStyle(a)
                         setStatus(`${s.name} — ${a.note}`)
                       } catch {
                         setStatus(`Could not load ${s.name}`)
@@ -1105,6 +1500,7 @@ export default function App() {
                 setImgInvert(a.invert)
                 setImgAlphaKey(a.alphaKey)
                 setImgLinework(a.linework)
+                applyStrokeStyle(a)
                 setStatus(`${f.name} — ${a.note}`)
               } catch {
                 setStatus(`Could not read ${f.name}`)
@@ -1119,15 +1515,31 @@ export default function App() {
             <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
             <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')}>Add / erase</button>
           </div>
+          <label>New stone size
+            <select value={addSize} onChange={(e) => setAddSize(e.target.value)}>
+              <option value="auto">Auto — match nearest stone</option>
+              {Object.keys(sizes).map((k) => (
+                <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
+              ))}
+            </select>
+          </label>
           <div className="toolrow">
             <button disabled={!selection.size} onClick={() => {
               mutate((prev) => prev.map((s, i) => (selection.has(i) ? { ...s, size: curSize } : s)))
             }}>Set selected → {curSize}</button>
           </div>
           <div className="toolrow">
+            <button
+              disabled={!stones.some((st) => (st.layer ?? 'outline') === 'fill')}
+              onClick={respaceFill}
+            >
+              Respace fill — even out after edits
+            </button>
+          </div>
+          <div className="toolrow">
             <button disabled={!stones.length} onClick={() => { mutate(() => []); setSelection(new Set()) }}>Clear all</button>
           </div>
-          <p className="hint">Click = select · shift-click = multi · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
+          <p className="hint">Click = select · shift-click = multi · drag empty space = box select · double-click = select whole design · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
         </Section>
 
         <Section title="Material">
@@ -1151,10 +1563,22 @@ export default function App() {
               <option value="hpgl">HP-GL (if COMMAND menu set to HP-GL)</option>
             </select>
           </label>
-          <button className="primary" disabled={!stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <label>Layer
+            <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value as typeof cutLayer)}>
+              <option value="all">All stones ({stones.length})</option>
+              <option value="outline">Outline only ({layerCounts.o})</option>
+              <option value="fill">Fill only ({layerCounts.f})</option>
+            </select>
+          </label>
+          {cutLayer !== 'all' && (
+            <p className="hint">
+              Layers share one frame — cut each on its own sheet and they line up when stacked.
+            </p>
+          )}
+          <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="toolrow">
-            <button disabled={!stones.length} onClick={() => download('stonecut.plt', cutData())}>Download .plt</button>
-            <button disabled={!stones.length} onClick={() => download('stonecut.svg', toSVG(job), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
           </div>
         </Section>
       </aside>
@@ -1164,6 +1588,34 @@ export default function App() {
         <div className="zoombar">
           <input type="range" min={1.5} max={30} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} />
           <span>{zoom.toFixed(1)} px/mm</span>
+          <span style={{ marginLeft: 12 }}>Artboard</span>
+          <input
+            type="number"
+            min={1}
+            max={60}
+            step={0.5}
+            value={boardWIn}
+            onChange={(e) => setBoardWIn(Math.max(1, +e.target.value || 1))}
+            style={{ width: 54 }}
+          />
+          <span>×</span>
+          <input
+            type="number"
+            min={1}
+            max={60}
+            step={0.5}
+            value={boardHIn}
+            onChange={(e) => setBoardHIn(Math.max(1, +e.target.value || 1))}
+            style={{ width: 54 }}
+          />
+          <span>in</span>
+          <button
+            disabled={!stones.length}
+            style={{ marginLeft: 'auto', width: 'auto', marginTop: 0 }}
+            onClick={() => { mutate(() => []); setSelection(new Set()) }}
+          >
+            Clear all
+          </button>
         </div>
         {/* stones render on a bitmap: one paint instead of thousands of SVG
             DOM circles, which made scrolling large designs crawl. The SVG
@@ -1177,6 +1629,7 @@ export default function App() {
           onMouseMove={onCanvasMove}
           onMouseUp={onCanvasUp}
           onMouseLeave={onCanvasUp}
+          onDoubleClick={onCanvasDoubleClick}
         >
           <defs>
             <pattern id="grid" width={10 * zoom} height={10 * zoom} patternUnits="userSpaceOnUse">
@@ -1184,6 +1637,61 @@ export default function App() {
             </pattern>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
+          {/* artboard: the physical sheet at true scale, ruled in inches */}
+          <g pointerEvents="none">
+            <rect
+              x={0}
+              y={0}
+              width={boardWmm * zoom}
+              height={boardHmm * zoom}
+              fill="#ffffff"
+              fillOpacity={0.035}
+              stroke="#7789ad"
+              strokeWidth={1.5}
+            />
+            {Array.from({ length: Math.max(0, Math.floor(boardWIn) - (Number.isInteger(boardWIn) ? 1 : 0)) }, (_, k) => k + 1).map((i) => (
+              <g key={`v${i}`}>
+                <line
+                  x1={i * 25.4 * zoom}
+                  y1={0}
+                  x2={i * 25.4 * zoom}
+                  y2={boardHmm * zoom}
+                  stroke="#3d4863"
+                  strokeWidth={1}
+                />
+                <text x={i * 25.4 * zoom + 3} y={12} fill="#8b97b5" fontSize={10}>{i}"</text>
+              </g>
+            ))}
+            {Array.from({ length: Math.max(0, Math.floor(boardHIn) - (Number.isInteger(boardHIn) ? 1 : 0)) }, (_, k) => k + 1).map((i) => (
+              <g key={`h${i}`}>
+                <line
+                  x1={0}
+                  y1={i * 25.4 * zoom}
+                  x2={boardWmm * zoom}
+                  y2={i * 25.4 * zoom}
+                  stroke="#3d4863"
+                  strokeWidth={1}
+                />
+                <text x={3} y={i * 25.4 * zoom - 3} fill="#8b97b5" fontSize={10}>{i}"</text>
+              </g>
+            ))}
+            <text x={boardWmm * zoom - 4} y={boardHmm * zoom - 6} fill="#7789ad" fontSize={11} textAnchor="end">
+              {boardWIn}" × {boardHIn}"
+            </text>
+          </g>
+          {marquee && (
+            <rect
+              x={Math.min(marquee.x0, marquee.x1) * zoom}
+              y={Math.min(marquee.y0, marquee.y1) * zoom}
+              width={Math.abs(marquee.x1 - marquee.x0) * zoom}
+              height={Math.abs(marquee.y1 - marquee.y0) * zoom}
+              fill="#5b7bd9"
+              fillOpacity={0.12}
+              stroke="#5b7bd9"
+              strokeDasharray="4 3"
+              pointerEvents="none"
+            />
+          )}
           {previewLive && previewPath && (
             <path
               d={previewPath}

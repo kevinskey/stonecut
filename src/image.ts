@@ -113,6 +113,61 @@ export interface ImageAnalysis {
   alphaKey: boolean
   linework: boolean // recommend keeping dark linework open (cartoon art)
   note: string
+  strokePx: number // typical (p90) stroke width of the design, in sample px
+  strokeDeciles: number[] // width deciles (p10..p90), sample px — art-type classification
+  strokeMax: number // p96 stroke width, sample px — a solid blob reads here, a junction bulge does not
+  sampleW: number // sample bitmap width the strokePx was measured at
+}
+
+// Typical stroke width of the design under the chosen settings: p90 of the
+// distance-to-edge over design pixels, doubled. Line art measures a few px;
+// solid shapes measure large. The caller scales by its output width to decide
+// whether strokes can hold two wall rows or need a single centreline.
+function strokeStats(
+  w: number,
+  h: number,
+  isDesign: (i: number) => boolean,
+): { strokePx: number; strokeDeciles: number[]; strokeMax: number } {
+  const bin = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) bin[i] = isDesign(i) ? 1 : 0
+  // two-pass 3-4 chamfer distance transform (Euclidean to ~5%) — city block
+  // over-read diagonal strokes by up to 1.4x and misclassified round art
+  const INF = 1e9
+  const dt = new Float32Array(w * h)
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x
+      if (!bin[i]) { dt[i] = 0; continue }
+      dt[i] = INF
+      if (x > 0) dt[i] = Math.min(dt[i], dt[i - 1] + 3)
+      if (y > 0) dt[i] = Math.min(dt[i], dt[i - w] + 3)
+      if (x > 0 && y > 0) dt[i] = Math.min(dt[i], dt[i - w - 1] + 4)
+      if (x < w - 1 && y > 0) dt[i] = Math.min(dt[i], dt[i - w + 1] + 4)
+    }
+  for (let y = h - 1; y >= 0; y--)
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x
+      if (!bin[i]) continue
+      if (x < w - 1) dt[i] = Math.min(dt[i], dt[i + 1] + 3)
+      if (y < h - 1) dt[i] = Math.min(dt[i], dt[i + w] + 3)
+      if (x < w - 1 && y < h - 1) dt[i] = Math.min(dt[i], dt[i + w + 1] + 4)
+      if (x > 0 && y < h - 1) dt[i] = Math.min(dt[i], dt[i + w - 1] + 4)
+    }
+  for (let i = 0; i < w * h; i++) dt[i] /= 3
+  const ds: number[] = []
+  for (let i = 0; i < w * h; i++) if (bin[i]) ds.push(dt[i])
+  if (!ds.length) return { strokePx: 0, strokeDeciles: [], strokeMax: 0 }
+  ds.sort((a, b) => a - b)
+  const deciles: number[] = []
+  for (let q = 1; q <= 9; q++) deciles.push(ds[Math.floor(ds.length * (q / 10))] * 2)
+  return {
+    strokePx: ds[Math.floor(ds.length * 0.9)] * 2,
+    strokeDeciles: deciles,
+    // p96, not the max: a stroke-junction bulge is a sliver of pixels and
+    // must not read as a blob, while a real solid head/body is broad enough
+    // to survive the percentile
+    strokeMax: ds[Math.floor(ds.length * 0.96)] * 2,
+  }
 }
 
 // Cartoon-art test: a SMALL share of near-black pixels inside a mostly
@@ -163,13 +218,42 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
   }
   const total = w * h
   if (transparent / total > 0.05) {
+    // Alpha keying treats EVERY opaque pixel as design, whatever its colour —
+    // which swallows white interior details (a white inner circle inside a
+    // black badge simply disappears, so it can never be outlined). Dark art
+    // renders fine on the white backdrop, where those light details read as
+    // background and their contours get stones. Reserve alpha keying for
+    // predominantly LIGHT art, which a white backdrop would erase.
+    let lightOpaque = 0
+    let opaqueN = 0
+    for (let i = 0; i < total; i++) {
+      if (data[i * 4 + 3] < 64) continue
+      opaqueN++
+      if (lumOf(i) > 170) lightOpaque++
+    }
+    const mostlyDark = opaqueN > 0 && lightOpaque / opaqueN < 0.5
     const share = lineworkShare(data, total, (i) => data[i * 4 + 3] >= 64)
     const linework = share >= 0.02 && share <= 0.35
+    if (mostlyDark) {
+      return {
+        threshold: 170,
+        invert: false,
+        alphaKey: false,
+        linework,
+        ...strokeStats(w, h, (i) => data[i * 4 + 3] >= 64 && lumOf(i) < 170),
+        sampleW: w,
+        note:
+          'transparent background, dark artwork — light details kept as open background' +
+          (linework ? ' · dark linework kept open' : ''),
+      }
+    }
     return {
       threshold: 128,
       invert: false,
       alphaKey: true,
       linework,
+      ...strokeStats(w, h, (i) => data[i * 4 + 3] >= 64),
+      sampleW: w,
       note:
         'transparent background — using the opaque artwork as the design' +
         (linework ? ' · dark linework kept open' : ''),
@@ -233,6 +317,11 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
     invert: borderIsDark,
     alphaKey: false,
     linework,
+    ...strokeStats(w, h, (i) => {
+      if (data[i * 4 + 3] < 64) return false
+      return borderIsDark ? lumOf(i) >= threshold : lumOf(i) < threshold
+    }),
+    sampleW: w,
     note:
       (borderIsDark
         ? `light artwork on a dark background — inverted, threshold ${threshold}`

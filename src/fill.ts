@@ -2109,15 +2109,80 @@ export function outlineOrSpine(
   for (const info of contourInfos) placeContourTipSpines(info, pitch, idx, out, gate, rhythm)
 
   if (narrowLbls.size) {
+    // Explicit centerline mode gets the SAME quality treatment the auto-mode
+    // thin-part spine earned: heavy smoothing (a raw skeleton wiggles with
+    // every bump of the drawn edge and jogs on curves), a depth trim so path
+    // ends don't hang stones off the artwork, a foreign-crowd filter so
+    // parallel skeleton forks and junction stubs don't lay doubled rows, and
+    // a chord snap that straightens the odd off-line stone.
     const compMask = new Uint8Array(w * h)
     for (const lbl of narrowLbls) {
       for (let i = 0; i < w * h; i++) compMask[i] = labels[i] === lbl ? 1 : 0
+      let medianW = 0
+      {
+        const ws: number[] = []
+        for (let i = 0; i < w * h; i++) if (compMask[i] && wide[i] > 0) ws.push(wide[i])
+        if (ws.length) {
+          ws.sort((a, b) => a - b)
+          medianW = ws[Math.floor(ws.length / 2)]
+        }
+      }
+      const minDeep = Math.min(holeMm / 2 + 0.1, Math.max(0.3, medianW * 0.35))
+      const deep = (q: Pt) => {
+        const xi = Math.round(q.x * pxPerMm + padPx)
+        const yi = Math.round(q.y * pxPerMm + padPx)
+        if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+        return dt[yi * w + xi] / pxPerMm >= minDeep
+      }
       const skel = skeletonize(compMask, w, h)
       const paths = traceSkeleton(skel, w, h)
-        .map((p) => smoothPath(p).map(toMm))
+        .map((p) => smoothPath(p, 7).map(toMm))
         .sort((a, b) => b.length - a.length)
-      for (const p of paths) {
-        const got = placeOpenEven(p, pitch, idx, rhythm)
+      for (const pth of paths) {
+        let len = 0
+        for (let k = 1; k < pth.length; k++)
+          len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+        // junction stubs are debris; real strokes carry at least a beat
+        if (len < rhythm * 0.9) continue
+        const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+          if (!deep(q)) {
+            idx.remove(q)
+            return false
+          }
+          // junction guard: drop only stones nearly AT the floor against a
+          // foreign row. At 0.85x rhythm the guard traded clumps for visible
+          // gaps where paths meet; the pitch floor already prevents genuine
+          // crowding, so only trim the truly wedged-in stone.
+          const tooClose = idx
+            .within(q, rhythm * 0.65)
+            .some((o) => Math.hypot(o.x - q.x, o.y - q.y) > 1e-9)
+          if (tooClose) {
+            idx.remove(q)
+            return false
+          }
+          return true
+        })
+        for (let pass = 0; pass < 2; pass++)
+          for (let i = 1; i < got.length - 1; i++) {
+            const a = got[i - 1]
+            const b = got[i + 1]
+            const q = got[i]
+            const dx = b.x - a.x
+            const dy = b.y - a.y
+            const L2 = dx * dx + dy * dy
+            if (L2 < 1e-9) continue
+            const t = ((q.x - a.x) * dx + (q.y - a.y) * dy) / L2
+            const f = { x: a.x + t * dx, y: a.y + t * dy }
+            const off = Math.hypot(f.x - q.x, f.y - q.y)
+            if (off < 0.25 || off > 1.2) continue
+            if (!deep(f)) continue
+            idx.remove(q)
+            if (idx.canPlace(f)) {
+              q.x = f.x
+              q.y = f.y
+            }
+            idx.add(q)
+          }
         dbg('narrowspine', got)
         out.push(...got)
       }
@@ -2952,11 +3017,11 @@ export function fillStones(
   // offset, so a row is either there across a run or not there at all.
   if (fixedPts.length) {
     const clear = idx.minDist * pxPerMm
-    const cr = Math.ceil(clear)
-    const crr = clear * clear
-    const stamp = (xMm: number, yMm: number) => {
+    const stamp = (xMm: number, yMm: number, radiusPx: number) => {
       const cx = Math.round(xMm * pxPerMm + padPx)
       const cy = Math.round(yMm * pxPerMm + padPx)
+      const cr = Math.ceil(radiusPx)
+      const crr = radiusPx * radiusPx
       for (let yy = Math.max(0, cy - cr); yy <= Math.min(h - 1, cy + cr); yy++) {
         const dy = yy - cy
         const span = Math.floor(Math.sqrt(Math.max(0, crr - dy * dy)))
@@ -2966,21 +3031,86 @@ export function fillStones(
       }
     }
     for (const a of fixedPts) {
-      stamp(a.x, a.y)
-      // the two nearest outline stones are its neighbours along the path
+      stamp(a.x, a.y, clear)
+      // Between two outline stones the binding constraint is the STONES, not
+      // the path: a fill stone nesting at the midpoint of a d-long pair only
+      // needs sqrt(minDist^2 - (d/2)^2) from the path line. Stamping the full
+      // minDist along the path banned fill from every stroke narrower than
+      // 2x minDist — the empty stems and curves of a filled word.
       const near = fixedPts
         .filter((b) => b !== a)
         .map((b) => ({ b, d: Math.hypot(b.x - a.x, b.y - a.y) }))
         .sort((p, q) => p.d - q.d)
         .slice(0, 2)
-      for (const { b } of near)
-        for (const t of [0.25, 0.5]) stamp(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+      for (const { b, d } of near) {
+        const sag = Math.sqrt(Math.max(0, clear * clear - ((d * pxPerMm) / 2) ** 2))
+        for (const t of [0.25, 0.5]) stamp(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, sag)
+      }
     }
   }
 
   const { labels, count } = labelComponents(mask, w, h)
   const maxD = new Float32Array(count + 1)
   for (let i = 0; i < w * h; i++) if (labels[i] && dt[i] > maxD[labels[i]]) maxD[labels[i]] = dt[i]
+
+  // STROKE-WIDTH FIELD over the artwork: each material pixel gets the
+  // diameter of the largest inscribed disk covering it, so the value is
+  // uniform across a stroke instead of peaking at its centre. Used to split
+  // the shape into lattice territory (wide) and centered-row territory
+  // (stroke-like) — mixing the two in one channel is what made fill rows
+  // weave between on-grid and centered stones.
+  const strokeW = new Float32Array(w * h)
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i2 = y * w + x
+      if (!grid.bin[i2]) continue
+      const dv = dt[i2]
+      if (dv <= 0) continue
+      if (
+        !(dv >= dt[i2 - 1] && dv >= dt[i2 + 1] && dv >= dt[i2 - w] && dv >= dt[i2 + w] &&
+          dv >= dt[i2 - w - 1] && dv >= dt[i2 - w + 1] &&
+          dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
+      )
+        continue
+      const rr = dv * dv
+      const val = (2 * dv) / pxPerMm
+      const r0 = Math.ceil(dv)
+      for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
+        const dy2 = yy - y
+        const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
+        const row = yy * w
+        for (let xx = Math.max(0, x - sp2); xx <= Math.min(w - 1, x + sp2); xx++)
+          if (grid.bin[row + xx] && strokeW[row + xx] < val) strokeW[row + xx] = val
+      }
+    }
+  // Below this width the interior band is narrower than one lattice step, so
+  // whether the lattice hits it is pure phase luck — centered-row territory.
+  // The call is made PER MASK COMPONENT, not per pixel: a channel whose width
+  // hovers at the threshold otherwise flickers between regimes along its own
+  // length, alternating brick clusters with blocked row segments.
+  const strokeCut = pitch * 3
+  const fillComps = labelComponents(mask, w, h)
+  const compRows = new Uint8Array(fillComps.count + 1) // 1 = centered-row territory
+  {
+    const wsBy = new Map<number, number[]>()
+    for (let i = 0; i < w * h; i++) {
+      const lbl = fillComps.labels[i]
+      if (!lbl || strokeW[i] <= 0) continue
+      let a = wsBy.get(lbl)
+      if (!a) wsBy.set(lbl, (a = []))
+      a.push(strokeW[i])
+    }
+    for (const [lbl, ws] of wsBy) {
+      ws.sort((a, b) => a - b)
+      if (ws[Math.floor(ws.length * 0.9)] < strokeCut * 1.15) compRows[lbl] = 1
+    }
+  }
+  const compAt = (xMm: number, yMm: number) => {
+    const xi = Math.round(xMm * pxPerMm + padPx)
+    const yi = Math.round(yMm * pxPerMm + padPx)
+    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0
+    return fillComps.labels[yi * w + xi]
+  }
 
   // ONE LATTICE FOR THE WHOLE SHAPE.
   //
@@ -3029,27 +3159,32 @@ export function fillStones(
   // clearance is measured to the LINE, not to each bead. Measuring to the
   // beads alone leaves a boundary that scallops inward between them, and the
   // lattice samples that ripple as a column flickering in and out row by row.
-  const segs: [Pt, Pt][] = []
+  const segs: { a: Pt; b: Pt; need: number }[] = []
   for (const a of fixedPts) {
     const near = fixedPts
       .filter((b) => b !== a)
       .map((b) => ({ b, d: Math.hypot(b.x - a.x, b.y - a.y) }))
       .sort((p, q) => p.d - q.d)
       .slice(0, 2)
-    for (const { b } of near) if (a.x < b.x || (a.x === b.x && a.y < b.y)) segs.push([a, b])
+    for (const { b, d } of near)
+      if (a.x < b.x || (a.x === b.x && a.y < b.y))
+        // exact sag: at the pair's midpoint the stones themselves allow the
+        // fill this close to the path line — the per-stone check above still
+        // enforces the true pairwise minimum everywhere
+        segs.push({ a, b, need: Math.sqrt(Math.max(0, idx.minDist ** 2 - (d / 2) ** 2)) })
   }
   const clearOfOutline = (p: Pt) => {
     const need = idx.minDist - 1e-6
     for (const s of fixedPts)
       if (Math.hypot(p.x - s.x, p.y - s.y) < need) return false
-    for (const [a, b] of segs) {
+    for (const { a, b, need: segNeed } of segs) {
       const vx = b.x - a.x
       const vy = b.y - a.y
       const len2 = vx * vx + vy * vy
       if (len2 < 1e-12) continue
       let t = ((p.x - a.x) * vx + (p.y - a.y) * vy) / len2
       t = t < 0 ? 0 : t > 1 ? 1 : t
-      if (Math.hypot(p.x - (a.x + vx * t), p.y - (a.y + vy * t)) < need) return false
+      if (Math.hypot(p.x - (a.x + vx * t), p.y - (a.y + vy * t)) < segNeed - 1e-6) return false
     }
     return true
   }
@@ -3106,6 +3241,7 @@ export function fillStones(
         }
         const p = { x: xMm, y: yMm }
         if (dtAt(xMm, yMm) < minPx) continue
+        if (compRows[compAt(xMm, yMm)]) continue // stroke channel: centered row owns it
         if (!clearOfOutline(p)) continue
         if (!idx.canPlace(p)) continue
         got.push(p)
@@ -3142,6 +3278,50 @@ export function fillStones(
   for (const p of best) {
     idx.add(p)
     out.push(p)
+  }
+
+  // NARROW-CHANNEL SALVAGE. The rigid lattice cannot be everywhere: a stroke
+  // whose interior channel is barely a stone wide holds a legal position only
+  // if the lattice phase happens to land in it, so a word's stems and curves
+  // came out empty while its wide bars filled. Where the artwork is genuinely
+  // stroke-like (too narrow for two lattice rows), run ONE centered row along
+  // the channel's own midline — exactly what a hand-set fill does there. Wide
+  // regions never qualify (their skeleton is deep inside covered area), so
+  // solid shapes keep the pure lattice.
+  {
+    const cm = new Uint8Array(w * h)
+    for (let lbl = 1; lbl <= fillComps.count; lbl++) {
+      if (!compRows[lbl]) continue // lattice territory: no centered rows
+      let area = 0
+      for (let i = 0; i < w * h; i++) {
+        cm[i] = fillComps.labels[i] === lbl ? 1 : 0
+        if (cm[i]) area++
+      }
+      if (area < (pitch * pxPerMm) ** 2 * 0.25) continue
+      const skel = skeletonize(cm, w, h)
+      const paths = traceSkeleton(skel, w, h)
+        .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
+        .sort((a, b) => b.length - a.length)
+      for (const pth of paths) {
+        let len = 0
+        for (let k = 1; k < pth.length; k++)
+          len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+        if (len < rhythm) continue
+        const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+          const drop = () => {
+            idx.remove(q)
+            return false
+          }
+          if (dtAt(q.x, q.y) < minPx) return drop()
+          if (!clearOfOutline(q)) return drop()
+          // (component-level territory already guarantees the lattice ceded here)
+          // the lattice already covers here — salvage only fills its holes
+          if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
+          return true
+        })
+        out.push(...got)
+      }
+    }
   }
 
   // Law fill: everything placed deterministically above — no relaxation,
