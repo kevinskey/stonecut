@@ -17,6 +17,7 @@ export async function imageToRaster(
   threshold: number, // 0-255, luminance below = "dark" (stone area)
   invert: boolean,
   alphaKey = false, // key on transparency instead of brightness
+  lineworkOpen = false, // cartoon mode: near-black linework stays stone-free
 ): Promise<RasterResult> {
   const img = await loadImage(file)
   const pxPerMm = 6
@@ -45,7 +46,15 @@ export async function imageToRaster(
       const lum = a < 64 ? 255 : 0.299 * r + 0.587 * g + 0.114 * b
       isDesign = lum < threshold
     }
-    bin[i] = (invert ? !isDesign : isDesign) ? 1 : 0
+    let final = invert ? !isDesign : isDesign
+    // cartoon linework: the drawing's own dark lines stay OPEN, the way a
+    // hand-set design uses gaps to draw knuckles, creases and folds —
+    // filling over them turned an emoji into a blob
+    if (lineworkOpen && final && a >= 64) {
+      const lum2 = 0.299 * r + 0.587 * g + 0.114 * b
+      if (lum2 < 70) final = false
+    }
+    bin[i] = final ? 1 : 0
   }
   const s = 1 / pxPerMm
   return {
@@ -83,7 +92,28 @@ export interface ImageAnalysis {
   threshold: number
   invert: boolean
   alphaKey: boolean
+  linework: boolean // recommend keeping dark linework open (cartoon art)
   note: string
+}
+
+// Cartoon-art test: a SMALL share of near-black pixels inside a mostly
+// midtone design means the dark pixels are LINEWORK (knuckle lines, folds)
+// that should stay open. A large share means dark IS the art (a black
+// logo) and must keep its stones.
+function lineworkShare(
+  data: Uint8ClampedArray,
+  n: number,
+  isDesign: (i: number) => boolean,
+): number {
+  let design = 0
+  let dark = 0
+  for (let i = 0; i < n; i++) {
+    if (!isDesign(i)) continue
+    design++
+    const lum = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]
+    if (lum < 70) dark++
+  }
+  return design ? dark / design : 0
 }
 
 /**
@@ -114,11 +144,16 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
   }
   const total = w * h
   if (transparent / total > 0.05) {
+    const share = lineworkShare(data, total, (i) => data[i * 4 + 3] >= 64)
+    const linework = share >= 0.02 && share <= 0.35
     return {
       threshold: 128,
       invert: false,
       alphaKey: true,
-      note: 'transparent background — using the opaque artwork as the design',
+      linework,
+      note:
+        'transparent background — using the opaque artwork as the design' +
+        (linework ? ' · dark linework kept open' : ''),
     }
   }
 
@@ -167,12 +202,21 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
   // midtones join the design.
   if (borderIsDark) threshold = Math.min(threshold, Math.max(10, Math.round(borderLum) + 25))
   else threshold = Math.max(threshold, Math.min(245, Math.round(borderLum) - 25))
+  const share = borderIsDark
+    ? 0 // inverted art: dark is the background, linework logic doesn't apply
+    : lineworkShare(data, total, (i) => {
+        if (data[i * 4 + 3] < 64) return false
+        return 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2] < threshold
+      })
+  const linework = share >= 0.02 && share <= 0.35
   return {
     threshold,
     invert: borderIsDark,
     alphaKey: false,
-    note: borderIsDark
-      ? `light artwork on a dark background — inverted, threshold ${threshold}`
-      : `threshold ${threshold}`,
+    linework,
+    note:
+      (borderIsDark
+        ? `light artwork on a dark background — inverted, threshold ${threshold}`
+        : `threshold ${threshold}`) + (linework ? ' · dark linework kept open' : ''),
   }
 }

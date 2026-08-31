@@ -228,6 +228,7 @@ export default function App() {
   const [imgThreshold, setImgThreshold] = useState(128)
   const [imgInvert, setImgInvert] = useState(false)
   const [imgAlphaKey, setImgAlphaKey] = useState(false)
+  const [imgLinework, setImgLinework] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
   const [imgMode, setImgMode] = useState<StoneMode>('both')
 
@@ -435,7 +436,7 @@ export default function App() {
     if (!imageFile) return
     const t = window.setTimeout(async () => {
       try {
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey)
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
         const hole = sizes[curSize]?.holeMm ?? 3
         const hardGap = hardGapOf(gap)
         const rhythm = hole + gap
@@ -481,7 +482,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap,
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
       outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor])
 
   // ---------- generation ----------
@@ -546,7 +547,7 @@ export default function App() {
     if (!imageFile) { setStatus('Choose an image first'); return }
     setStatus('Tracing image…')
     try {
-      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey)
+      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
       const hole = sizes[curSize]?.holeMm ?? 3
       const hardGap = hardGapOf(gap)
       const rhythm = hole + gap
@@ -587,7 +588,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones.length, bbox.maxY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -1030,6 +1031,7 @@ export default function App() {
           </label>
           <label className="row"><input type="checkbox" checked={imgInvert} onChange={(e) => setImgInvert(e.target.checked)} /> Invert (light areas get stones)</label>
           <label className="row"><input type="checkbox" checked={imgAlphaKey} onChange={(e) => setImgAlphaKey(e.target.checked)} /> Use transparency (opaque art = design)</label>
+          <label className="row"><input type="checkbox" checked={imgLinework} onChange={(e) => setImgLinework(e.target.checked)} /> Keep dark linework open (cartoon lines stay stone-free)</label>
           <button
             onClick={() => setTsbOpen((o) => !o)}
             style={{ width: '100%', marginBottom: 6 }}
@@ -1079,6 +1081,7 @@ export default function App() {
                         setImgThreshold(a.threshold)
                         setImgInvert(a.invert)
                         setImgAlphaKey(a.alphaKey)
+                        setImgLinework(a.linework)
                         setStatus(`${s.name} — ${a.note}`)
                       } catch {
                         setStatus(`Could not load ${s.name}`)
@@ -1101,6 +1104,7 @@ export default function App() {
                 setImgThreshold(a.threshold)
                 setImgInvert(a.invert)
                 setImgAlphaKey(a.alphaKey)
+                setImgLinework(a.linework)
                 setStatus(`${f.name} — ${a.note}`)
               } catch {
                 setStatus(`Could not read ${f.name}`)
