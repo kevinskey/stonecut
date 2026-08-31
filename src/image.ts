@@ -56,6 +56,25 @@ export async function imageToRaster(
     }
     bin[i] = final ? 1 : 0
   }
+  // Excluding the linework exposes its ANTI-ALIASED halo: the 1-2px blend
+  // between a black contour and the background reads as midtone "design"
+  // and outline stones scatter along the ghost ring. A one-pixel opening
+  // (erode then dilate) removes anything under a couple of pixels thick;
+  // real strokes shrink an edge pixel and grow it right back.
+  if (lineworkOpen) {
+    const er = new Uint8Array(w * h)
+    for (let y = 1; y < h - 1; y++)
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x
+        er[i] = bin[i] && bin[i - 1] && bin[i + 1] && bin[i - w] && bin[i + w] ? 1 : 0
+      }
+    bin.fill(0)
+    for (let y = 1; y < h - 1; y++)
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x
+        if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w]) bin[i] = 1
+      }
+  }
   const s = 1 / pxPerMm
   return {
     contours: marchingSquares(bin, w, h).map((c) => c.map((p) => ({ x: p.x * s, y: p.y * s }))),
