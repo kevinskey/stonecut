@@ -59,7 +59,15 @@ BAD_TITLE = re.compile(
     r"world cup|mundial|\bghs\b|transducer|crossword|squadron|anarchist|"
     r"speech balloon|hashtag|traffic|\bstub\b|current event|\brange\b|"
     r"federation|association|athletic club|tengrism|moism|\bmaat\b|"
-    r"star of david|star and crescent|templar|heraldry|heraldic|1[89][0-9][0-9]", re.I)
+    r"star of david|star and crescent|templar|heraldry|heraldic|1[89][0-9][0-9]|"
+    r"bandeira|blason|wapen|insignia|kolovrat|capitoline|nearby stars|megalodon|"
+    r"fox (one|sports|4|5)|kswb|wdaf|onenote|microsoft|one section|discogs|"
+    r"eurovision|adopt-a-highway|usva|headstone|tram|oojs|ooui|wlm|weather-icons|"
+    r"paomedia|nps map|speaker|auditorium|smartphone|surfboard|hydroelectric|"
+    r"kopplingssprint|abalone|pushing daisies|trill|partials|ligne rythme|"
+    r"mouthpiece|water tap|marine raiders|star of life|factotum|sultanate|"
+    r"novgorod|double-headed|crossed.out|cross.country|talk icon|mairie|"
+    r"emblem of|barnstar|wikiproject|icon-note|section icon", re.I)
 
 def api(params):
     params = dict(params, format="json")

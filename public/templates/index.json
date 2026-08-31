@@ -107,34 +107,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AEagle_01.svg"
     },
     {
-     "name": "Double-headed eagle of the Sultanate of Rum",
-     "file": "spirit-wear/double-headed-eagle-of-the-sultanate-of-rum.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ADouble-headed_eagle_of_the_Sultanate_of_Rum.svg"
-    },
-    {
-     "name": "Novgorod Republic Double-headed eagle Shield",
-     "file": "spirit-wear/novgorod-republic-double-headed-eagle-shield.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ANovgorod_Republic_Double-headed_eagle_Shield.svg"
-    },
-    {
-     "name": "Golden shield with black eagle and golden crown",
-     "file": "spirit-wear/golden-shield-with-black-eagle-and-golden-crown.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AGolden_shield_with_black_eagle_and_golden_crown.svg"
-    },
-    {
      "name": "Eagle bowing",
      "file": "spirit-wear/eagle-bowing.svg",
      "license": "Public domain",
      "source": "https://commons.wikimedia.org/wiki/File%3AEagle_bowing.svg"
-    },
-    {
-     "name": "Kopplingssprint-se",
-     "file": "spirit-wear/kopplingssprint-se.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AKopplingssprint-se.svg"
     },
     {
      "name": "Eagle (21619) - The Noun Project",
@@ -155,34 +131,16 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ALightning_%2889063%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Weather Icons - tsra",
-     "file": "spirit-wear/weather-icons-tsra.svg",
+     "name": "Crown Pinhead icon",
+     "file": "spirit-wear/crown-pinhead-icon.svg",
      "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWeather_Icons_-_tsra.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3ACrown_Pinhead_icon.svg"
     },
     {
-     "name": "Weather Icons - hi tsra",
-     "file": "spirit-wear/weather-icons-hi-tsra.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWeather_Icons_-_hi_tsra.svg"
-    },
-    {
-     "name": "Hydroelectric Energy - The Noun Project",
-     "file": "spirit-wear/hydroelectric-energy-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AHydroelectric_Energy_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Smartphone (83003) - The Noun Project",
-     "file": "spirit-wear/smartphone-83003-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ASmartphone_%2883003%29_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Surfboard (100671) - The Noun Project",
-     "file": "spirit-wear/surfboard-100671-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ASurfboard_%28100671%29_-_The_Noun_Project.svg"
+     "name": "Simple crown icon",
+     "file": "spirit-wear/simple-crown-icon.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3ASimple_crown_icon.svg"
     }
    ]
   },
@@ -401,12 +359,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AWeightlifting_pictogram.svg"
     },
     {
-     "name": "Shooting pictogram",
-     "file": "sports/shooting-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AShooting_pictogram.svg"
-    },
-    {
      "name": "Karate pictogram",
      "file": "sports/karate-pictogram.svg",
      "license": "Public domain",
@@ -429,6 +381,12 @@
      "file": "sports/wrestling-pictogram.svg",
      "license": "Public domain",
      "source": "https://commons.wikimedia.org/wiki/File%3AWrestling_pictogram.svg"
+    },
+    {
+     "name": "Softball pictogram",
+     "file": "sports/softball-pictogram.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3ASoftball_pictogram.svg"
     }
    ]
   },
@@ -436,30 +394,6 @@
    "slug": "music",
    "label": "Music",
    "items": [
-    {
-     "name": "Audio a",
-     "file": "music/audio-a.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AAudio_a.svg"
-    },
-    {
-     "name": "Ligne rythme C noires et soupirs",
-     "file": "music/ligne-rythme-c-noires-et-soupirs.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ALigne_rythme_C_noires_et_soupirs.svg"
-    },
-    {
-     "name": "Ligne rythme C ronde blanches noires",
-     "file": "music/ligne-rythme-c-ronde-blanches-noires.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ALigne_rythme_C_ronde_blanches_noires.svg"
-    },
-    {
-     "name": "Ligne rythme C ronde blanches noires paroles",
-     "file": "music/ligne-rythme-c-ronde-blanches-noires-paroles.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ALigne_rythme_C_ronde_blanches_noires_paroles.svg"
-    },
     {
      "name": "Rests on stave 06 Crotchet",
      "file": "music/rests-on-stave-06-crotchet.svg",
@@ -539,76 +473,16 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AMusic-staff.svg"
     },
     {
-     "name": "NPS map symbol fishing",
-     "file": "music/nps-map-symbol-fishing.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ANPS_map_symbol_fishing.svg"
-    },
-    {
      "name": "French Horn (18919) - The Noun Project",
      "file": "music/french-horn-18919-the-noun-project.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AFrench_Horn_%2818919%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Horn mouthpiece drawing",
-     "file": "music/horn-mouthpiece-drawing.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AHorn_mouthpiece_drawing.svg"
-    },
-    {
      "name": "Music Note (61776) - The Noun Project",
      "file": "music/music-note-61776-the-noun-project.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AMusic_Note_%2861776%29_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "OOUI Talk icon - Note 2",
-     "file": "music/ooui-talk-icon-note-2.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AOOUI_Talk_icon_-_Note_2.svg"
-    },
-    {
-     "name": "Microsoft OneNote Icon (2025 - present)",
-     "file": "music/microsoft-onenote-icon-2025-present.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AMicrosoft_OneNote_Icon_%282025_-_present%29.svg"
-    },
-    {
-     "name": "Wlm-icon-note-white",
-     "file": "music/wlm-icon-note-white.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWlm-icon-note-white.svg"
-    },
-    {
-     "name": "Wlm-icon-note-red",
-     "file": "music/wlm-icon-note-red.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWlm-icon-note-red.svg"
-    },
-    {
-     "name": "Wlm-icon-note-green",
-     "file": "music/wlm-icon-note-green.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWlm-icon-note-green.svg"
-    },
-    {
-     "name": "Wlm-icon-note-blue",
-     "file": "music/wlm-icon-note-blue.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWlm-icon-note-blue.svg"
-    },
-    {
-     "name": ".one section icon (2013-2016)",
-     "file": "music/one-section-icon-2013-2016.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3A.one_section_icon_%282013-2016%29.svg"
-    },
-    {
-     "name": "Wlm-icon-note-black",
-     "file": "music/wlm-icon-note-black.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWlm-icon-note-black.svg"
     },
     {
      "name": "Palette with music note Pinhead icon",
@@ -623,22 +497,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AMusic_note_with_optical_disc_Pinhead_icon.svg"
     },
     {
-     "name": "Baroque Trill Instructions",
-     "file": "music/baroque-trill-instructions.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABaroque_Trill_Instructions.svg"
-    },
-    {
      "name": "Guitar Pick (407369) - The Noun Project",
      "file": "music/guitar-pick-407369-the-noun-project.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AGuitar_Pick_%28407369%29_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Harmonic partials on strings",
-     "file": "music/harmonic-partials-on-strings.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AHarmonic_partials_on_strings.svg"
     },
     {
      "name": "Vinyl record",
@@ -647,22 +509,76 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AVinyl_record.svg"
     },
     {
-     "name": "Discogs record icon",
-     "file": "music/discogs-record-icon.svg",
+     "name": "Music notes eighth Pinhead icon",
+     "file": "music/music-notes-eighth-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusic_notes_eighth_Pinhead_icon.svg"
+    },
+    {
+     "name": "Book with music notes eighth Pinhead icon",
+     "file": "music/book-with-music-notes-eighth-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ABook_with_music_notes_eighth_Pinhead_icon.svg"
+    },
+    {
+     "name": "Music rests",
+     "file": "music/music-rests.svg",
      "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ADiscogs_record_icon.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusic_rests.svg"
     },
     {
-     "name": "Blue speaker icon flipped",
-     "file": "music/blue-speaker-icon-flipped.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABlue_speaker_icon_flipped.svg"
+     "name": "U+266B d",
+     "file": "music/u-266b-d.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3AU%2B266B_d.svg"
     },
     {
-     "name": "Blue auditorium icon (upside-down speaker icon)",
-     "file": "music/blue-auditorium-icon-upside-down-speaker-icon.svg",
+     "name": "U+266B a",
+     "file": "music/u-266b-a.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3AU%2B266B_a.svg"
+    },
+    {
+     "name": "Figure rythmique trois croches lien haut",
+     "file": "music/figure-rythmique-trois-croches-lien-haut.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3AFigure_rythmique_trois_croches_lien_haut.svg"
+    },
+    {
+     "name": "Maracas (887856) - The Noun Project",
+     "file": "music/maracas-887856-the-noun-project.svg",
      "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABlue_auditorium_icon_%28upside-down_speaker_icon%29.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3AMaracas_%28887856%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Music notes (495026) - The Noun Project",
+     "file": "music/music-notes-495026-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusic_notes_%28495026%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Musical note nicu bucule 01",
+     "file": "music/musical-note-nicu-bucule-01.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusical_note_nicu_bucule_01.svg"
+    },
+    {
+     "name": "1-4 note crotchet (music)",
+     "file": "music/1-4-note-crotchet-music.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3A1-4_note_crotchet_%28music%29.svg"
+    },
+    {
+     "name": "Music Note (130928) - The Noun Project",
+     "file": "music/music-note-130928-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusic_Note_%28130928%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Music Note (130920) - The Noun Project",
+     "file": "music/music-note-130920-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AMusic_Note_%28130920%29_-_The_Noun_Project.svg"
     }
    ]
   },
@@ -677,18 +593,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ABallroom.svg"
     },
     {
-     "name": "Cycling (road) pictogram",
-     "file": "cheer-dance/cycling-road-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ACycling_%28road%29_pictogram.svg"
-    },
-    {
-     "name": "Water tap Pinhead icon",
-     "file": "cheer-dance/water-tap-pinhead-icon.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWater_tap_Pinhead_icon.svg"
-    },
-    {
      "name": "Dance (9109) - The Noun Project",
      "file": "cheer-dance/dance-9109-the-noun-project.svg",
      "license": "CC0",
@@ -699,18 +603,6 @@
      "file": "cheer-dance/person-dancing-with-person-wearing-dress-pinhead-icon.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3APerson_dancing_with_person_wearing_dress_Pinhead_icon.svg"
-    },
-    {
-     "name": "Triathlon pictogram",
-     "file": "cheer-dance/triathlon-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ATriathlon_pictogram.svg"
-    },
-    {
-     "name": "Karate pictogram",
-     "file": "cheer-dance/karate-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AKarate_pictogram.svg"
     },
     {
      "name": "Gymnastics (artistic) pictogram",
@@ -731,64 +623,70 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ABaton_Twirler_Silhouette.svg"
     },
     {
-     "name": "Equestrian pictogram",
-     "file": "cheer-dance/equestrian-pictogram.svg",
+     "name": "Figure skating pictogram",
+     "file": "cheer-dance/figure-skating-pictogram.svg",
      "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AEquestrian_pictogram.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3AFigure_skating_pictogram.svg"
     },
     {
-     "name": "Athletics pictogram",
-     "file": "cheer-dance/athletics-pictogram.svg",
+     "name": "Ancient Greek dancer \u00b7 HHWIII171",
+     "file": "cheer-dance/ancient-greek-dancer-hhwiii171.svg",
      "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AAthletics_pictogram.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3AAncient_Greek_dancer_%C2%B7_HHWIII171.svg"
     },
     {
-     "name": "Football pictogram",
-     "file": "cheer-dance/football-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AFootball_pictogram.svg"
+     "name": "Dancer brice boyer 01",
+     "file": "cheer-dance/dancer-brice-boyer-01.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADancer_brice_boyer_01.svg"
     },
     {
-     "name": "Canoeing (flatwater) pictogram",
-     "file": "cheer-dance/canoeing-flatwater-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ACanoeing_%28flatwater%29_pictogram.svg"
+     "name": "Person dancing with sparkles Pinhead icon",
+     "file": "cheer-dance/person-dancing-with-sparkles-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3APerson_dancing_with_sparkles_Pinhead_icon.svg"
     },
     {
-     "name": "Volleyball (indoor) pictogram",
-     "file": "cheer-dance/volleyball-indoor-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AVolleyball_%28indoor%29_pictogram.svg"
+     "name": "Cheerleader - The Noun Project",
+     "file": "cheer-dance/cheerleader-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ACheerleader_-_The_Noun_Project.svg"
     },
     {
-     "name": "Boxing pictogram",
-     "file": "cheer-dance/boxing-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABoxing_pictogram.svg"
+     "name": "Cheerleader (11325) - The Noun Project",
+     "file": "cheer-dance/cheerleader-11325-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ACheerleader_%2811325%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Curling pictogram",
-     "file": "cheer-dance/curling-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ACurling_pictogram.svg"
+     "name": "Cheerleader (11324) - The Noun Project",
+     "file": "cheer-dance/cheerleader-11324-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ACheerleader_%2811324%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Weightlifting pictogram",
-     "file": "cheer-dance/weightlifting-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWeightlifting_pictogram.svg"
+     "name": "Dancer (11091) - The Noun Project",
+     "file": "cheer-dance/dancer-11091-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADancer_%2811091%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Shooting pictogram",
-     "file": "cheer-dance/shooting-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AShooting_pictogram.svg"
+     "name": "Dancer (11089) - The Noun Project",
+     "file": "cheer-dance/dancer-11089-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADancer_%2811089%29_-_The_Noun_Project.svg"
     },
     {
-     "name": "Baseball pictogram",
-     "file": "cheer-dance/baseball-pictogram.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABaseball_pictogram.svg"
+     "name": "Dancer (11090) - The Noun Project",
+     "file": "cheer-dance/dancer-11090-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADancer_%2811090%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Okinawan Dancer (145774) - The Noun Project",
+     "file": "cheer-dance/okinawan-dancer-145774-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AOkinawan_Dancer_%28145774%29_-_The_Noun_Project.svg"
     }
    ]
   },
@@ -833,34 +731,16 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AStar_icon_stylized.svg"
     },
     {
-     "name": "Star icon-72a7cf",
-     "file": "hearts-stars/star-icon-72a7cf.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AStar_icon-72a7cf.svg"
-    },
-    {
      "name": "Star gradient icon",
      "file": "hearts-stars/star-gradient-icon.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AStar_gradient_icon.svg"
     },
     {
-     "name": "Hex icon with star black",
-     "file": "hearts-stars/hex-icon-with-star-black.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AHex_icon_with_star_black.svg"
-    },
-    {
      "name": "Star outline Pinhead icon",
      "file": "hearts-stars/star-outline-pinhead-icon.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AStar_outline_Pinhead_icon.svg"
-    },
-    {
-     "name": "Star of life2",
-     "file": "hearts-stars/star-of-life2.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AStar_of_life2.svg"
     },
     {
      "name": "Five-pointed star",
@@ -923,28 +803,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AHeart_Healthy_-_The_Noun_Project.svg"
     },
     {
-     "name": "Balloon - The Noun Project",
-     "file": "hearts-stars/balloon-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABalloon_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Adopt a Highway (14299) - The Noun Project",
-     "file": "hearts-stars/adopt-a-highway-14299-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AAdopt_a_Highway_%2814299%29_-_The_Noun_Project.svg"
-    },
-    {
      "name": "Key-to-heart - The Noun Project",
      "file": "hearts-stars/key-to-heart-the-noun-project.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AKey-to-heart_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Leaf icon (Noun Project)",
-     "file": "hearts-stars/leaf-icon-noun-project.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ALeaf_icon_%28Noun_Project%29.svg"
     },
     {
      "name": "Pawprints and heart Pinhead icon",
@@ -953,28 +815,40 @@
      "source": "https://commons.wikimedia.org/wiki/File%3APawprints_and_heart_Pinhead_icon.svg"
     },
     {
-     "name": "USVA headstone emb-62 (Sacred Heart)",
-     "file": "hearts-stars/usva-headstone-emb-62-sacred-heart.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AUSVA_headstone_emb-62_%28Sacred_Heart%29.svg"
-    },
-    {
-     "name": "OOjs UI icon unStar",
-     "file": "hearts-stars/oojs-ui-icon-unstar.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AOOjs_UI_icon_unStar.svg"
-    },
-    {
-     "name": "Eurovision 2026 heart - Iceland",
-     "file": "hearts-stars/eurovision-2026-heart-iceland.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AEurovision_2026_heart_-_Iceland.svg"
-    },
-    {
      "name": "Heart icon red hollow",
      "file": "hearts-stars/heart-icon-red-hollow.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AHeart_icon_red_hollow.svg"
+    },
+    {
+     "name": "Shopping bag with heart Pinhead icon",
+     "file": "hearts-stars/shopping-bag-with-heart-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AShopping_bag_with_heart_Pinhead_icon.svg"
+    },
+    {
+     "name": "Drawn love hearts",
+     "file": "hearts-stars/drawn-love-hearts.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADrawn_love_hearts.svg"
+    },
+    {
+     "name": "Red-Heart-vector-2731436",
+     "file": "hearts-stars/red-heart-vector-2731436.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ARed-Heart-vector-2731436.svg"
+    },
+    {
+     "name": "Favorite (89637) - The Noun Project",
+     "file": "hearts-stars/favorite-89637-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AFavorite_%2889637%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Icon (80027) - The Noun Project",
+     "file": "hearts-stars/icon-80027-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AIcon_%2880027%29_-_The_Noun_Project.svg"
     }
    ]
   },
@@ -1025,12 +899,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ACat_silhouette_darkgray.svg"
     },
     {
-     "name": "Megalodon scale-ar",
-     "file": "animals/megalodon-scale-ar.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AMegalodon_scale-ar.svg"
-    },
-    {
      "name": "Black Cat",
      "file": "animals/black-cat.svg",
      "license": "CC0",
@@ -1073,12 +941,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AEagle_01.svg"
     },
     {
-     "name": "Vintage Heraldic Panther Silhouette",
-     "file": "animals/vintage-heraldic-panther-silhouette.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AVintage_Heraldic_Panther_Silhouette.svg"
-    },
-    {
      "name": "Eagle (21619) - The Noun Project",
      "file": "animals/eagle-21619-the-noun-project.svg",
      "license": "CC0",
@@ -1089,18 +951,6 @@
      "file": "animals/wolf-vector-image.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AWolf_vector_image.svg"
-    },
-    {
-     "name": "Insignia of the Mechanized Infantry Brigade \"Iron Wolf\"",
-     "file": "animals/insignia-of-the-mechanized-infantry-brigade-iron-wolf.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AInsignia_of_the_Mechanized_Infantry_Brigade_%22Iron_Wolf%22.svg"
-    },
-    {
-     "name": "Capitoline Wolf of Roman Kingdom",
-     "file": "animals/capitoline-wolf-of-roman-kingdom.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ACapitoline_Wolf_of_Roman_Kingdom.svg"
     },
     {
      "name": "Wolf 2",
@@ -1121,46 +971,28 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AWolf_head_Pinhead_icon.svg"
     },
     {
-     "name": "Peterburgian Vedic wolf-pronged kolovrat",
-     "file": "animals/peterburgian-vedic-wolf-pronged-kolovrat.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3APeterburgian_Vedic_wolf-pronged_kolovrat.svg"
-    },
-    {
      "name": "Wolf head and exclamation point Pinhead icon",
      "file": "animals/wolf-head-and-exclamation-point-pinhead-icon.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AWolf_head_and_exclamation_point_Pinhead_icon.svg"
     },
     {
-     "name": "Nearby Stars (14ly Radius)",
-     "file": "animals/nearby-stars-14ly-radius.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ANearby_Stars_%2814ly_Radius%29.svg"
+     "name": "Dog Pinhead icon",
+     "file": "animals/dog-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADog_Pinhead_icon.svg"
     },
     {
-     "name": "Fox One 2025",
-     "file": "animals/fox-one-2025.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AFox_One_2025.svg"
+     "name": "Fish icon (The Noun Project 27052)",
+     "file": "animals/fish-icon-the-noun-project-27052.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AFish_icon_%28The_Noun_Project_27052%29.svg"
     },
     {
-     "name": "WDAF Fox 4 (2025)",
-     "file": "animals/wdaf-fox-4-2025.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWDAF_Fox_4_%282025%29.svg"
-    },
-    {
-     "name": "Fox Sports 2 Argentina 2023",
-     "file": "animals/fox-sports-2-argentina-2023.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AFox_Sports_2_Argentina_2023.svg"
-    },
-    {
-     "name": "KSWB Fox 5 (2018)",
-     "file": "animals/kswb-fox-5-2018.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AKSWB_Fox_5_%282018%29.svg"
+     "name": "Teddy Bear (243760) - The Noun Project",
+     "file": "animals/teddy-bear-243760-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ATeddy_Bear_%28243760%29_-_The_Noun_Project.svg"
     }
    ]
   },
@@ -1205,12 +1037,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3APeace_dove.svg"
     },
     {
-     "name": "Cross-Country Skiing - The Noun Project",
-     "file": "faith/cross-country-skiing-the-noun-project.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ACross-Country_Skiing_-_The_Noun_Project.svg"
-    },
-    {
      "name": "Pawprint with greek cross Pinhead icon",
      "file": "faith/pawprint-with-greek-cross-pinhead-icon.svg",
      "license": "CC0",
@@ -1221,12 +1047,6 @@
      "file": "faith/black-gold-christian-cross.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3ABlack_Gold_Christian_Cross.svg"
-    },
-    {
-     "name": "Novgorod Republic Double-headed eagle Shield",
-     "file": "faith/novgorod-republic-double-headed-eagle-shield.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ANovgorod_Republic_Double-headed_eagle_Shield.svg"
     },
     {
      "name": "Ichthus",
@@ -1253,28 +1073,34 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AGreek_cross_envolved_in_a_crown_of_thorns.svg"
     },
     {
-     "name": "Doornspijk wapen",
-     "file": "faith/doornspijk-wapen.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ADoornspijk_wapen.svg"
+     "name": "Angel moroni Pinhead icon",
+     "file": "faith/angel-moroni-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AAngel_moroni_Pinhead_icon.svg"
     },
     {
-     "name": "Blason famille de Meaux de par Saint Louis",
-     "file": "faith/blason-famille-de-meaux-de-par-saint-louis.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABlason_famille_de_Meaux_de_par_Saint_Louis.svg"
+     "name": "Latin-Cross-in-Zapf-Dingbats",
+     "file": "faith/latin-cross-in-zapf-dingbats.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ALatin-Cross-in-Zapf-Dingbats.svg"
     },
     {
-     "name": "Tram icon StVO (crossed out)",
-     "file": "faith/tram-icon-stvo-crossed-out.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ATram_icon_StVO_%28crossed_out%29.svg"
+     "name": "Person kneeling and praying Pinhead icon",
+     "file": "faith/person-kneeling-and-praying-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3APerson_kneeling_and_praying_Pinhead_icon.svg"
     },
     {
-     "name": "Tram icon StVO (crossed out, white)",
-     "file": "faith/tram-icon-stvo-crossed-out-white.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ATram_icon_StVO_%28crossed_out%2C_white%29.svg"
+     "name": "Dove (248816) - The Noun Project",
+     "file": "faith/dove-248816-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADove_%28248816%29_-_The_Noun_Project.svg"
+    },
+    {
+     "name": "Dove (248815) - The Noun Project",
+     "file": "faith/dove-248815-the-noun-project.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ADove_%28248815%29_-_The_Noun_Project.svg"
     }
    ]
   },
@@ -1355,40 +1181,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ASnowflake_-_The_Noun_Project.svg"
     },
     {
-     "name": "Weather Icons - sn",
-     "file": "holidays/weather-icons-sn.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWeather_Icons_-_sn.svg"
-    },
-    {
      "name": "Christmas light - The Noun Project",
      "file": "holidays/christmas-light-the-noun-project.svg",
      "license": "CC0",
      "source": "https://commons.wikimedia.org/wiki/File%3AChristmas_light_-_The_Noun_Project.svg"
-    },
-    {
-     "name": "Marine Raiders insignia",
-     "file": "holidays/marine-raiders-insignia.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AMarine_Raiders_insignia.svg"
-    },
-    {
-     "name": "Bandeira de Santa Rita (MA)",
-     "file": "holidays/bandeira-de-santa-rita-ma.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABandeira_de_Santa_Rita_%28MA%29.svg"
-    },
-    {
-     "name": "Bandeira de Santa Catarina",
-     "file": "holidays/bandeira-de-santa-catarina.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABandeira_de_Santa_Catarina.svg"
-    },
-    {
-     "name": "Blason famille fr Aspremont (Champagne)",
-     "file": "holidays/blason-famille-fr-aspremont-champagne.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3ABlason_famille_fr_Aspremont_%28Champagne%29.svg"
     },
     {
      "name": "Champagne coupe",
@@ -1409,10 +1205,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AChampagne_-_The_Noun_Project.svg"
     },
     {
-     "name": "France Champagne-sur-Oise Mairie 2026",
-     "file": "holidays/france-champagne-sur-oise-mairie-2026.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3AFrance_Champagne-sur-Oise_Mairie_2026.svg"
+     "name": "Giftwrapped box Pinhead icon",
+     "file": "holidays/giftwrapped-box-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3AGiftwrapped_box_Pinhead_icon.svg"
     }
    ]
   },
@@ -1481,18 +1277,6 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ACloud-blue-24.svg"
     },
     {
-     "name": "Paomedia small-n-flat cloud-down",
-     "file": "nature/paomedia-small-n-flat-cloud-down.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3APaomedia_small-n-flat_cloud-down.svg"
-    },
-    {
-     "name": "Paomedia small-n-flat cloud-up",
-     "file": "nature/paomedia-small-n-flat-cloud-up.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3APaomedia_small-n-flat_cloud-up.svg"
-    },
-    {
      "name": "Cloud 7 in classic duotone style",
      "file": "nature/cloud-7-in-classic-duotone-style.svg",
      "license": "CC0",
@@ -1517,22 +1301,10 @@
      "source": "https://commons.wikimedia.org/wiki/File%3AVector_Illustration_of_a_Mountain_Landscape_with_Pine_Trees.svg"
     },
     {
-     "name": "Weather Icons - hi tsra",
-     "file": "nature/weather-icons-hi-tsra.svg",
-     "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AWeather_Icons_-_hi_tsra.svg"
-    },
-    {
      "name": "Daisy Emblem",
      "file": "nature/daisy-emblem.svg",
      "license": "Public domain",
      "source": "https://commons.wikimedia.org/wiki/File%3ADaisy_Emblem.svg"
-    },
-    {
-     "name": "Daisy chain",
-     "file": "nature/daisy-chain.svg",
-     "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3ADaisy_chain.svg"
     },
     {
      "name": "Daisy Pinhead icon",
@@ -1541,16 +1313,28 @@
      "source": "https://commons.wikimedia.org/wiki/File%3ADaisy_Pinhead_icon.svg"
     },
     {
-     "name": "Pushing Daisies",
-     "file": "nature/pushing-daisies.svg",
+     "name": "Sun black icon",
+     "file": "nature/sun-black-icon.svg",
      "license": "Public domain",
-     "source": "https://commons.wikimedia.org/wiki/File%3APushing_Daisies.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3ASun_black_icon.svg"
     },
     {
-     "name": "Grand Abalone - Belgian daisy",
-     "file": "nature/grand-abalone-belgian-daisy.svg",
+     "name": "Golden Sun Icon",
+     "file": "nature/golden-sun-icon.svg",
      "license": "CC0",
-     "source": "https://commons.wikimedia.org/wiki/File%3AGrand_Abalone_-_Belgian_daisy.svg"
+     "source": "https://commons.wikimedia.org/wiki/File%3AGolden_Sun_Icon.svg"
+    },
+    {
+     "name": "Sun Pinhead icon",
+     "file": "nature/sun-pinhead-icon.svg",
+     "license": "CC0",
+     "source": "https://commons.wikimedia.org/wiki/File%3ASun_Pinhead_icon.svg"
+    },
+    {
+     "name": "Sun with face",
+     "file": "nature/sun-with-face.svg",
+     "license": "Public domain",
+     "source": "https://commons.wikimedia.org/wiki/File%3ASun_with_face.svg"
     }
    ]
   }
