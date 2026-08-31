@@ -157,7 +157,16 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
       borderSum += lumOf(y * w + x)
       borderN++
     }
-  const borderIsDark = borderSum / borderN < threshold
+  const borderLum = borderSum / borderN
+  const borderIsDark = borderLum < threshold
+  // The design is everything meaningfully different from the BACKGROUND,
+  // not one side of an Otsu split among the artwork's own tones. On a
+  // white-background emoji, Otsu split the dark outline strokes from
+  // everything else (threshold 47) and traced a hairline ring instead of
+  // the solid numerals. Pull the threshold toward the background so all
+  // midtones join the design.
+  if (borderIsDark) threshold = Math.min(threshold, Math.max(10, Math.round(borderLum) + 25))
+  else threshold = Math.max(threshold, Math.min(245, Math.round(borderLum) - 25))
   return {
     threshold,
     invert: borderIsDark,
