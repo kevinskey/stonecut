@@ -1716,11 +1716,30 @@ export function outlineOrSpine(
             }
             return x1 - x0 >= holeMm || y1 - y0 >= holeMm
           })
-        if (bc.length === 2 && Math.min(bc[0].length, bc[1].length) >= Math.max(bc[0].length, bc[1].length) * 0.25) {
-          // a true RING: two boundary contours of comparable length. (A
-          // cursive word with one tiny loop counter also has two contours —
-          // pairing its giant outer against the little loop produced
-          // garbage, hence the length-ratio gate.)
+        // a true RING is two comparable contours that run PARALLEL a band
+        // apart the whole way round. Length ratio alone let a cursive word
+        // (big outer + one loop counter, ratio 0.33) classify as a ring and
+        // pair its entire outer against that single counter — the midline
+        // cut through empty counters and corner/edge stones followed it
+        // 2-6mm off the vector on every script loop.
+        const bandParallel = (): boolean => {
+          if (bc.length !== 2) return false
+          const [A, B] = bc
+          const ds: number[] = []
+          for (let k = 0; k < A.length; k += Math.max(1, Math.floor(A.length / 48))) {
+            const p = A[k]
+            let bd = Infinity
+            for (let j = 0; j < B.length; j += 2) {
+              const q = B[j]
+              const dd = (q.x - p.x) ** 2 + (q.y - p.y) ** 2
+              if (dd < bd) bd = dd
+            }
+            ds.push(Math.sqrt(bd))
+          }
+          ds.sort((x, y) => x - y)
+          return ds[Math.floor(ds.length * 0.9)] <= needW * 1.3
+        }
+        if (bc.length === 2 && Math.min(bc[0].length, bc[1].length) >= Math.max(bc[0].length, bc[1].length) * 0.25 && bandParallel()) {
           const [a, b] = bc
           bandRings.push(a.length >= b.length ? { outer: a, inner: b } : { outer: b, inner: a })
           bandLbls.add(lbl)
@@ -1890,14 +1909,45 @@ export function outlineOrSpine(
   // placement as an ordinary outline: corners stay crisp and the beat is
   // harmonized, neither of which a pixel-skeleton spine could give.
   for (const ring of bandRings) {
-    const mid: Pt[] = []
-    for (const p of ring.outer) {
-      let bx = 0, by = 0, bd = Infinity
-      for (const q of ring.inner) {
+    // CONTINUITY-CONSTRAINED pairing. Global nearest-point pairing jumps the
+    // counter at a loop's neck — a point on the outer contour is spatially
+    // closest to the inner contour's FAR side, the midpoint lands mid-void,
+    // and corner/edge stones followed it 2-6mm off the vector (every script
+    // loop: Allura/Sacramento/Pinyon l and e). Anchor at the most
+    // unambiguous pair, then walk the ring keeping the partner index LOCAL,
+    // so the pairing can only travel around the band, never across it.
+    const inN = ring.inner.length
+    const nearestTo = (p: Pt): { j: number; d2: number } => {
+      let bj = 0, bd = Infinity
+      for (let j = 0; j < inN; j++) {
+        const q = ring.inner[j]
         const dd = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
-        if (dd < bd) { bd = dd; bx = q.x; by = q.y }
+        if (dd < bd) { bd = dd; bj = j }
       }
-      mid.push({ x: (p.x + bx) / 2, y: (p.y + by) / 2 })
+      return { j: bj, d2: bd }
+    }
+    let anchor = 0
+    let anchorHit = { j: 0, d2: Infinity }
+    for (let i = 0; i < ring.outer.length; i++) {
+      const hit = nearestTo(ring.outer[i])
+      if (hit.d2 < anchorHit.d2) { anchorHit = hit; anchor = i }
+    }
+    const W = Math.max(6, Math.round(inN * 0.08))
+    const mid: Pt[] = new Array(ring.outer.length)
+    let jPrev = anchorHit.j
+    for (let step = 0; step < ring.outer.length; step++) {
+      const i = (anchor + step) % ring.outer.length
+      const p = ring.outer[i]
+      let bj = jPrev, bd = Infinity
+      for (let o = -W; o <= W; o++) {
+        const j = ((jPrev + o) % inN + inN) % inN
+        const q = ring.inner[j]
+        const dd = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
+        if (dd < bd) { bd = dd; bj = j }
+      }
+      jPrev = bj
+      const q = ring.inner[bj]
+      mid[i] = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }
     }
     for (let pass = 0; pass < 2; pass++) {
       const n = mid.length
@@ -1983,24 +2033,14 @@ export function outlineOrSpine(
         if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue
         if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * 0.33) continue
       }
-      // walls stand down exactly where the single line takes over: paint
-      // the mask as a disk covering the local stroke around this midpoint
-      {
-        const mr = Math.ceil((Math.sqrt(bd) / 2 + 0.5) * pxPerMm)
-        const mx = Math.round(m.x * pxPerMm + padPx)
-        const my = Math.round(m.y * pxPerMm + padPx)
-        for (let dy2 = -mr; dy2 <= mr; dy2++)
-          for (let dx2 = -mr; dx2 <= mr; dx2++) {
-            if (dx2 * dx2 + dy2 * dy2 > mr * mr) continue
-            const x2 = mx + dx2
-            const y2 = my + dy2
-            if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h) spinedMask[y2 * w + x2] = 1
-          }
-      }
       const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
       if (cloudKeys.has(key)) continue
       cloudKeys.add(key)
-      cloud.push(m)
+      // band width rides along so the mask can be painted LATER, only along
+      // chains that actually place stones — painting here banned walls on
+      // stretches whose chain was then dropped, leaving them bare (the crest
+      // of a script o: no wall, no line, a hole in the lettering)
+      cloud.push({ x: m.x, y: m.y, bw: Math.sqrt(bd) } as Pt)
     }
     // greedy-chain the cloud into open polylines
     const used = new Uint8Array(cloud.length)
@@ -2079,6 +2119,20 @@ export function outlineOrSpine(
       if (got.length) {
         dbg('vectorline', got)
         out.push(...got)
+        // walls stand down exactly where the single line ACTUALLY took over
+        for (const v of chain) {
+          const bw = (v as Pt & { bw?: number }).bw ?? band.medW
+          const mr = Math.ceil((bw / 2 + 0.5) * pxPerMm)
+          const mx = Math.round(v.x * pxPerMm + padPx)
+          const my = Math.round(v.y * pxPerMm + padPx)
+          for (let dy2 = -mr; dy2 <= mr; dy2++)
+            for (let dx2 = -mr; dx2 <= mr; dx2++) {
+              if (dx2 * dx2 + dy2 * dy2 > mr * mr) continue
+              const x2 = mx + dx2
+              const y2 = my + dy2
+              if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h) spinedMask[y2 * w + x2] = 1
+            }
+        }
       }
     }
   }
@@ -2605,6 +2659,137 @@ export function outlineOrSpine(
   // Crowding is prevented where it happens instead: divideSpan re-divides a
   // span when a stone would land too near a foreign one, so a junction ends up
   // with fewer, evenly spaced stones rather than a jammed pair to clean up.
+
+  // BARE RESCUE — the last line of defence for "can this trace get closer to
+  // the original vector?". Whatever seam between producers left a stretch of
+  // material more than a beat from every stone (a pruned skeleton fragment at
+  // a junction, a masked wall with no line), find each bare blob and lay
+  // stones along ITS OWN medial line. Add-only: guarded by depth and spacing,
+  // it can fill a hole but never move or crowd what is already placed.
+  {
+    const sBin = new Uint8Array(w * h).fill(1)
+    for (const q of out) {
+      const px2 = Math.round(q.x * pxPerMm + padPx)
+      const py2 = Math.round(q.y * pxPerMm + padPx)
+      if (px2 >= 0 && py2 >= 0 && px2 < w && py2 < h) sBin[py2 * w + px2] = 0
+    }
+    const dStone = distanceTransform({ bin: sBin, w, h, pxPerMm, padPx })
+    const bare = new Uint8Array(w * h)
+    for (let i2 = 0; i2 < w * h; i2++) {
+      if (!bin[i2]) continue
+      if (dt[i2] / pxPerMm > pitch * 0.55) continue
+      if (dt[i2] / pxPerMm < 0.4) continue
+      if (dStone[i2] / pxPerMm > rhythm * 1.1) bare[i2] = 1
+    }
+    const bl = labelComponents(bare, w, h)
+    if (bl.count) {
+      const area = new Int32Array(bl.count + 1)
+      for (let i2 = 0; i2 < w * h; i2++) if (bl.labels[i2]) area[bl.labels[i2]]++
+      const minArea = (pitch * pxPerMm) ** 2 * 0.12
+      const blob = new Uint8Array(w * h)
+      for (let b2 = 1; b2 <= bl.count; b2++) {
+        if (area[b2] < minArea) continue
+        let medianW2 = 0
+        let blobMaxDt = 0
+        let deepestIdx = -1
+        {
+          const ws2: number[] = []
+          for (let i2 = 0; i2 < w * h; i2++) {
+            blob[i2] = bl.labels[i2] === b2 ? 1 : 0
+            if (blob[i2]) {
+              if (wide[i2] > 0) ws2.push(wide[i2])
+              if (dt[i2] > blobMaxDt) {
+                blobMaxDt = dt[i2]
+                deepestIdx = i2
+              }
+            }
+          }
+          if (ws2.length) {
+            ws2.sort((x2, y2) => x2 - y2)
+            medianW2 = ws2[Math.floor(ws2.length / 2)]
+          }
+        }
+        // demand only as much depth as this blob's geometry allows — the
+        // stroke's ideal centre may sit just outside a rim-hugging blob, and
+        // a stone 1mm inside the material beats a hole in the lettering
+        const minDeep3 = Math.min(
+          holeMm / 2 + 0.1,
+          Math.max(0.3, medianW2 * 0.35),
+          Math.max(0.3, (blobMaxDt / pxPerMm) * 0.8),
+        )
+        const deep3 = (q: Pt) => {
+          const xi = Math.round(q.x * pxPerMm + padPx)
+          const yi = Math.round(q.y * pxPerMm + padPx)
+          if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+          return dt[yi * w + xi] / pxPerMm >= minDeep3
+        }
+        const inBlob = (q: Pt) => {
+          const xi = Math.round(q.x * pxPerMm + padPx)
+          const yi = Math.round(q.y * pxPerMm + padPx)
+          if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+          for (let dy2 = -2; dy2 <= 2; dy2++)
+            for (let dx2 = -2; dx2 <= 2; dx2++) {
+              const x2 = xi + dx2
+              const y2 = yi + dy2
+              if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h && blob[y2 * w + x2]) return true
+            }
+          return false
+        }
+        let placedAny2 = false
+        const paths2: Pt[][] = []
+        if (medianW2 >= pitch * 1.3) {
+          // the bare material is the RIM of a wide region — its stones belong
+          // ON the outline, so rescue along the merged boundary through the
+          // blob, never down the bare zone's own middle
+          for (const ct of mergedOutline) {
+            let run: Pt[] = []
+            const flush = () => {
+              if (run.length >= 2) paths2.push(run)
+              run = []
+            }
+            for (let k2 = 0; k2 < ct.length; k2++) {
+              if (inBlob(ct[k2])) run.push(ct[k2])
+              else flush()
+            }
+            flush()
+          }
+        } else {
+          const skel2 = skeletonize(blob, w, h)
+          paths2.push(...traceSkeleton(skel2, w, h).map((pp) => smoothPath(pp, 4).map(toMm)))
+        }
+        paths2.sort((a2, b3) => b3.length - a2.length)
+        const wallMode = medianW2 >= pitch * 1.3
+        for (const pth2 of paths2) {
+          let len2 = 0
+          for (let k2 = 1; k2 < pth2.length; k2++)
+            len2 += Math.hypot(pth2[k2].x - pth2[k2 - 1].x, pth2[k2].y - pth2[k2 - 1].y)
+          if (len2 < rhythm * 0.5 && pth2.length < 3) continue
+          const got2 = placeOpenEven(pth2, pitch, idx, rhythm).filter((q) => {
+            if (!wallMode && !deep3(q)) {
+              idx.remove(q)
+              return false
+            }
+            return true
+          })
+          if (got2.length) {
+            dbg('rescue', got2)
+            out.push(...got2)
+            placedAny2 = true
+          }
+        }
+        // a blob whose skeleton gave nothing still deserves ONE stone at its
+        // deepest point — every blob pixel clears the floor by construction
+        if (!placedAny2 && deepestIdx >= 0) {
+          const q3 = toMm({ x: deepestIdx % w, y: Math.floor(deepestIdx / w) })
+          if (idx.canPlace(q3)) {
+            idx.add(q3)
+            dbg('rescue', [q3])
+            out.push(q3)
+          }
+        }
+      }
+    }
+  }
 
   return out
 }
