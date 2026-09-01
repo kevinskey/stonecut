@@ -161,6 +161,32 @@ let bareRuns = 0
   }
 }
 
+// CLUMP metric: a stone with 2+ neighbours near the legal floor whose
+// directions are NOT opposite (a row has floor-ish neighbours only fore/aft;
+// a knot has them at an angle). This is what the eye reads as clutter.
+let clumps = 0
+const onVec = (p) => distToVec(p) < 0.55
+for (const p of out) {
+  const nbr = []
+  for (const q of out) {
+    if (q === p) continue
+    const d = Math.hypot(q.x - p.x, q.y - p.y)
+    if (d < pitch * 1.08) nbr.push({ q, x: (q.x - p.x) / d, y: (q.y - p.y) / d })
+  }
+  if (nbr.length < 2) continue
+  let knot = false
+  for (let a = 0; a < nbr.length && !knot; a++)
+    for (let b = a + 1; b < nbr.length; b++) {
+      const dot = nbr[a].x * nbr[b].x + nbr[a].y * nbr[b].y
+      if (dot <= -0.2) continue // fore/aft or a shallow bend: a row
+      // an angular meeting where all three ride the vector is a CORNER —
+      // correct tracing, not clutter
+      if (onVec(p) && onVec(nbr[a].q) && onVec(nbr[b].q)) continue
+      knot = true
+      break
+    }
+  if (knot) clumps++
+}
 const cats = debugStones.reduce((m, s) => ((m[s.cat] = (m[s.cat] || 0) + 1), m), {})
 console.log(
   JSON.stringify({
@@ -176,6 +202,7 @@ console.log(
     vecMax: +pct(wallD, 1).toFixed(2),
     spineN: spineErr.length,
     spineCtrP90: +pct(spineErr, 0.9).toFixed(2),
+    clumps,
     floorViol,
     gapP50: +pct(nn, 0.5).toFixed(2),
     gapP90: +pct(nn, 0.9).toFixed(2),

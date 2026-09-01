@@ -53,18 +53,18 @@ const errs = results.filter((r) => r.error)
 // legality and coverage still hard-count
 for (const r of ok)
   r.score = +(r.vecP90 * 2 + r.vecMax * 0.5 + r.floorViol * 10 + r.bareRuns * 3 +
-    Math.max(0, r.gapP90 / 4.2 - 1.15) * 10 + r.spineCtrP90).toFixed(2)
+    (r.clumps ?? 0) * 1.5 + Math.max(0, r.gapP90 / 4.2 - 1.15) * 10 + r.spineCtrP90).toFixed(2)
 ok.sort((a, b) => b.score - a.score)
 const mean = (k) => (ok.reduce((s, r) => s + r[k], 0) / ok.length).toFixed(2)
 console.log(`tests: ${ok.length} ok, ${errs.length} err`)
-console.log(`MEANS  vecP50 ${mean('vecP50')}  vecP90 ${mean('vecP90')}  vecMax ${mean('vecMax')}  floorViol ${mean('floorViol')}  bare ${mean('bareRuns')}  gapP90 ${mean('gapP90')}`)
-console.log('font/word'.padEnd(30), 'score', 'vP50', 'vP90', 'vMax', 'viol', 'bare', 'gP90', 'spine')
+console.log(`MEANS  vecP50 ${mean('vecP50')}  vecP90 ${mean('vecP90')}  vecMax ${mean('vecMax')}  floorViol ${mean('floorViol')}  bare ${mean('bareRuns')}  clumps ${mean('clumps')}  gapP90 ${mean('gapP90')}`)
+console.log('font/word'.padEnd(30), 'score', 'vP50', 'vP90', 'vMax', 'viol', 'bare', 'clump', 'spine')
 for (const r of ok)
   console.log(
     `${r.font.replace('.ttf', '')}/${r.text}`.padEnd(30),
     String(r.score).padStart(6), String(r.vecP50).padStart(5), String(r.vecP90).padStart(5),
     String(r.vecMax).padStart(5), String(r.floorViol).padStart(4), String(r.bareRuns).padStart(4),
-    String(r.gapP50).padStart(5), String(r.spineCtrP90).padStart(5),
+    String(r.clumps ?? 0).padStart(5), String(r.spineCtrP90).padStart(5),
   )
 for (const r of errs) console.log('ERR', r.font, r.text, r.error)
 const outIdx = process.argv.indexOf('--json')

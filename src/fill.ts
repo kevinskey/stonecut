@@ -1666,6 +1666,34 @@ export function outlineOrSpine(
     const thin = new Uint8Array(w * h)
     for (let i2 = 0; i2 < w * h; i2++)
       thin[i2] = labels[i2] && wide[i2] > 0 && wide[i2] < needW ? 1 : 0
+    // ABSORB SMALL WALL ISLANDS. A serif flare at the tip of a hairline arm
+    // measures just over the two-row threshold, so a few square mm of "wall
+    // zone" sits inside line territory — and both machineries plant stones
+    // in it, which knots (Playfair E arms). A wall region has to be big
+    // enough to hold an actual wall RUN; smaller islands adjacent to thin
+    // material are traced by the line that runs through them.
+    {
+      const notThin = new Uint8Array(w * h)
+      for (let i2 = 0; i2 < w * h; i2++) notThin[i2] = labels[i2] && !thin[i2] ? 1 : 0
+      const wi = labelComponents(notThin, w, h)
+      if (wi.count) {
+        const areaW = new Int32Array(wi.count + 1)
+        const touchThin = new Uint8Array(wi.count + 1)
+        for (let y2 = 1; y2 < h - 1; y2++)
+          for (let x2 = 1; x2 < w - 1; x2++) {
+            const i2 = y2 * w + x2
+            const lb = wi.labels[i2]
+            if (!lb) continue
+            areaW[lb]++
+            if (thin[i2 - 1] || thin[i2 + 1] || thin[i2 - w] || thin[i2 + w]) touchThin[lb] = 1
+          }
+        const minIsland = (pitch * pxPerMm) ** 2 * 1.8
+        for (let i2 = 0; i2 < w * h; i2++) {
+          const lb = wi.labels[i2]
+          if (lb && touchThin[lb] && areaW[lb] < minIsland) thin[i2] = 1
+        }
+      }
+    }
     // A BAND-LIKE component — a double-outline font's ring, uniformly narrow
     // the whole way round — is spined as a WHOLE. Judged in thin patches, the
     // stretches of a hand-drawn ring that bulge past the threshold kept
