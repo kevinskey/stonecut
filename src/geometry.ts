@@ -41,11 +41,15 @@ export function removeCollisions(
 
 // Nearest-neighbor cut ordering starting from the origin — the fix for the
 // head zigzagging across the mat on dense rhinestone patterns.
-export function orderNearestNeighbor(stones: Stone[]): Stone[] {
+// `start` is in MODEL space and should be whatever maps to the machine's
+// (0,0) — the exporters mirror X and flip Y, so the model origin is the far
+// corner on the cutter. Ordering from the wrong end made the head traverse
+// the whole design before its first cut.
+export function orderNearestNeighbor(stones: Stone[], start: Pt = { x: 0, y: 0 }): Stone[] {
   if (stones.length < 3) return stones
   const remaining = [...stones]
   const out: Stone[] = []
-  let cur: Pt = { x: 0, y: 0 }
+  let cur: Pt = start
   while (remaining.length) {
     let bi = 0
     let bd = Infinity

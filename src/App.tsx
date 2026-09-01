@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
-import type { MaterialPreset, Stone, StoneSpec } from './model'
+import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { removeCollisions } from './geometry'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
-import { download, toGPGL, toHPGL, toSVG } from './export'
+import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
+import type { OriginCorner } from './export'
+import { SHAPE_NAMES, shapeToContours } from './shapes'
+import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import './App.css'
 
 type Tool = 'select' | 'add'
 type StoneMode = 'outline' | 'fill' | 'both'
 
-const MARGIN = 5 // mm margin around design in exports
+const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in the Cut panel
 
 // template-integrity floor (sticky flock ~0.5-1.2mm edge gap) regardless of
 // how wide the design spacing is set
@@ -70,6 +73,36 @@ export default function App() {
   const [boardHIn, setBoardHIn] = useState(() => +(localStorage.getItem('stonecut.boardH') ?? 12))
   useEffect(() => { localStorage.setItem('stonecut.boardW', String(boardWIn)) }, [boardWIn])
   useEffect(() => { localStorage.setItem('stonecut.boardH', String(boardHIn)) }, [boardHIn])
+  // standoff between the cutter origin and the nearest hole. The CE6000's pinch
+  // rollers sit on the material edges and can't be cut under, so 0 only works
+  // when ORIGIN is set inboard of them.
+  const [margin, setMargin] = useState(() => +(localStorage.getItem('stonecut.margin') ?? DEFAULT_MARGIN))
+  useEffect(() => { localStorage.setItem('stonecut.margin', String(margin)) }, [margin])
+  // 'design' re-zeroes the job to its own bounding box (cut always starts at
+  // the machine origin); 'artboard' keeps the stones where they sit on the
+  // sheet, so what you positioned on the page is what gets cut.
+  const [placement, setPlacement] = useState<'design' | 'artboard'>(
+    () => (localStorage.getItem('stonecut.placement') === 'artboard' ? 'artboard' : 'design'),
+  )
+  useEffect(() => { localStorage.setItem('stonecut.placement', placement) }, [placement])
+  // Graphtec carriages home to the right, so 'br' is the common CE6000 setup.
+  const [originCorner, setOriginCorner] = useState<OriginCorner>(
+    () => (localStorage.getItem('stonecut.origin') === 'br' ? 'br' : 'bl'),
+  )
+  useEffect(() => { localStorage.setItem('stonecut.origin', originCorner) }, [originCorner])
+  // Must match MENU -> I/F -> STEP SIZE on the machine, or the job is scaled.
+  const [gpStep, setGpStep] = useState(() => +(localStorage.getItem('stonecut.gpstep') ?? 20) || 20)
+  useEffect(() => { localStorage.setItem('stonecut.gpstep', String(gpStep)) }, [gpStep])
+  // Off by default: the machine uses its own panel conditions unless
+  // CONDITION PRIORITY is set to PROGRAM.
+  const [sendConditions, setSendConditions] = useState(
+    () => localStorage.getItem('stonecut.sendcond') === '1',
+  )
+  // Graphtec's first coordinate is the media-feed axis. Whether that is the
+  // model's X or Y is a machine convention, so it has to be selectable.
+  const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') === '1')
+  useEffect(() => { localStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
+  useEffect(() => { localStorage.setItem('stonecut.sendcond', sendConditions ? '1' : '0') }, [sendConditions])
   const boardWmm = boardWIn * 25.4
   const boardHmm = boardHIn * 25.4
   const [status, setStatus] = useState('Ready')
@@ -314,22 +347,38 @@ export default function App() {
   }, [stones, holeOf])
 
   const job = useMemo(() => {
-    const w = bbox.maxX - bbox.minX + MARGIN * 2
-    const h = bbox.maxY - bbox.minY + MARGIN * 2
+    if (placement === 'artboard') {
+      // Coordinates pass through untouched: the sheet's own corner is the
+      // machine origin, so on-screen placement is the cut placement.
+      // NOT rounded: heightMm is the datum the exporters flip Y against, so
+      // ceiling a 304.8mm sheet to 305 would shift the whole design 0.2mm.
+      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm }
+    }
+    const w = bbox.maxX - bbox.minX + margin * 2
+    const h = bbox.maxY - bbox.minY + margin * 2
     return {
-      stones: stones.map((s) => ({ ...s, x: s.x - bbox.minX + MARGIN, y: s.y - bbox.minY + MARGIN })),
+      stones: stones.map((s) => ({ ...s, x: s.x - bbox.minX + margin, y: s.y - bbox.minY + margin })),
       sizes,
       widthMm: Math.ceil(w),
       heightMm: Math.ceil(h),
     }
-  }, [stones, bbox, sizes])
+  }, [stones, bbox, sizes, margin, placement, boardWmm, boardHmm])
+
+  // In artboard mode anything past the sheet edge cuts at negative or
+  // over-range coordinates, which the CE6000 silently clips.
+  const offBoard =
+    placement === 'artboard' &&
+    stones.length > 0 &&
+    (bbox.minX < 0 || bbox.minY < 0 || bbox.maxX > boardWmm || bbox.maxY > boardHmm)
 
   // live text preview: sample the selected font before committing stones
   const textPreview = useMemo(() => {
     if (!font || !text.trim()) return null
     try {
       return textToContours(font, text, textHeight, letterSpacing)
-    } catch {
+    } catch (e) {
+      // Can't setStatus from a memo; the console is the only channel here.
+      console.error('[stonecut] font contours failed', e)
       return null
     }
   }, [font, text, textHeight, letterSpacing])
@@ -390,8 +439,18 @@ export default function App() {
   // live stone preview: settings changes (size, gap, style) re-stone the
   // preview automatically, debounced so typing stays smooth. Committing hides
   // the preview until something changes again — no duplicate on canvas.
+  const [shapeKind, setShapeKind] = useState<ShapeKind>('circle')
+  const [shapeW, setShapeW] = useState(50)
+  const [shapeH, setShapeH] = useState(50)
+  const [shapeMode, setShapeMode] = useState<StoneMode>('outline')
   const [previewStones, setPreviewStones] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
   const [previewLive, setPreviewLive] = useState(true)
+  // A preview looks exactly like a finished design but isn't in `stones` yet,
+  // so the layer counts read 0 and Cut stays dead with a full canvas on screen.
+  // These counts drive the "not added yet" notice and the pulsing Add button.
+  const pendingText = previewLive ? previewStones?.length ?? 0 : 0
+  const pendingImage = imagePreview?.length ?? 0
+  const pending = pendingText + pendingImage
   useEffect(() => {
     setPreviewLive(true)
   }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
@@ -524,8 +583,13 @@ export default function App() {
         ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ ...s, chords: [...s.chords] }))
         ;(window as unknown as { __scContours?: unknown }).__scContours = textPreview.contours
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
-      } catch {
+      } catch (e) {
+        // A throw here used to vanish silently: the outline path still drew
+        // from textPreview, so the design looked intact while every stone
+        // disappeared and the layer counts read 0. Say what broke.
+        console.error('[stonecut] text stone preview failed', e)
         setPreviewStones(null)
+        setStatus(`Preview failed: ${e instanceof Error ? e.message : e}`)
       }
     }, 350)
     return () => window.clearTimeout(t)
@@ -588,8 +652,10 @@ export default function App() {
         setImagePreview(pts)
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
-      } catch {
+      } catch (e) {
+        console.error('[stonecut] image stone preview failed', e)
         setImagePreview(null)
+        setStatus(`Preview failed: ${e instanceof Error ? e.message : e}`)
       }
     }, 350)
     return () => window.clearTimeout(t)
@@ -611,9 +677,10 @@ export default function App() {
     [curSize, gap, mutate, sizes],
   )
 
-  const generateText = useCallback(() => {
-    if (!font) { setStatus('Upload a font file first (.ttf/.otf)'); return }
-    const { contours } = textToContours(font, text, textHeight, letterSpacing)
+  // The contours -> stones stage, shared by text and shapes. Both feed the
+  // same outline/fill machinery; only where the contours come from differs.
+  const contoursToStones = useCallback(
+    (contours: Pt[][], mode: StoneMode) => {
     const hole = sizes[curSize]?.holeMm ?? 3
     const hardGap = hardGapOf(gap)
     const rhythm = hole + gap
@@ -621,7 +688,7 @@ export default function App() {
     const pts: { x: number; y: number; size?: string; color?: string }[] = []
     const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
     let outline: { x: number; y: number }[] = []
-    if (textMode !== 'fill') {
+    if (mode !== 'fill') {
       if (outlineDesign === 'ghost') {
         outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
       } else {
@@ -631,7 +698,7 @@ export default function App() {
       }
     }
     pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
-    if (textMode !== 'outline') {
+    if (mode !== 'outline') {
       const fHole = sizes[fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
     // The lattice steps on the FILL stone's own pitch, not the outline's.
@@ -648,6 +715,15 @@ export default function App() {
       const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
+      return pts
+    },
+    [curSize, gap, sizes, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor],
+  )
+
+  const generateText = useCallback(() => {
+    if (!font) { setStatus('Upload a font file first (.ttf/.otf)'); return }
+    const { contours } = textToContours(font, text, textHeight, letterSpacing)
+    const pts = contoursToStones(contours, textMode)
     // commit exactly where the preview showed; release the pin so the next
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
@@ -655,7 +731,19 @@ export default function App() {
     setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, previewBaseY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [font, text, textHeight, letterSpacing, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
+
+  const generateShape = useCallback(() => {
+    const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
+    const pts = contoursToStones(contours, shapeMode)
+    if (!pts.length) {
+      setStatus('Shape is too small to hold stones at this size — raise the size or pick a smaller stone')
+      return
+    }
+    const offsetY = stones.length ? bbox.maxY + 10 : 10
+    addGenerated(pts, offsetY)
+    setStatus(`Added ${pts.length} stones from ${shapeKind}`)
+  }, [shapeKind, shapeW, shapeH, shapeMode, contoursToStones, stones.length, bbox.maxY, addGenerated])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -961,8 +1049,11 @@ export default function App() {
     return { o, f }
   }, [stones])
   const cutData = useCallback(
-    () => (format === 'gpgl' ? toGPGL(cutJob, preset) : toHPGL(cutJob, preset)),
-    [format, cutJob, preset],
+    () =>
+      format === 'gpgl'
+        ? toGPGL(cutJob, preset, originCorner, gpStep, sendConditions, swapAxes)
+        : toHPGL(cutJob, preset, originCorner),
+    [format, cutJob, preset, originCorner, gpStep, sendConditions, swapAxes],
   )
 
   const doSend = useCallback(async () => {
@@ -1127,7 +1218,12 @@ export default function App() {
     <div className="app">
       <aside className="panel">
         <h1>StoneCut</h1>
-        <div className="statusbar">{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
+        <div className="statusbar">
+          {pending > 0 && (
+            <div><b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b></div>
+          )}
+          <div>{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
+        </div>
 
 
         <Section title="Text">
@@ -1331,7 +1427,9 @@ export default function App() {
               </select>
             </label>
           </div>
-          <button className="primary" onClick={generateText}>Add text stones</button>
+          <button className={`primary${pendingText ? ' urgent' : ''}`} onClick={generateText}>
+            {pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones'}
+          </button>
         </Section>
         <Section title="Fill">
           <div className="grid2">
@@ -1357,6 +1455,51 @@ export default function App() {
               <option value="grid">Grid — aligned rows</option>
             </select>
           </label>
+        </Section>
+
+        <Section title="Shapes" defaultOpen={false}>
+          <div className="chiprow">
+            {SHAPE_NAMES.map((sh) => (
+              <button
+                key={sh.kind}
+                className={`chip ${shapeKind === sh.kind ? 'active' : ''}`}
+                onClick={() => setShapeKind(sh.kind)}
+              >
+                {sh.label}
+              </button>
+            ))}
+          </div>
+          <div className="grid2">
+            <label>Width (mm)
+              <input type="number" min={5} max={600} value={shapeW}
+                onChange={(e) => {
+                  const w = Math.max(1, +e.target.value || 1)
+                  setShapeW(w)
+                  // circle and square are defined by their smaller side, so
+                  // let width drive height for them rather than silently
+                  // ignoring one of the two boxes
+                  if (shapeKind === 'circle' || shapeKind === 'square') setShapeH(w)
+                }} />
+            </label>
+            <label>Height (mm)
+              <input type="number" min={5} max={600}
+                disabled={shapeKind === 'circle' || shapeKind === 'square'}
+                value={shapeH}
+                onChange={(e) => setShapeH(Math.max(1, +e.target.value || 1))} />
+            </label>
+          </div>
+          <label>Style
+            <select value={shapeMode} onChange={(e) => setShapeMode(e.target.value as StoneMode)}>
+              <option value="outline">Outline</option>
+              <option value="fill">Fill</option>
+              <option value="both">Outline + fill</option>
+            </select>
+          </label>
+          <p className="hint">
+            Uses the same stone size, spacing, outline and fill settings as text — set those in
+            the Stones and Fill panels. Shapes are added below the existing design.
+          </p>
+          <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
         </Section>
 
         <Section title="Templates" defaultOpen={false}>
@@ -1507,7 +1650,9 @@ export default function App() {
               }
             }} />
           </label>
-          <button onClick={generateImage}>Add image stones</button>
+          <button className={pendingImage ? 'primary urgent' : ''} onClick={generateImage}>
+            {pendingImage ? `Add ${pendingImage} image stones to design` : 'Add image stones'}
+          </button>
         </Section>
 
         <Section title="Edit">
@@ -1537,7 +1682,22 @@ export default function App() {
             </button>
           </div>
           <div className="toolrow">
-            <button disabled={!stones.length} onClick={() => { mutate(() => []); setSelection(new Set()) }}>Clear all</button>
+            <button
+              disabled={!stones.length && !pending}
+              onClick={() => {
+                if (stones.length) mutate(() => [])
+                setSelection(new Set())
+                // Clear the preview's SOURCE, not just its rendered output.
+                // Nulling previewStones alone left the preview unrecoverable:
+                // both preview effects only re-run when their inputs change,
+                // so nothing regenerated until a setting happened to move.
+                setText('')
+                setImageFile(null)
+                setImagePreview(null)
+                setPreviewStones(null)
+                setPreviewLive(false)
+              }}
+            >Clear all</button>
           </div>
           <p className="hint">Click = select · shift-click = multi · drag empty space = box select · double-click = select whole design · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
         </Section>
@@ -1575,7 +1735,104 @@ export default function App() {
               Layers share one frame — cut each on its own sheet and they line up when stacked.
             </p>
           )}
+          {format === 'gpgl' && (
+            <>
+              <label className="row">
+                <input type="checkbox" checked={swapAxes}
+                  onChange={(e) => setSwapAxes(e.target.checked)} />
+                {' '}Swap axes (feed axis is the model's Y)
+              </label>
+              <label className="row">
+                <input type="checkbox" checked={sendConditions}
+                  onChange={(e) => setSendConditions(e.target.checked)} />
+                {' '}Send speed/force from the app
+              </label>
+              <p className="hint">
+                Off (recommended): the cutter uses its own panel conditions and the job is pure
+                geometry. On: sends <code>!speed</code> and <code>*accel,force</code> — only
+                honoured if TOOLS SETTING → CONDITION PRIORITY is PROGRAM.
+              </p>
+              <label>GP-GL step size (must match the machine)
+                <select value={gpStep} onChange={(e) => setGpStep(+e.target.value)}>
+                  <option value={10}>0.100 mm — 254 steps/inch</option>
+                  <option value={20}>0.050 mm — 508 steps/inch</option>
+                  <option value={40}>0.025 mm — 1016 steps/inch</option>
+                  <option value={100}>0.010 mm — 2540 steps/inch</option>
+                </select>
+              </label>
+              <p className="hint">
+                MENU → I/F → STEP SIZE on the CE6000. A mismatch scales the whole job with no
+                error — 0.100 mm sent as 0.050 mm cuts everything at double size.
+              </p>
+            </>
+          )}
+          <label>Cutter origin corner
+            <select value={originCorner} onChange={(e) => setOriginCorner(e.target.value as OriginCorner)}>
+              <option value="bl">Lower-LEFT of the material</option>
+              <option value="br">Lower-RIGHT of the material (Graphtec default)</option>
+            </select>
+          </label>
+          <p className="hint">
+            Where you press ORIGIN on the machine. Graphtec carriages home to the right — if the
+            job feeds a long way before cutting, this is set to the wrong side.
+          </p>
+          <label>Position on material
+            <select value={placement} onChange={(e) => setPlacement(e.target.value as typeof placement)}>
+              <option value="design">Design edge — always cut from the origin</option>
+              <option value="artboard">Artboard — cut where I placed it on the page</option>
+            </select>
+          </label>
+          {placement === 'design' ? (
+            <>
+              <label>Edge margin (mm)
+                <input
+                  type="number"
+                  min={0}
+                  max={50}
+                  step={0.5}
+                  value={margin}
+                  onChange={(e) => setMargin(Math.min(50, Math.max(0, +e.target.value || 0)))}
+                />
+              </label>
+              <p className="hint">
+                Wherever the design sits on the page, it cuts from the corner. Jog the carriage
+                to the material corner, press ORIGIN, and the first hole lands {margin}mm in from
+                there{margin === 0 ? ' — right on the origin point' : ''}.
+              </p>
+            </>
+          ) : (
+            <p className="hint">
+              The whole {boardWIn}″ × {boardHIn}″ sheet is the job — the machine travels to
+              wherever the design sits on it. Jog to the artboard's{' '}
+              <b>lower-{originCorner === 'br' ? 'RIGHT' : 'LEFT'}</b> corner, press ORIGIN, and
+              keep the design near that corner: art at the far edge of a {boardHIn}″ sheet makes
+              the cutter feed {boardHIn}″ of material before it cuts anything.
+            </p>
+          )}
+          {offBoard && (
+            <p className="hint" style={{ color: '#f0b95e' }}>
+              Part of the design sits outside the {boardWIn}″ × {boardHIn}″ artboard — the cutter
+              will clip whatever falls off the sheet. Move it back inside, or enlarge the artboard.
+            </p>
+          )}
           <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <p className="hint" style={{ marginTop: 10 }}>
+            Diagnostic: a bare <b>L</b> (20 mm tall, 10 mm foot) 2 mm from the origin — nothing
+            but M and D. Asymmetric on purpose: how the L comes out tells you the axis mapping
+            and whether the job is mirrored, at a cost of about an inch of material.
+          </p>
+          <div className="toolrow">
+            <button onClick={async () => {
+              try {
+                setStatus('Sending 10 mm test square…')
+                await sendToCutter(gpglTestShape(gpStep, 2, swapAxes))
+                setStatus('Test square sent ✓')
+              } catch (e) {
+                setStatus(`Test square failed: ${e instanceof Error ? e.message : e}`)
+              }
+            }}>Send test square</button>
+            <button onClick={() => download('stonecut-testshape.plt', gpglTestShape(gpStep, 2, swapAxes))}>Download it</button>
+          </div>
           <div className="toolrow">
             <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
             <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>

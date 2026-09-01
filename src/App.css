@@ -31,6 +31,16 @@
   min-height: 15px;
 }
 
+.statusbar .pending {
+  display: inline-block;
+  margin-bottom: 4px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #3a2c14;
+  color: #f0b95e;
+  font-weight: 600;
+}
+
 details.sec {
   border-top: 1px solid #262c3a;
   padding: 0 0 4px;
@@ -113,6 +123,25 @@ button.primary {
   padding: 11px;
 }
 button.primary:hover:not(:disabled) { background: #37b878; }
+
+/* An uncommitted preview is indistinguishable from a finished design on the
+   canvas, so the button that commits it has to ask for attention. */
+button.urgent {
+  background: #c8892f;
+  border-color: #e0a244;
+  color: #fff;
+  animation: urgentpulse 1.8s ease-in-out infinite;
+}
+button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
+
+@keyframes urgentpulse {
+  0%, 100% { box-shadow: 0 0 0 0 #e0a24400; }
+  50% { box-shadow: 0 0 0 4px #e0a24438; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.urgent { animation: none; }
+}
 
 .toolrow { display: flex; gap: 6px; }
 .toolrow button { margin-top: 4px; }
