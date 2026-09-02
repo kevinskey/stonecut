@@ -971,6 +971,11 @@ function analyzeContour(poly: Pt[], pitch: number, rhythm?: number): ContourInfo
   const target = rhythm ?? pitch * 1.15
   const path = makePath(poly, true)
   if (!path || path.total < pitch * 2.5) return { poly, path, corners: [], fallback: true }
+  // A TINY closed contour — an i-dot, a period, a small counter — has no true
+  // corners at stone scale: Douglas-Peucker vertices on a 28mm circle are
+  // artifacts, and corner-anchoring them rendered dots as tilted squares.
+  // Fall back to the even loop walk, which beads the ring uniformly.
+  if (path.total < pitch * 7) return { poly, path, corners: [], fallback: true }
   const step = 0.3
   const n = Math.max(16, Math.round(path.total / step))
   const ds = path.total / n
@@ -3304,11 +3309,15 @@ export function fillStones(
   const strokeCut = pitch * 3
   const fillComps = labelComponents(mask, w, h)
   const compRows = new Uint8Array(fillComps.count + 1) // 1 = centered-row territory
+  const compDot = new Uint8Array(fillComps.count + 1) // 1 = dot: one centred stone
   {
     const wsBy = new Map<number, number[]>()
+    const areaBy = new Int32Array(fillComps.count + 1)
     for (let i = 0; i < w * h; i++) {
       const lbl = fillComps.labels[i]
-      if (!lbl || strokeW[i] <= 0) continue
+      if (!lbl) continue
+      areaBy[lbl]++
+      if (strokeW[i] <= 0) continue
       let a = wsBy.get(lbl)
       if (!a) wsBy.set(lbl, (a = []))
       a.push(strokeW[i])
@@ -3317,6 +3326,31 @@ export function fillStones(
       ws.sort((a, b) => a - b)
       if (ws[Math.floor(ws.length * 0.9)] < strokeCut * 1.15) compRows[lbl] = 1
     }
+    // a fill area barely bigger than a stone or two, whose MATERIAL is itself
+    // a small blob — an i-dot, a period — is a DOT: a 2x2 lattice block in it
+    // reads as a dice face. The material test matters: small POCKETS of a
+    // stem's fill channel are fragments of a stroke, not dots, and keep their
+    // centered-row treatment.
+    const dotArea = (pitch * pxPerMm) ** 2 * 2.2
+    const mat = labelComponents(grid.bin, w, h)
+    const matArea = new Int32Array(mat.count + 1)
+    for (let i = 0; i < w * h; i++) if (mat.labels[i]) matArea[mat.labels[i]]++
+    const matOf = new Int32Array(fillComps.count + 1)
+    for (let i = 0; i < w * h; i++) {
+      const lbl = fillComps.labels[i]
+      if (lbl && !matOf[lbl]) matOf[lbl] = mat.labels[i]
+    }
+    const dotMatArea = (2.6 * pitch * pxPerMm) ** 2
+    for (let lbl = 1; lbl <= fillComps.count; lbl++)
+      if (
+        areaBy[lbl] > 0 &&
+        areaBy[lbl] < dotArea &&
+        matOf[lbl] > 0 &&
+        matArea[matOf[lbl]] < dotMatArea
+      ) {
+        compDot[lbl] = 1
+        compRows[lbl] = 0
+      }
   }
   const compAt = (xMm: number, yMm: number) => {
     const xi = Math.round(xMm * pxPerMm + padPx)
@@ -3454,7 +3488,10 @@ export function fillStones(
         }
         const p = { x: xMm, y: yMm }
         if (dtAt(xMm, yMm) < minPx) continue
-        if (compRows[compAt(xMm, yMm)]) continue // stroke channel: centered row owns it
+        {
+          const lbl2 = compAt(xMm, yMm)
+          if (compRows[lbl2] || compDot[lbl2]) continue // rows/dots own these
+        }
         if (!clearOfOutline(p)) continue
         if (!idx.canPlace(p)) continue
         got.push(p)
@@ -3501,9 +3538,29 @@ export function fillStones(
   // the channel's own midline — exactly what a hand-set fill does there. Wide
   // regions never qualify (their skeleton is deep inside covered area), so
   // solid shapes keep the pure lattice.
+  const dotStones = new Set<Pt>()
   {
     const cm = new Uint8Array(w * h)
     for (let lbl = 1; lbl <= fillComps.count; lbl++) {
+      if (compDot[lbl]) {
+        // one stone, dead centre of the dot
+        let best = -1
+        let bestD = 0
+        for (let i = 0; i < w * h; i++)
+          if (fillComps.labels[i] === lbl && dt[i] > bestD) {
+            bestD = dt[i]
+            best = i
+          }
+        if (best >= 0) {
+          const q = { x: toMmX(best % w), y: toMmY(Math.floor(best / w)) }
+          if (clearOfOutline(q) && idx.canPlace(q)) {
+            idx.add(q)
+            out.push(q)
+            dotStones.add(q)
+          }
+        }
+        continue
+      }
       if (!compRows[lbl]) continue // lattice territory: no centered rows
       let area = 0
       for (let i = 0; i < w * h; i++) {
@@ -3543,9 +3600,13 @@ export function fillStones(
   // Except lonely stones: a fill stone with no fill neighbour nearby isn't
   // part of a pattern, it reads as a mistake. That happens when the strokes
   // are too light for a fill and only tiny pockets survive the edge inset.
+  // a dot's centre stone is DELIBERATELY alone — the ring around it is
+  // outline, not fill, so the lonely-stone cull must not eat it
   const near = rhythm * 1.6
-  const keep = out.filter((p) =>
-    out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
+  const keep = out.filter(
+    (p) =>
+      dotStones.has(p) ||
+      out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
   )
   return keep
 }
