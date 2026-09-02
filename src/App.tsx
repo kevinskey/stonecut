@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
-import { removeCollisions } from './geometry'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
@@ -46,7 +45,8 @@ export default function App() {
   const stonesRef = useRef<Stone[]>([])
   // last image commit — while untouched, generation-setting changes REGENERATE
   // it in place instead of only affecting the next add
-  const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[] } | null>(null)
+  const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[]; el?: number } | null>(null)
+  const elSeq = useRef(1)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => ({ ...DEFAULT_SIZES }))
   const [curSize, setCurSize] = useState('SS10')
@@ -600,14 +600,11 @@ export default function App() {
   // ---------- generation ----------
   const addGenerated = useCallback(
     (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number) => {
-      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline' }))
-      mutate((prev) => {
-        // half-gap threshold: safety net for merges only — relaxed fills sit
-        // slightly under full pitch by design and must not get culled here
-        const all = [...prev, ...fresh]
-        const kept = removeCollisions(all, (s) => sizes[s.size]?.holeMm ?? 3, hardGapOf(gap) * 0.5)
-        return kept
-      })
+      // each commit is its own ELEMENT: a free-moving layer that may overlap
+      // other elements — nothing culls across elements anymore
+      const el = elSeq.current++
+      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
+      mutate((prev) => [...prev, ...fresh])
     },
     [curSize, gap, mutate, sizes],
   )
@@ -697,21 +694,20 @@ export default function App() {
       const offsetY = replacing
         ? last.offsetY
         : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+      const el = replacing && last.el != null ? last.el : elSeq.current++
       const fresh: Stone[] = pts.map((p) => ({
         x: p.x + 10,
         y: p.y + offsetY,
         size: p.size ?? curSize,
         color: p.color,
         layer: p.layer ?? 'outline',
+        el,
       }))
-      const kept = removeCollisions(
-        [...base, ...fresh],
-        (st) => sizes[st.size]?.holeMm ?? 3,
-        hardGapOf(gap) * 0.5,
-      )
+      // elements are free layers: no culling across elements on commit
+      const kept = [...base, ...fresh]
       if (!replacing) pushUndo(stones) // regens share the original undo point
       setStones(kept)
-      lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept }
+      lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept, el }
       setPreviewBaseY(null)
       setImagePreview(null)
       setStatus(
@@ -798,13 +794,17 @@ export default function App() {
               } else if (d < boD) { boD = d; bo = i }
             }
             const best = bo >= 0 && (bf < 0 || boD <= bfD + 3) ? bo : bf
+            let el: number | undefined
             if (best >= 0) {
-              // blend in with the field being clicked into: layer and colour
-              // always follow the neighbour; size follows it only in Auto
+              // blend in with the field being clicked into: layer, colour and
+              // element always follow the neighbour; size only in Auto
               layer = stones[best].layer ?? 'outline'
               color = stones[best].color
+              el = stones[best].el
               if (addSize === 'auto') size = stones[best].size
             }
+            mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer, el }])
+            return
           }
           mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer }])
         }
@@ -878,6 +878,17 @@ export default function App() {
       const p = toMm(e)
       const start = stones.findIndex((st) => Math.hypot(st.x - p.x, st.y - p.y) <= holeOf(st) / 2 + 0.5)
       if (start < 0) return
+      // element-tagged designs select as a unit — free-moving layers
+      if (stones[start].el != null) {
+        const el = stones[start].el
+        const inSet = new Set<number>()
+        stones.forEach((st, i) => {
+          if (st.el === el) inSet.add(i)
+        })
+        setSelection(inSet)
+        setStatus(`Selected element: ${inSet.size} stones — drag to move, Del removes it`)
+        return
+      }
       const link = (a: Stone, b: Stone) =>
         Math.hypot(a.x - b.x, a.y - b.y) <= (holeOf(a) + holeOf(b)) / 2 + gap + 2.5
       const inSet = new Set<number>([start])
