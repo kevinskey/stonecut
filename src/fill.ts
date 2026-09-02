@@ -1363,9 +1363,14 @@ export function outlineOrSpine(
           dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
       )
         continue
-      const rr = dv * dv
-      const val = (2 * dv) / pxPerMm
-      const r0 = Math.ceil(dv)
+      // stamp radius is CAPPED: every width comparison in this function
+      // saturates near ~needW, so stamping a 50mm blob's true inscribed disk
+      // (hundreds of px) only burned time — widths clamp at the cap and the
+      // classifications are identical
+      const dvc = Math.min(dv, 7 * pxPerMm)
+      const rr = dvc * dvc
+      const val = (2 * dvc) / pxPerMm
+      const r0 = Math.ceil(dvc)
       for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
         const dy2 = yy - y
         const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
@@ -1961,7 +1966,8 @@ export function outlineOrSpine(
     }
     let anchor = 0
     let anchorHit = { j: 0, d2: Infinity }
-    for (let i = 0; i < ring.outer.length; i++) {
+    const aStep = Math.max(1, Math.floor(ring.outer.length / 64))
+    for (let i = 0; i < ring.outer.length; i += aStep) {
       const hit = nearestTo(ring.outer[i])
       if (hit.d2 < anchorHit.d2) { anchorHit = hit; anchor = i }
     }
@@ -2029,24 +2035,44 @@ export function outlineOrSpine(
     const n = pts.length
     if (n < 8) continue
     const minArc = Math.max(3, band.medW * 2.2)
-    // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid)
+    // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid).
+    // Pairs beyond medW*1.8 are rejected below anyway, so the partner search
+    // only needs a spatial hash within that radius — the all-pairs scan was
+    // the hottest loop in the whole pipeline on long cursive words.
+    const maxPair = band.medW * 1.8
+    const cell = Math.max(1, maxPair)
+    const buckets = new Map<string, number[]>()
+    for (let j = 0; j < n; j++) {
+      const key = `${Math.floor(pts[j].x / cell)},${Math.floor(pts[j].y / cell)}`
+      let b = buckets.get(key)
+      if (!b) buckets.set(key, (b = []))
+      b.push(j)
+    }
     const cloudKeys = new Set<string>()
     const cloud: Pt[] = []
     for (let i = 0; i < n; i++) {
       let bj = -1
-      let bd = Infinity
-      for (let j = 0; j < n; j++) {
-        if (cid[j] === cid[i]) {
-          let arc = Math.abs(arcs[j] - arcs[i])
-          arc = Math.min(arc, totals[cid[i]] - arc)
-          if (arc < minArc) continue
+      let bd = maxPair * maxPair
+      const cx0 = Math.floor(pts[i].x / cell)
+      const cy0 = Math.floor(pts[i].y / cell)
+      for (let gy = cy0 - 1; gy <= cy0 + 1; gy++)
+        for (let gx = cx0 - 1; gx <= cx0 + 1; gx++) {
+          const b = buckets.get(`${gx},${gy}`)
+          if (!b) continue
+          for (const j of b) {
+            if (j === i) continue
+            if (cid[j] === cid[i]) {
+              let arc = Math.abs(arcs[j] - arcs[i])
+              arc = Math.min(arc, totals[cid[i]] - arc)
+              if (arc < minArc) continue
+            }
+            const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
+            if (dd < bd) {
+              bd = dd
+              bj = j
+            }
+          }
         }
-        const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
-        if (dd < bd) {
-          bd = dd
-          bj = j
-        }
-      }
       if (bj < 0) continue
       // a true opposite partner sits about a stroke-width away; a far-off
       // "nearest" means i is at a tip or junction mouth — skip it
@@ -2390,11 +2416,9 @@ export function outlineOrSpine(
         run = []
       }
       for (const s of samples) {
-        let m = Infinity
-        for (const o of out) {
-          const dd = Math.hypot(s.p.x - o.x, s.p.y - o.y)
-          if (dd < m) m = dd
-        }
+        // "anything within covered?" needs the spatial index, not a scan of
+        // every stone per sample — this was a top-3 hot loop
+        const m = idx.within(s.p, covered).length ? 0 : Infinity
         // banned stretches (spined bands, detail-line zones) are bare BY
         // DESIGN — patching them puts wall stones back beside the line
         if (m > covered && !seam(s) && !bannedTest?.(s.p)) run.push(s)
@@ -3297,9 +3321,12 @@ export function fillStones(
           dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
       )
         continue
-      const rr = dv * dv
-      const val = (2 * dv) / pxPerMm
-      const r0 = Math.ceil(dv)
+      // capped like the outline's wide[]: the row/lattice/dot thresholds all
+      // sit under ~12mm of width, so bigger inscribed disks only cost time
+      const dvc = Math.min(dv, 7 * pxPerMm)
+      const rr = dvc * dvc
+      const val = (2 * dvc) / pxPerMm
+      const r0 = Math.ceil(dvc)
       for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
         const dy2 = yy - y
         const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))

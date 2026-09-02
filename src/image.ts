@@ -18,9 +18,9 @@ export async function imageToRaster(
   invert: boolean,
   alphaKey = false, // key on transparency instead of brightness
   lineworkOpen = false, // cartoon mode: near-black linework stays stone-free
+  pxPerMm = 6, // previews pass a coarser grid — analysis passes scale with area
 ): Promise<RasterResult> {
   const img = await loadImage(file)
-  const pxPerMm = 6
   const w = Math.max(8, Math.round(widthMm * pxPerMm))
   const h = Math.max(8, Math.round((img.height / img.width) * w))
   const canvas = document.createElement('canvas')

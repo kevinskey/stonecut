@@ -410,7 +410,7 @@ export default function App() {
         let noFill = false
         // ghost and double both put a row OUTSIDE the letter — pad the grid
         // so the outer row isn't clipped at the raster edge
-        const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+        const grid = rasterizeContours(textPreview.contours, 4, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
         setCanEcho(true)
         setEchoUpsize(null)
         let outline: { x: number; y: number }[] = []
@@ -545,7 +545,10 @@ export default function App() {
       return
     const t = window.setTimeout(async () => {
       try {
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
+        // PREVIEW runs on a coarser analysis grid — half the pixels, near-
+        // identical stones — so slider drags stay fluid; the commit re-runs
+        // at full resolution
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 4)
         const hole = sizes[curSize]?.holeMm ?? 3
         const hardGap = hardGapOf(gap)
         const rhythm = hole + gap
@@ -732,7 +735,7 @@ export default function App() {
     if (!last || last.file !== imageFile || stonesRef.current !== last.after) return
     const t = window.setTimeout(() => {
       void generateImageRef.current()
-    }, 400)
+    }, 650)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
@@ -1003,6 +1006,35 @@ export default function App() {
       return next
     })
   }, [outlineColor])
+
+  // Scale stones about their centroid — the selection if there is one, the
+  // whole design otherwise. Positions scale; stone sizes don't (they're
+  // physical). Works whether or not the design is still regenerable.
+  const [scalePct, setScalePct] = useState(100)
+  const applyScale = useCallback(() => {
+    const f = scalePct / 100
+    if (!Number.isFinite(f) || f <= 0.05 || f === 1) return
+    mutate((prev) => {
+      const idxs = selection.size ? [...selection] : prev.map((_, i) => i)
+      if (!idxs.length) return prev
+      let cx = 0
+      let cy = 0
+      for (const i of idxs) {
+        cx += prev[i].x
+        cy += prev[i].y
+      }
+      cx /= idxs.length
+      cy /= idxs.length
+      const inSel = new Set(idxs)
+      return prev.map((st, i) =>
+        inSel.has(i) ? { ...st, x: cx + (st.x - cx) * f, y: cy + (st.y - cy) * f } : st,
+      )
+    })
+    setStatus(
+      `Scaled ${selection.size || 'all'} stones to ${scalePct}%` +
+        (scalePct < 100 ? ' — check spacing (⌘Z to undo)' : ''),
+    )
+  }, [scalePct, selection, mutate])
 
   // Even out fill spacing after manual edits: fill stones closer than their
   // legal pitch (to anything) push apart in small damped steps; outline
@@ -1533,6 +1565,29 @@ export default function App() {
               Respace fill — even out after edits
             </button>
           </div>
+          <div className="grid2">
+            <label>Scale %
+              <input
+                type="number"
+                min={10}
+                max={400}
+                step={5}
+                value={scalePct}
+                onChange={(e) => setScalePct(+e.target.value)}
+              />
+            </label>
+            <button
+              disabled={!stones.length || scalePct === 100}
+              style={{ alignSelf: 'end' }}
+              onClick={applyScale}
+            >
+              Scale {selection.size ? `${selection.size} selected` : 'all'}
+            </button>
+          </div>
+          <p className="hint">
+            Scales stone positions about the center (sizes stay physical). Double-click a design
+            to select it first, or scale everything.
+          </p>
           <div className="toolrow">
             <button disabled={!stones.length} onClick={() => { mutate(() => []); setSelection(new Set()) }}>Clear all</button>
           </div>
