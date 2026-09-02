@@ -15,8 +15,7 @@ let fillPts = []
 if (process.env.SC_FILL) {
   const fHole = 2.5, fGap = 0.8
   const fIdx = new SpacingIndex(Math.max(fHole + fGap, (3.4 + fHole) / 2 + fGap), fGap, fHole / 2)
-  for (const p of outline) fIdx.add(p, 3.4 / 2)
-  fillPts = fillByGlyph(contours, fHole, fGap, fHole / 2 + 0.1, fIdx, outline, fHole + fGap, true)
+  fillPts = fillByGlyph(contours, fHole, fGap, fHole / 2 + 0.1, fIdx, outline, fHole + fGap, true, 3.4)
 }
 const S = +(process.env.SC_SCALE ?? 8)
 const W = (widthMm+10)*S, H = (+heightMm+16)*S

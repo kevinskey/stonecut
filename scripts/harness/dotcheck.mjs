@@ -13,8 +13,7 @@ const idx = new SpacingIndex(4.2)
 const outline = outlineOrSpine(contours, grid, 3.4, 0.8, idx, 'auto', true, 4.2, true)
 const fHole=2.5, fGap=0.8
 const fIdx = new SpacingIndex(Math.max(fHole+fGap,(3.4+fHole)/2+fGap), fGap, fHole/2)
-for (const p of outline) fIdx.add(p, 1.7)
-const fill = fillByGlyph(contours, fHole, fGap, fHole/2+0.1, fIdx, outline, fHole+fGap, true)
+const fill = fillByGlyph(contours, fHole, fGap, fHole/2+0.1, fIdx, outline, fHole+fGap, true, 3.4)
 // find small closed contours (dots): circumference < 4.2*7
 for (const c of contours) {
   let len=0, cx=0, cy=0

@@ -3207,9 +3207,14 @@ export function fillStones(
   gapMm: number,
   startInsetMm: number,
   idx: SpacingIndex,
-  fixedPts: Pt[] = [], // outline stones (already in idx)
+  fixedPts: Pt[] = [], // outline stones
   rhythmMm?: number,
   brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
+  outlineHoleMm?: number, // when given, fill-to-OUTLINE clearance uses the
+  // absolute 0.5mm template floor instead of the design gap. Checking the
+  // design gap against the outline made legality flicker with the walls'
+  // stagger — a fill row through a medium stroke broke wherever an outline
+  // stone sat directly across, though the stone physically fit.
 ): Pt[] {
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
@@ -3233,8 +3238,10 @@ export function fillStones(
   // samples that ripple as a column flickering in and out row by row. Filling
   // in each stone's gap to its nearest neighbours makes the boundary a smooth
   // offset, so a row is either there across a run or not there at all.
+  const outlineNeed =
+    outlineHoleMm != null ? outlineHoleMm / 2 + holeMm / 2 + 0.5 : idx.minDist
   if (fixedPts.length) {
-    const clear = idx.minDist * pxPerMm
+    const clear = outlineNeed * pxPerMm
     const stamp = (xMm: number, yMm: number, radiusPx: number) => {
       const cx = Math.round(xMm * pxPerMm + padPx)
       const cy = Math.round(yMm * pxPerMm + padPx)
@@ -3418,10 +3425,10 @@ export function fillStones(
         // exact sag: at the pair's midpoint the stones themselves allow the
         // fill this close to the path line — the per-stone check above still
         // enforces the true pairwise minimum everywhere
-        segs.push({ a, b, need: Math.sqrt(Math.max(0, idx.minDist ** 2 - (d / 2) ** 2)) })
+        segs.push({ a, b, need: Math.sqrt(Math.max(0, outlineNeed ** 2 - (d / 2) ** 2)) })
   }
   const clearOfOutline = (p: Pt) => {
-    const need = idx.minDist - 1e-6
+    const need = outlineNeed - 1e-6
     for (const s of fixedPts)
       if (Math.hypot(p.x - s.x, p.y - s.y) < need) return false
     for (const { a, b, need: segNeed } of segs) {
@@ -3634,6 +3641,7 @@ export function fillByGlyph(
   fixedPts: Pt[],
   rhythmMm: number,
   brick = false,
+  outlineHoleMm?: number,
 ): Pt[] {
   interface Group {
     minX: number
@@ -3684,8 +3692,8 @@ export function fillByGlyph(
     // That rejects every second lattice point and leaves the fill
     // checkerboarded, with obvious unfilled space inside every stroke.
     const localIdx = new SpacingIndex(idx.minDist, idx.gap, idx.defaultR)
-    for (const p of localFixed) localIdx.add(p, outlineR)
-    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick)
+    if (outlineHoleMm == null) for (const p of localFixed) localIdx.add(p, outlineR)
+    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick, outlineHoleMm)
     for (const p of placed) {
       const q = { x: p.x + ox, y: p.y + oy }
       // cross-glyph legality still enforced against the global index

@@ -448,8 +448,7 @@ export default function App() {
           // between the outline and the first lattice line.
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-          for (const p of outline) fIdx.add(p, hole / 2)
-          const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+            const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
           if (!f.length && textMode === 'both') noFill = true
         }
@@ -572,8 +571,7 @@ export default function App() {
           const fRhythm = fHole + fGap
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-          for (const p of outline) fIdx.add(p, hole / 2)
-          const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+            const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
         }
         // same physics advisory text gets: artwork lines thinner than the
@@ -645,7 +643,7 @@ export default function App() {
           const fInset = fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
-      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
     // commit exactly where the preview showed; release the pin so the next
@@ -687,8 +685,7 @@ export default function App() {
           const fRhythm = fHole + fGap
         const fInset = fHole / 2 + 0.1
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-        for (const p of outline) fIdx.add(p, hole / 2)
-        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
         pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
       }
       const last = lastImageRef.current
