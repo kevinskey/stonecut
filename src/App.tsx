@@ -236,7 +236,7 @@ export default function App() {
       })
       const f = new File([blob], `${t.name}.svg`, { type: 'image/svg+xml' })
       setImageFile(f)
-      const a = await analyzeImage(f)
+      const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
       setImgThreshold(a.threshold)
       setImgInvert(a.invert)
       setImgAlphaKey(a.alphaKey)
@@ -363,16 +363,13 @@ export default function App() {
       // reads wide even though its thin stem drags the p90 down, so it fills;
       // a basketball's uniform strokes read narrow everywhere, so it gets a
       // centerline outline with no fill.
-      // Absolute widths cannot separate art types — a chunky icon's strokes
-      // overlap a music note's head in millimetres. SHAPE statistics can:
-      // pure line art is thin-dominant AND uniform (its p96 width is just a
-      // junction bulge, ~2x its median), while blob-bearing art (note heads,
-      // mascot bodies on thin limbs) is thin-dominant but NOT uniform. Solid
-      // art isn't thin-dominant at all.
+      // The analyzer decides blob presence geometrically (compactness +
+      // width ratio + area — see hasBlob); percentile-only rules seesawed
+      // between the basketball and the beamed notes for days.
       const deciles = a.strokeDeciles ?? []
       const p50 = toMm(deciles[4] ?? a.strokePx)
       const thinDominant = p50 < pitch * 1.6
-      const blobby = p50 > 0 && toMm(a.strokeMax ?? 0) / p50 >= 2.5
+      const blobby = (a as { blobby?: boolean }).blobby ?? false
       if (thinDominant && !blobby) {
         // uniform line drawing: one row of stones per line, nothing to fill
         setOutlineDesign('centerline')
@@ -410,7 +407,8 @@ export default function App() {
         let noFill = false
         // ghost and double both put a row OUTSIDE the letter — pad the grid
         // so the outer row isn't clipped at the raster edge
-        const grid = rasterizeContours(textPreview.contours, 4, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+        const previewPx = textPreview.widthMm <= 150 ? 6 : textPreview.widthMm <= 300 ? 4 : 3
+        const grid = rasterizeContours(textPreview.contours, previewPx, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
         setCanEcho(true)
         setEchoUpsize(null)
         let outline: { x: number; y: number }[] = []
@@ -545,10 +543,12 @@ export default function App() {
       return
     const t = window.setTimeout(async () => {
       try {
-        // PREVIEW runs on a coarser analysis grid — half the pixels, near-
-        // identical stones — so slider drags stay fluid; the commit re-runs
-        // at full resolution
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 4)
+        // PREVIEW resolution adapts to design size: small designs keep the
+        // full 6 px/mm (they're fast anyway, and small features like note
+        // heads fall apart on a coarse grid); only large designs trade
+        // resolution for fluid slider drags. Commits always re-run at 6.
+        const previewPx = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx)
         const hole = sizes[curSize]?.holeMm ?? 3
         const hardGap = hardGapOf(gap)
         const rhythm = hole + gap
@@ -1500,7 +1500,7 @@ export default function App() {
                         })
                         const f = new File([blob], `${s.name}.png`, { type: blob.type || 'image/png' })
                         setImageFile(f)
-                        const a = await analyzeImage(f)
+                        const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
                         setImgThreshold(a.threshold)
                         setImgInvert(a.invert)
                         setImgAlphaKey(a.alphaKey)
@@ -1524,7 +1524,7 @@ export default function App() {
               try {
                 // pick settings that make the artwork the design, so a light
                 // logo or transparent background doesn't silently yield nothing
-                const a = await analyzeImage(f)
+                const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
                 setImgThreshold(a.threshold)
                 setImgInvert(a.invert)
                 setImgAlphaKey(a.alphaKey)

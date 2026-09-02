@@ -2736,13 +2736,13 @@ export function outlineOrSpine(
       if (!bin[i2]) continue
       if (dt[i2] / pxPerMm > pitch * 0.55) continue
       if (dt[i2] / pxPerMm < 0.4) continue
-      if (dStone[i2] / pxPerMm > rhythm * 1.1) bare[i2] = 1
+      if (dStone[i2] / pxPerMm > rhythm * 1.02) bare[i2] = 1
     }
     const bl = labelComponents(bare, w, h)
     if (bl.count) {
       const area = new Int32Array(bl.count + 1)
       for (let i2 = 0; i2 < w * h; i2++) if (bl.labels[i2]) area[bl.labels[i2]]++
-      const minArea = (pitch * pxPerMm) ** 2 * 0.12
+      const minArea = (pitch * pxPerMm) ** 2 * 0.07
       const blob = new Uint8Array(w * h)
       for (let b2 = 1; b2 <= bl.count; b2++) {
         if (area[b2] < minArea) continue
@@ -3597,11 +3597,20 @@ export function fillStones(
       }
       if (!compRows[lbl]) continue // lattice territory: no centered rows
       let area = 0
+      let deepest = -1
+      let deepD = 0
       for (let i = 0; i < w * h; i++) {
         cm[i] = fillComps.labels[i] === lbl ? 1 : 0
-        if (cm[i]) area++
+        if (cm[i]) {
+          area++
+          if (dt[i] > deepD) {
+            deepD = dt[i]
+            deepest = i
+          }
+        }
       }
       if (area < (pitch * pxPerMm) ** 2 * 0.25) continue
+      let rowPlaced = false
       const skel = skeletonize(cm, w, h)
       const paths = traceSkeleton(skel, w, h)
         .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
@@ -3623,7 +3632,19 @@ export function fillStones(
           if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
           return true
         })
+        if (got.length) rowPlaced = true
         out.push(...got)
+      }
+      // a channel whose skeleton yielded nothing — a note head's interior,
+      // too big for the dot rule, too small for a traceable path — still
+      // deserves its deepest-point stone rather than sitting hollow
+      if (!rowPlaced && deepest >= 0) {
+        const q = { x: toMmX(deepest % w), y: toMmY(Math.floor(deepest / w)) }
+        if (clearOfOutline(q) && idx.canPlace(q)) {
+          idx.add(q)
+          out.push(q)
+          dotStones.add(q)
+        }
       }
     }
   }

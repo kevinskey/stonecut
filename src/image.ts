@@ -115,7 +115,8 @@ export interface ImageAnalysis {
   note: string
   strokePx: number // typical (p90) stroke width of the design, in sample px
   strokeDeciles: number[] // width deciles (p10..p90), sample px — art-type classification
-  strokeMax: number // p96 stroke width, sample px — a solid blob reads here, a junction bulge does not
+  strokeMax: number // p96 stroke width, sample px
+  blobby: boolean // a real solid blob exists (fill is wanted) — see hasBlob
   sampleW: number // sample bitmap width the strokePx was measured at
 }
 
@@ -127,7 +128,7 @@ function strokeStats(
   w: number,
   h: number,
   isDesign: (i: number) => boolean,
-): { strokePx: number; strokeDeciles: number[]; strokeMax: number } {
+): { strokePx: number; strokeDeciles: number[]; strokeMax: number; bin: Uint8Array; dt: Float32Array } {
   const bin = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) bin[i] = isDesign(i) ? 1 : 0
   // two-pass 3-4 chamfer distance transform (Euclidean to ~5%) — city block
@@ -156,18 +157,67 @@ function strokeStats(
   for (let i = 0; i < w * h; i++) dt[i] /= 3
   const ds: number[] = []
   for (let i = 0; i < w * h; i++) if (bin[i]) ds.push(dt[i])
-  if (!ds.length) return { strokePx: 0, strokeDeciles: [], strokeMax: 0 }
+  if (!ds.length) return { strokePx: 0, strokeDeciles: [], strokeMax: 0, bin, dt }
   ds.sort((a, b) => a - b)
   const deciles: number[] = []
   for (let q = 1; q <= 9; q++) deciles.push(ds[Math.floor(ds.length * (q / 10))] * 2)
   return {
     strokePx: ds[Math.floor(ds.length * 0.9)] * 2,
     strokeDeciles: deciles,
-    // p96, not the max: a stroke-junction bulge is a sliver of pixels and
-    // must not read as a blob, while a real solid head/body is broad enough
-    // to survive the percentile
     strokeMax: ds[Math.floor(ds.length * 0.96)] * 2,
+    bin,
+    dt,
   }
+}
+
+// Does the artwork contain a real solid BLOB (a note head, a mascot body) as
+// opposed to junction bulges of a stroke network? Three tests together — no
+// single one separates a basketball from beamed notes:
+//   compact  — the wide-core fills its inscribed circle (a head ≈ 1+, a
+//              junction sprawl ≈ 0.25)
+//   ratio    — core width dwarfs the typical stroke (heads on hairline stems)
+//   area     — big enough to mean anything
+function hasBlob(
+  bin: Uint8Array,
+  dt: Float32Array,
+  w: number,
+  h: number,
+  mmPerPx: number,
+  pitchMm: number,
+  p50WidthMm: number,
+): boolean {
+  const thr = pitchMm / mmPerPx // half-width ≥ pitch/2·2 = width ≥ 2·pitch? no: dt ≥ pitch → width ≥ 2·pitch
+  const core = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) core[i] = bin[i] && dt[i] >= thr / 2 ? 1 : 0
+  const lbl = new Int32Array(w * h)
+  let c = 0
+  const stack: number[] = []
+  for (let seed = 0; seed < w * h; seed++) {
+    if (!core[seed] || lbl[seed]) continue
+    c++
+    let area = 0
+    let maxD = 0
+    stack.push(seed)
+    lbl[seed] = c
+    while (stack.length) {
+      const j = stack.pop() as number
+      area++
+      if (dt[j] > maxD) maxD = dt[j]
+      const x = j % w
+      const y = (j - x) / w
+      if (x > 0 && core[j - 1] && !lbl[j - 1]) { lbl[j - 1] = c; stack.push(j - 1) }
+      if (x < w - 1 && core[j + 1] && !lbl[j + 1]) { lbl[j + 1] = c; stack.push(j + 1) }
+      if (y > 0 && core[j - w] && !lbl[j - w]) { lbl[j - w] = c; stack.push(j - w) }
+      if (y < h - 1 && core[j + w] && !lbl[j + w]) { lbl[j + w] = c; stack.push(j + w) }
+    }
+    const areaMm2 = area * mmPerPx * mmPerPx
+    const maxHalfMm = maxD * mmPerPx
+    const compact = area / (Math.PI * maxD * maxD)
+    const ratio = (2 * maxHalfMm) / Math.max(p50WidthMm, 0.5)
+    if (areaMm2 >= 55 && compact >= 0.55 && ratio >= 2.5 && maxHalfMm >= pitchMm * 0.9)
+      return true
+  }
+  return false
 }
 
 // Cartoon-art test: a SMALL share of near-black pixels inside a mostly
@@ -196,7 +246,11 @@ function lineworkShare(
  * transparent-background art (key on alpha), light-on-dark art (invert),
  * and low-contrast art (Otsu threshold instead of a fixed 128).
  */
-export async function analyzeImage(file: File): Promise<ImageAnalysis> {
+export async function analyzeImage(
+  file: File,
+  imgWidthMm = 100,
+  pitchMm = 4.2,
+): Promise<ImageAnalysis> {
   const img = await loadImage(file)
   const w = Math.min(256, Math.max(16, img.width))
   const h = Math.max(16, Math.round((img.height / img.width) * w))
@@ -212,6 +266,11 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
   const hist = new Array(256).fill(0)
   const lumOf = (i: number) =>
     0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]
+  const withBlobby = (st: ReturnType<typeof strokeStats>) => {
+    const mmPerPx = imgWidthMm / w
+    const p50 = ((st.strokeDeciles[4] ?? st.strokePx) * mmPerPx) || 0
+    return { ...st, blobby: hasBlob(st.bin, st.dt, w, h, mmPerPx, pitchMm, p50) }
+  }
   for (let i = 0; i < w * h; i++) {
     if (data[i * 4 + 3] < 64) transparent++
     else hist[Math.round(lumOf(i))]++
@@ -240,7 +299,7 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
         invert: false,
         alphaKey: false,
         linework,
-        ...strokeStats(w, h, (i) => data[i * 4 + 3] >= 64 && lumOf(i) < 170),
+        ...withBlobby(strokeStats(w, h, (i) => data[i * 4 + 3] >= 64 && lumOf(i) < 170)),
         sampleW: w,
         note:
           'transparent background, dark artwork — light details kept as open background' +
@@ -252,7 +311,7 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
       invert: false,
       alphaKey: true,
       linework,
-      ...strokeStats(w, h, (i) => data[i * 4 + 3] >= 64),
+      ...withBlobby(strokeStats(w, h, (i) => data[i * 4 + 3] >= 64)),
       sampleW: w,
       note:
         'transparent background — using the opaque artwork as the design' +
@@ -317,10 +376,10 @@ export async function analyzeImage(file: File): Promise<ImageAnalysis> {
     invert: borderIsDark,
     alphaKey: false,
     linework,
-    ...strokeStats(w, h, (i) => {
+    ...withBlobby(strokeStats(w, h, (i) => {
       if (data[i * 4 + 3] < 64) return false
       return borderIsDark ? lumOf(i) >= threshold : lumOf(i) < threshold
-    }),
+    })),
     sampleW: w,
     note:
       (borderIsDark
