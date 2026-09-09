@@ -1212,6 +1212,65 @@ export default function App() {
         <div className="statusbar">{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
 
 
+        <Section title="Stones">
+          <div className="grid2">
+            <label>Size
+              <select value={curSize} onChange={(e) => setCurSize(e.target.value)}>
+                {sizeKeys.map((k) => (
+                  <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>
+                ))}
+              </select>
+            </label>
+            <label>Color
+              <input type="color" value={outlineColor} onChange={(e) => setOutlineColor(e.target.value)} />
+            </label>
+          </div>
+          <div className="grid2">
+            <label>Hole ⌀ (mm)
+              <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
+                onChange={(e) => setSizes((prev) => ({ ...prev, [curSize]: { ...prev[curSize], holeMm: +e.target.value } }))} />
+            </label>
+            <label>Spacing (mm)
+              <input type="number" step={0.1} min={0.4} max={15} value={gap} onChange={(e) => setGap(+e.target.value)} />
+            </label>
+          </div>
+          <div className="chiprow">
+            {[['Dense', 0.5], ['Standard', 0.8], ['Open', 3], ['Scatter', 8]].map(([name, v]) => (
+              <button key={name as string} className={`chip ${gap === v ? 'active' : ''}`} onClick={() => setGap(v as number)}>{name}</button>
+            ))}
+          </div>
+          <label className="row">
+            <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
+            Uniform rhythm — verticals match horizontals per letter
+          </label>
+          <div className="grid2">
+            <label>Outline design
+              <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
+                <option value="single">Single outline</option>
+                <option value="double">
+                  {canEcho ? 'Double — echo row outside' : 'Double — needs upsize'}
+                </option>
+                <option value="ghost">Ghost — floats outside</option>
+                <option value="halo">Halo — rows around vinyl letters</option>
+                <option value="centerline">Single-line lettering</option>
+              </select>
+            </label>
+            <label>Narrow strokes
+              <select value={strokePolicy} disabled={outlineDesign === 'centerline' || outlineDesign === 'halo'}
+                onChange={(e) => setStrokePolicy(e.target.value as typeof strokePolicy)}>
+                <option value="auto">Auto fallback</option>
+                <option value="walls">Force walls</option>
+              </select>
+            </label>
+          </div>
+          {outlineDesign === 'halo' && (
+            <label>Halo rows
+              <input type="number" min={1} max={5} step={1} value={haloRows}
+                onChange={(e) => setHaloRows(Math.max(1, Math.min(5, Math.round(+e.target.value))))} />
+            </label>
+          )}
+        </Section>
+
         <Section title="Text">
           <label>Text<input value={text} onChange={(e) => setText(e.target.value)} /></label>
           <div className="fontpicker" ref={pickerRef}>
@@ -1353,38 +1412,6 @@ export default function App() {
               <span> · {Math.round(textPreview.widthMm)} × {textHeight} mm in {fontName}{previewStones ? ` · ${previewStones.length} stones` : ''}</span>
             </div>
           )}
-        </Section>
-        <Section title="Stones">
-          <div className="grid2">
-            <label>Size
-              <select value={curSize} onChange={(e) => setCurSize(e.target.value)}>
-                {sizeKeys.map((k) => (
-                  <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>
-                ))}
-              </select>
-            </label>
-            <label>Color
-              <input type="color" value={outlineColor} onChange={(e) => setOutlineColor(e.target.value)} />
-            </label>
-          </div>
-          <div className="grid2">
-            <label>Hole ⌀ (mm)
-              <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
-                onChange={(e) => setSizes((prev) => ({ ...prev, [curSize]: { ...prev[curSize], holeMm: +e.target.value } }))} />
-            </label>
-            <label>Spacing (mm)
-              <input type="number" step={0.1} min={0.4} max={15} value={gap} onChange={(e) => setGap(+e.target.value)} />
-            </label>
-          </div>
-          <div className="chiprow">
-            {[['Dense', 0.5], ['Standard', 0.8], ['Open', 3], ['Scatter', 8]].map(([name, v]) => (
-              <button key={name as string} className={`chip ${gap === v ? 'active' : ''}`} onClick={() => setGap(v as number)}>{name}</button>
-            ))}
-          </div>
-          <label className="row">
-            <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
-            Uniform rhythm — verticals match horizontals per letter
-          </label>
           {outlineDesign === 'double' && !canEcho && echoUpsize && (
             <div className="sizeinfo warn">
               Double outline doesn't fit at this size.
@@ -1394,74 +1421,24 @@ export default function App() {
               </div>
             </div>
           )}
-          <div className="grid2">
-            <label>Outline design
-              <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
-                <option value="single">Single outline</option>
-                <option value="double">
-                  {canEcho ? 'Double — echo row outside' : 'Double — needs upsize'}
-                </option>
-                <option value="ghost">Ghost — floats outside</option>
-                <option value="halo">Halo — rows around vinyl letters</option>
-                <option value="centerline">Single-line lettering</option>
-              </select>
-            </label>
-            <label>Narrow strokes
-              <select value={strokePolicy} disabled={outlineDesign === 'centerline' || outlineDesign === 'halo'}
-                onChange={(e) => setStrokePolicy(e.target.value as typeof strokePolicy)}>
-                <option value="auto">Auto fallback</option>
-                <option value="walls">Force walls</option>
-              </select>
-            </label>
-          </div>
           {outlineDesign === 'halo' && (
             <>
-              <div className="grid2">
-                <label>Halo rows
-                  <input type="number" min={1} max={5} step={1} value={haloRows}
-                    onChange={(e) => setHaloRows(Math.max(1, Math.min(5, Math.round(+e.target.value))))} />
-                </label>
-                <button disabled={!textPreview} onClick={downloadVinyl}>Vinyl SVG — letters</button>
-              </div>
               <div className="sizeinfo">
-                Stones circle the letters; the letters themselves cut from glitter vinyl.
-                Download the Vinyl SVG for the Cricut, press it first, then center the stone
-                transfer over it — the halo's clear gap frames the vinyl edge.
+                Halo: stones circle the letters; the letters themselves cut from glitter vinyl.
+                Press the vinyl first, then center the stone transfer over it — the halo's
+                clear gap frames the vinyl edge.
+              </div>
+              <div className="toolrow">
+                <button disabled={!textPreview} onClick={downloadVinyl}>Vinyl SVG — letters</button>
               </div>
             </>
           )}
           <button className="primary" onClick={generateText}>Add text stones</button>
         </Section>
-        <Section title="Fill">
-          <div className="grid2">
-            <label>Fill stone
-              <select value={fillSize} onChange={(e) => setFillSize(e.target.value)}>
-                {Object.keys(sizes).map((k) => (
-                  <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
-                ))}
-              </select>
-            </label>
-            <label>Color
-              <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
-            </label>
-          </div>
-          <div className="sizeinfo">
-            Even spacing: one lattice, stepped on the fill stone ·{' '}
-            <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
-            <span> — set it in Stones · Spacing</span>
-          </div>
-          <label>Fill style
-            <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
-              <option value="brick">Brick — offset rows</option>
-              <option value="grid">Grid — aligned rows</option>
-            </select>
-          </label>
-        </Section>
-
-        <Section title="Templates" defaultOpen={false}>
+        <Section title="Graphic" defaultOpen={false}>
           <p className="hint">
-            {tplCats.reduce((n, c) => n + c.items.length, 0)} public-domain designs — click one to
-            load it as the working image, then tune style and width in the Image section.
+            {tplCats.reduce((n, c) => n + c.items.length, 0)} templates — click one to load it,
+            then tune style and width below. Or upload your own image at the bottom.
           </p>
           <div className="chiprow" style={{ maxHeight: 74, overflow: 'auto' }}>
             {tplCats.map((c) => (
@@ -1504,9 +1481,6 @@ export default function App() {
               />
             ))}
           </div>
-        </Section>
-
-        <Section title="Image">
           <div className="grid2">
             <label>Width (mm)
               <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
@@ -1606,7 +1580,33 @@ export default function App() {
               }
             }} />
           </label>
-          <button onClick={generateImage}>Add image stones</button>
+          <button className="primary" onClick={generateImage}>Add graphic stones</button>
+        </Section>
+
+        <Section title="Fill">
+          <div className="grid2">
+            <label>Fill stone
+              <select value={fillSize} onChange={(e) => setFillSize(e.target.value)}>
+                {Object.keys(sizes).map((k) => (
+                  <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
+                ))}
+              </select>
+            </label>
+            <label>Color
+              <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
+            </label>
+          </div>
+          <div className="sizeinfo">
+            Even spacing: one lattice, stepped on the fill stone ·{' '}
+            <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
+            <span> — set it in Stones · Spacing</span>
+          </div>
+          <label>Fill style
+            <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
+              <option value="brick">Brick — offset rows</option>
+              <option value="grid">Grid — aligned rows</option>
+            </select>
+          </label>
         </Section>
 
         <Section title="Edit">
