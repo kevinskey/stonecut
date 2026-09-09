@@ -2988,6 +2988,53 @@ export function offsetRows(
 }
 
 
+// First halo row's offset from the vinyl edge, in rhythms. 0.7 leaves a
+// visible sliver of garment between the vinyl and the first stones without
+// the halo reading as detached from the letters.
+export const HALO_CLEAR = 0.7
+
+// Halo design: N rows of stones floating OUTSIDE the shape — the shape
+// itself is cut from glitter vinyl, so no stones sit on or inside it.
+// Rows share the SpacingIndex, so each ring keeps legal clearance from the
+// one before it; counters get their own inner rings for free because
+// offsetRows works on the distance transform of the whole background.
+export function haloOutline(
+  grid: Grid,
+  holeMm: number,
+  gapMm: number,
+  idx: SpacingIndex,
+  rhythmMm: number,
+  rows: number,
+  uniform = false,
+): Pt[] {
+  // outlineOrSpine never runs in halo mode, so clear its diagnostics here —
+  // otherwise the previous design's centre-line/cap warnings stay on screen
+  debugStones.length = 0
+  debugSpans.length = 0
+  spinedWidths.length = 0
+  capGaps.length = 0
+  bareFrac = 0
+  const out: Pt[] = []
+  for (let k = 0; k < rows; k++)
+    out.push(...offsetRows(grid, holeMm, gapMm, idx, rhythmMm, (HALO_CLEAR + k) * rhythmMm, true, uniform))
+  return out
+}
+
+// Grow a grid's canvas without moving the design: mm coordinates are
+// preserved through padPx. offsetRows drops any ring that touches the
+// raster border, so outside rows need real border room — image grids come
+// in with padPx 0 and would silently lose their halo otherwise.
+export function padGrid(grid: Grid, padMm: number): Grid {
+  const extra = Math.ceil(padMm * grid.pxPerMm)
+  if (extra <= 0) return grid
+  const w = grid.w + extra * 2
+  const h = grid.h + extra * 2
+  const bin = new Uint8Array(w * h)
+  for (let y = 0; y < grid.h; y++)
+    bin.set(grid.bin.subarray(y * grid.w, (y + 1) * grid.w), (y + extra) * w + extra)
+  return { bin, w, h, pxPerMm: grid.pxPerMm, padPx: grid.padPx + extra }
+}
+
 // Can this design geometrically support a clean double-outline echo?
 // Returns feasibility plus the scale factor that WOULD make it work — the
 // standard design-software pattern: name the fix, don't just refuse.

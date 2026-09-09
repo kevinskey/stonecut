@@ -1,4 +1,4 @@
-import type { MaterialPreset, Stone, StoneSpec } from './model'
+import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { orderNearestNeighbor } from './geometry'
 
 export interface Job {
@@ -23,6 +23,40 @@ export function toSVG(job: Job): string {
 <g fill="none" stroke="#000" stroke-width="0.1">
 ${circles}
 </g>
+</svg>
+`
+}
+
+// ---------- Vinyl layer (solid letters for glitter vinyl / HTV) ----------
+// Halo designs pair the stone template with the letters themselves cut from
+// glitter vinyl. One even-odd path keeps counters (the hole in an "e") open.
+// Exported at true mm size; Cricut Design Space reads the mm width/height.
+export function contoursToVinylSVG(contours: Pt[][], marginMm = 5): string {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const c of contours)
+    for (const p of c) {
+      if (p.x < minX) minX = p.x
+      if (p.y < minY) minY = p.y
+      if (p.x > maxX) maxX = p.x
+      if (p.y > maxY) maxY = p.y
+    }
+  if (!isFinite(minX)) return ''
+  const w = (maxX - minX + marginMm * 2).toFixed(2)
+  const h = (maxY - minY + marginMm * 2).toFixed(2)
+  const d = contours
+    .filter((c) => c.length >= 3)
+    .map(
+      (c) =>
+        'M' +
+        c
+          .map((p) => `${(p.x - minX + marginMm).toFixed(2)} ${(p.y - minY + marginMm).toFixed(2)}`)
+          .join(' L') +
+        ' Z',
+    )
+    .join(' ')
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}mm" height="${h}mm" viewBox="0 0 ${w} ${h}">
+<path d="${d}" fill="#000" fill-rule="evenodd"/>
 </svg>
 `
 }

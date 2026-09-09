@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Stone, StoneSpec } from './model'
-import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, haloOutline, offsetRows, outlineOrSpine, padGrid, rasterizeContours, HALO_CLEAR } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
-import { download, toGPGL, toHPGL, toSVG } from './export'
+import { contoursToVinylSVG, download, toGPGL, toHPGL, toSVG } from './export'
 import { sendToCutter } from './usb'
 import './App.css'
 
@@ -53,7 +53,8 @@ export default function App() {
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
   const [addSize, setAddSize] = useState<'auto' | string>('auto') // stone size for manual adds
-  const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline'>('single')
+  const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline' | 'halo'>('single')
+  const [haloRows, setHaloRows] = useState(3) // outside stone rows in Halo design
   const [strokePolicy, setStrokePolicy] = useState<'auto' | 'walls'>('auto')
   const [uniformRhythm, setUniformRhythm] = useState(true)
   const [canEcho, setCanEcho] = useState(true)
@@ -234,7 +235,11 @@ export default function App() {
         if (!r.ok) throw new Error(String(r.status))
         return r.blob()
       })
-      const f = new File([blob], `${t.name}.svg`, { type: 'image/svg+xml' })
+      // templates are mostly SVG but TRW designs ship as JPG/PNG — a JPG blob
+      // labelled image/svg+xml fails to decode, so type follows the extension
+      const ext = t.file.split('.').pop()?.toLowerCase() ?? 'svg'
+      const mime = ext === 'png' ? 'image/png' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/svg+xml'
+      const f = new File([blob], `${t.name}.${ext}`, { type: mime })
       setImageFile(f)
       const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
       setImgThreshold(a.threshold)
@@ -391,7 +396,7 @@ export default function App() {
   const [previewLive, setPreviewLive] = useState(true)
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -408,12 +413,20 @@ export default function App() {
         // ghost and double both put a row OUTSIDE the letter — pad the grid
         // so the outer row isn't clipped at the raster edge
         const previewPx = textPreview.widthMm <= 150 ? 6 : textPreview.widthMm <= 300 ? 4 : 3
-        const grid = rasterizeContours(textPreview.contours, previewPx, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+        const pad =
+          outlineDesign === 'halo'
+            ? (HALO_CLEAR + haloRows) * rhythm + hole + 1
+            : outlineDesign === 'ghost' || outlineDesign === 'double'
+              ? rhythm + hole
+              : 0.5
+        const grid = rasterizeContours(textPreview.contours, previewPx, pad)
         setCanEcho(true)
         setEchoUpsize(null)
         let outline: { x: number; y: number }[] = []
         if (textMode !== 'fill') {
-          if (outlineDesign === 'ghost') {
+          if (outlineDesign === 'halo') {
+            outline = haloOutline(grid, hole, hardGap, idx, rhythm, haloRows, uniformRhythm)
+          } else if (outlineDesign === 'ghost') {
             outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
           } else {
             outline = outlineOrSpine(textPreview.contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
@@ -429,7 +442,8 @@ export default function App() {
         // arrow-key step blocked the main thread for over a second and made
         // the app feel frozen. Show the outline while browsing; the full
         // design lands the moment the picker closes.
-        if (textMode !== 'outline' && !fontOpen) {
+        // halo letters are cut from vinyl — stones never sit on or inside them
+        if (textMode !== 'outline' && !fontOpen && outlineDesign !== 'halo') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
           const fGap = hardGapOf(gap)
           // EVEN SPACING FIRST: the fill continues the outline's rhythm, so a
@@ -526,7 +540,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
@@ -556,7 +570,12 @@ export default function App() {
         const pts: { x: number; y: number; size?: string; color?: string }[] = []
         let outline: { x: number; y: number }[] = []
         if (imgMode !== 'fill') {
-          if (outlineDesign === 'ghost') {
+          if (outlineDesign === 'halo') {
+            // image grids come in with no border padding — grow the canvas so
+            // outside rows aren't clipped at the raster edge
+            const hGrid = padGrid(raster.grid, (HALO_CLEAR + haloRows) * rhythm + hole + 1)
+            outline = haloOutline(hGrid, hole, hardGap, idx, rhythm, haloRows, uniformRhythm)
+          } else if (outlineDesign === 'ghost') {
             outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
           } else {
             outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
@@ -565,7 +584,7 @@ export default function App() {
           }
         }
         pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
-        if (imgMode !== 'outline') {
+        if (imgMode !== 'outline' && outlineDesign !== 'halo') {
           const fHole = sizes[fillSize]?.holeMm ?? 2.5
           const fGap = hardGapOf(gap)
           // The lattice steps on the FILL stone's own pitch, not the outline's.
@@ -595,7 +614,7 @@ export default function App() {
     }, 350)
     return () => window.clearTimeout(t)
   }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
-      outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
+      outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
 
   // ---------- generation ----------
   const addGenerated = useCallback(
@@ -617,10 +636,18 @@ export default function App() {
     const rhythm = hole + gap
     const idx = new SpacingIndex(hole + hardGap)
     const pts: { x: number; y: number; size?: string; color?: string }[] = []
-    const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+    const pad =
+      outlineDesign === 'halo'
+        ? (HALO_CLEAR + haloRows) * rhythm + hole + 1
+        : outlineDesign === 'ghost' || outlineDesign === 'double'
+          ? rhythm + hole
+          : 0.5
+    const grid = rasterizeContours(contours, 6, pad)
     let outline: { x: number; y: number }[] = []
     if (textMode !== 'fill') {
-      if (outlineDesign === 'ghost') {
+      if (outlineDesign === 'halo') {
+        outline = haloOutline(grid, hole, hardGap, idx, rhythm, haloRows, uniformRhythm)
+      } else if (outlineDesign === 'ghost') {
         outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
       } else {
         outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
@@ -629,7 +656,7 @@ export default function App() {
       }
     }
     pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
-    if (textMode !== 'outline') {
+    if (textMode !== 'outline' && outlineDesign !== 'halo') {
       const fHole = sizes[fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
     // The lattice steps on the FILL stone's own pitch, not the outline's.
@@ -652,8 +679,20 @@ export default function App() {
     addGenerated(pts, offsetY)
     setPreviewBaseY(null)
     setPreviewLive(false)
-    setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, previewBaseY, addGenerated, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+    setStatus(
+      outlineDesign === 'halo'
+        ? `Added ${pts.length} halo stones — cut the letters with Vinyl SVG in the Text panel`
+        : `Added ${pts.length} stones from text`,
+    )
+  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, previewBaseY, addGenerated, uniformRhythm, outlineDesign, haloRows, outlineStyle, fillStyle, fillSize, fillColor])
+
+  // the vinyl layer of a halo design: the letters as one solid cut file
+  const downloadVinyl = useCallback(() => {
+    if (!textPreview) { setStatus('Type some text first'); return }
+    const slug = text.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'letters'
+    download(`stonecut-vinyl-${slug}.svg`, contoursToVinylSVG(textPreview.contours), 'image/svg+xml')
+    setStatus(`Vinyl SVG saved — cut from glitter vinyl at 100% scale (no resize)`)
+  }, [textPreview, text])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -667,7 +706,10 @@ export default function App() {
       const pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[] = []
       let outline: { x: number; y: number }[] = []
       if (imgMode !== 'fill') {
-        if (outlineDesign === 'ghost') {
+        if (outlineDesign === 'halo') {
+          const hGrid = padGrid(raster.grid, (HALO_CLEAR + haloRows) * rhythm + hole + 1)
+          outline = haloOutline(hGrid, hole, hardGap, idx, rhythm, haloRows, uniformRhythm)
+        } else if (outlineDesign === 'ghost') {
           outline = offsetRows(raster.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
         } else {
           outline = outlineOrSpine(raster.contours, raster.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
@@ -676,7 +718,7 @@ export default function App() {
         }
       }
       pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
-      if (imgMode !== 'outline') {
+      if (imgMode !== 'outline' && outlineDesign !== 'halo') {
         const fHole = sizes[fillSize]?.holeMm ?? 2.5
         const fGap = hardGapOf(gap)
       // The lattice steps on the FILL stone's own pitch, not the outline's.
@@ -718,7 +760,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, haloRows, outlineStyle, fillStyle, fillSize, fillColor])
 
   // Live regeneration: while the last image commit is untouched, any
   // generation-setting change re-runs it in place (debounced like a preview).
@@ -734,7 +776,7 @@ export default function App() {
     }, 650)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
+  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, haloRows, strokePolicy, uniformRhythm, imageFile])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -1360,17 +1402,34 @@ export default function App() {
                   {canEcho ? 'Double — echo row outside' : 'Double — needs upsize'}
                 </option>
                 <option value="ghost">Ghost — floats outside</option>
+                <option value="halo">Halo — rows around vinyl letters</option>
                 <option value="centerline">Single-line lettering</option>
               </select>
             </label>
             <label>Narrow strokes
-              <select value={strokePolicy} disabled={outlineDesign === 'centerline'}
+              <select value={strokePolicy} disabled={outlineDesign === 'centerline' || outlineDesign === 'halo'}
                 onChange={(e) => setStrokePolicy(e.target.value as typeof strokePolicy)}>
                 <option value="auto">Auto fallback</option>
                 <option value="walls">Force walls</option>
               </select>
             </label>
           </div>
+          {outlineDesign === 'halo' && (
+            <>
+              <div className="grid2">
+                <label>Halo rows
+                  <input type="number" min={1} max={5} step={1} value={haloRows}
+                    onChange={(e) => setHaloRows(Math.max(1, Math.min(5, Math.round(+e.target.value))))} />
+                </label>
+                <button disabled={!textPreview} onClick={downloadVinyl}>Vinyl SVG — letters</button>
+              </div>
+              <div className="sizeinfo">
+                Stones circle the letters; the letters themselves cut from glitter vinyl.
+                Download the Vinyl SVG for the Cricut, press it first, then center the stone
+                transfer over it — the halo's clear gap frames the vinyl edge.
+              </div>
+            </>
+          )}
           <button className="primary" onClick={generateText}>Add text stones</button>
         </Section>
         <Section title="Fill">
