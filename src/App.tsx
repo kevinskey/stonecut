@@ -1269,6 +1269,29 @@ export default function App() {
                 onChange={(e) => setHaloRows(Math.max(1, Math.min(5, Math.round(+e.target.value))))} />
             </label>
           )}
+          <div className="grid2">
+            <label>Fill stone
+              <select value={fillSize} onChange={(e) => setFillSize(e.target.value)}>
+                {Object.keys(sizes).map((k) => (
+                  <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
+                ))}
+              </select>
+            </label>
+            <label>Fill color
+              <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
+            </label>
+          </div>
+          <label>Fill style
+            <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
+              <option value="brick">Brick — offset rows</option>
+              <option value="grid">Grid — aligned rows</option>
+            </select>
+          </label>
+          <div className="sizeinfo">
+            Even spacing: one lattice, stepped on the fill stone ·{' '}
+            <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
+            <span> — follows Spacing above</span>
+          </div>
         </Section>
 
         <Section title="Text">
@@ -1436,11 +1459,50 @@ export default function App() {
           <button className="primary" onClick={generateText}>Add text stones</button>
         </Section>
         <Section title="Graphic" defaultOpen={false}>
-          <p className="hint">
-            {tplCats.reduce((n, c) => n + c.items.length, 0)} templates — click one to load it,
-            then tune style and width below. Or upload your own image at the bottom.
+          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
+            <input type="file" accept="image/*" onChange={async (e) => {
+              const f = e.target.files?.[0] ?? null
+              setImageFile(f)
+              if (!f) return
+              try {
+                // pick settings that make the artwork the design, so a light
+                // logo or transparent background doesn't silently yield nothing
+                const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
+                setImgThreshold(a.threshold)
+                setImgInvert(a.invert)
+                setImgAlphaKey(a.alphaKey)
+                setImgLinework(a.linework)
+                applyStrokeStyle(a)
+                setStatus(`${f.name} — ${a.note}`)
+              } catch {
+                setStatus(`Could not read ${f.name}`)
+              }
+            }} />
+          </label>
+          <div className="grid2">
+            <label>Width (mm)
+              <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
+            </label>
+            <label>Style
+              <select value={imgMode} onChange={(e) => setImgMode(e.target.value as StoneMode)}>
+                <option value="outline">Outline</option>
+                <option value="fill">Fill</option>
+                <option value="both">Outline + fill</option>
+              </select>
+            </label>
+          </div>
+          <label>Threshold {imgThreshold}
+            <input type="range" min={10} max={245} value={imgThreshold} onChange={(e) => setImgThreshold(+e.target.value)} />
+          </label>
+          <label className="row"><input type="checkbox" checked={imgInvert} onChange={(e) => setImgInvert(e.target.checked)} /> Invert (light areas get stones)</label>
+          <label className="row"><input type="checkbox" checked={imgAlphaKey} onChange={(e) => setImgAlphaKey(e.target.checked)} /> Use transparency (opaque art = design)</label>
+          <label className="row"><input type="checkbox" checked={imgLinework} onChange={(e) => setImgLinework(e.target.checked)} /> Keep dark linework open (cartoon lines stay stone-free)</label>
+          <button className="primary" onClick={generateImage}>Add graphic stones</button>
+          <p className="hint" style={{ marginTop: 8 }}>
+            Or pick from {tplCats.reduce((n, c) => n + c.items.length, 0)} templates — click one to
+            load it, then tune width and style above.
           </p>
-          <div className="chiprow" style={{ maxHeight: 74, overflow: 'auto' }}>
+          <div className="chiprow">
             {tplCats.map((c) => (
               <button
                 key={c.slug}
@@ -1456,8 +1518,6 @@ export default function App() {
               display: 'grid',
               gridTemplateColumns: 'repeat(3, 1fr)',
               gap: 6,
-              maxHeight: 300,
-              overflow: 'auto',
               marginTop: 6,
             }}
           >
@@ -1481,33 +1541,15 @@ export default function App() {
               />
             ))}
           </div>
-          <div className="grid2">
-            <label>Width (mm)
-              <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
-            </label>
-            <label>Style
-              <select value={imgMode} onChange={(e) => setImgMode(e.target.value as StoneMode)}>
-                <option value="outline">Outline</option>
-                <option value="fill">Fill</option>
-                <option value="both">Outline + fill</option>
-              </select>
-            </label>
-          </div>
-          <label>Threshold {imgThreshold}
-            <input type="range" min={10} max={245} value={imgThreshold} onChange={(e) => setImgThreshold(+e.target.value)} />
-          </label>
-          <label className="row"><input type="checkbox" checked={imgInvert} onChange={(e) => setImgInvert(e.target.checked)} /> Invert (light areas get stones)</label>
-          <label className="row"><input type="checkbox" checked={imgAlphaKey} onChange={(e) => setImgAlphaKey(e.target.checked)} /> Use transparency (opaque art = design)</label>
-          <label className="row"><input type="checkbox" checked={imgLinework} onChange={(e) => setImgLinework(e.target.checked)} /> Keep dark linework open (cartoon lines stay stone-free)</label>
           <button
             onClick={() => setTsbOpen((o) => !o)}
-            style={{ width: '100%', marginBottom: 6 }}
+            style={{ width: '100%', marginTop: 8, marginBottom: 6 }}
           >
             {tsbOpen ? 'Hide TSB shape library' : 'Browse my TSB shape library…'}
           </button>
           {tsbOpen && (
             <div style={{ marginBottom: 8 }}>
-              <div className="chiprow" style={{ maxHeight: 74, overflow: 'auto' }}>
+              <div className="chiprow">
                 {tsbCats.map((c) => (
                   <button
                     key={c.name}
@@ -1523,8 +1565,6 @@ export default function App() {
                   display: 'grid',
                   gridTemplateColumns: 'repeat(3, 1fr)',
                   gap: 6,
-                  maxHeight: 240,
-                  overflow: 'auto',
                   marginTop: 6,
                 }}
               >
@@ -1560,53 +1600,6 @@ export default function App() {
               </div>
             </div>
           )}
-          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
-            <input type="file" accept="image/*" onChange={async (e) => {
-              const f = e.target.files?.[0] ?? null
-              setImageFile(f)
-              if (!f) return
-              try {
-                // pick settings that make the artwork the design, so a light
-                // logo or transparent background doesn't silently yield nothing
-                const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
-                setImgThreshold(a.threshold)
-                setImgInvert(a.invert)
-                setImgAlphaKey(a.alphaKey)
-                setImgLinework(a.linework)
-                applyStrokeStyle(a)
-                setStatus(`${f.name} — ${a.note}`)
-              } catch {
-                setStatus(`Could not read ${f.name}`)
-              }
-            }} />
-          </label>
-          <button className="primary" onClick={generateImage}>Add graphic stones</button>
-        </Section>
-
-        <Section title="Fill">
-          <div className="grid2">
-            <label>Fill stone
-              <select value={fillSize} onChange={(e) => setFillSize(e.target.value)}>
-                {Object.keys(sizes).map((k) => (
-                  <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
-                ))}
-              </select>
-            </label>
-            <label>Color
-              <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
-            </label>
-          </div>
-          <div className="sizeinfo">
-            Even spacing: one lattice, stepped on the fill stone ·{' '}
-            <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
-            <span> — set it in Stones · Spacing</span>
-          </div>
-          <label>Fill style
-            <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
-              <option value="brick">Brick — offset rows</option>
-              <option value="grid">Grid — aligned rows</option>
-            </select>
-          </label>
         </Section>
 
         <Section title="Edit">
