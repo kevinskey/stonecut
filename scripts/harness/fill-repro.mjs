@@ -24,8 +24,7 @@ for (const [name, fn, size] of [
   const idx = new SpacingIndex(pitch)
   const outline = outlineOrSpine(contours, grid, hole, gap, idx, 'auto', false, pitch, true)
   const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-  for (const p of outline) fIdx.add(p, hole / 2)
-  const fill = fillStones(grid, fHole, fGap, fHole / 2 + 0.1, fIdx, outline, fHole + fGap, true)
+  const fill = fillStones(grid, fHole, fGap, fHole / 2 + 0.1, fIdx, outline, fHole + fGap, true, hole)
   // how much of the material is within a beat of some fill/outline stone?
   const all = [...outline, ...fill]
   let bare = 0, mat = 0

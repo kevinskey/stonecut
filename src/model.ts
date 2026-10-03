@@ -4,6 +4,7 @@ export interface Stone {
   size: string // key into stone size table
   color?: string // display/design color (multi-color templates)
   layer?: 'outline' | 'fill' // cut separation — templates are cut per layer
+  el?: number // element id — each committed design is a free-moving unit
 }
 
 export interface StoneSpec {

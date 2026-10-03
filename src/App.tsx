@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
-import { removeCollisions } from './geometry'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
@@ -49,7 +48,8 @@ export default function App() {
   const stonesRef = useRef<Stone[]>([])
   // last image commit — while untouched, generation-setting changes REGENERATE
   // it in place instead of only affecting the next add
-  const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[] } | null>(null)
+  const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[]; el?: number } | null>(null)
+  const elSeq = useRef(1)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => ({ ...DEFAULT_SIZES }))
   const [curSize, setCurSize] = useState('SS10')
@@ -269,7 +269,7 @@ export default function App() {
       })
       const f = new File([blob], `${t.name}.svg`, { type: 'image/svg+xml' })
       setImageFile(f)
-      const a = await analyzeImage(f)
+      const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
       setImgThreshold(a.threshold)
       setImgInvert(a.invert)
       setImgAlphaKey(a.alphaKey)
@@ -412,16 +412,13 @@ export default function App() {
       // reads wide even though its thin stem drags the p90 down, so it fills;
       // a basketball's uniform strokes read narrow everywhere, so it gets a
       // centerline outline with no fill.
-      // Absolute widths cannot separate art types — a chunky icon's strokes
-      // overlap a music note's head in millimetres. SHAPE statistics can:
-      // pure line art is thin-dominant AND uniform (its p96 width is just a
-      // junction bulge, ~2x its median), while blob-bearing art (note heads,
-      // mascot bodies on thin limbs) is thin-dominant but NOT uniform. Solid
-      // art isn't thin-dominant at all.
+      // The analyzer decides blob presence geometrically (compactness +
+      // width ratio + area — see hasBlob); percentile-only rules seesawed
+      // between the basketball and the beamed notes for days.
       const deciles = a.strokeDeciles ?? []
       const p50 = toMm(deciles[4] ?? a.strokePx)
       const thinDominant = p50 < pitch * 1.6
-      const blobby = p50 > 0 && toMm(a.strokeMax ?? 0) / p50 >= 2.5
+      const blobby = (a as { blobby?: boolean }).blobby ?? false
       if (thinDominant && !blobby) {
         // uniform line drawing: one row of stones per line, nothing to fill
         setOutlineDesign('centerline')
@@ -469,7 +466,8 @@ export default function App() {
         let noFill = false
         // ghost and double both put a row OUTSIDE the letter — pad the grid
         // so the outer row isn't clipped at the raster edge
-        const grid = rasterizeContours(textPreview.contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
+        const previewPx = textPreview.widthMm <= 150 ? 6 : textPreview.widthMm <= 300 ? 4 : 3
+        const grid = rasterizeContours(textPreview.contours, previewPx, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
         setCanEcho(true)
         setEchoUpsize(null)
         let outline: { x: number; y: number }[] = []
@@ -507,8 +505,7 @@ export default function App() {
           // between the outline and the first lattice line.
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-          for (const p of outline) fIdx.add(p, hole / 2)
-          const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+            const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
           if (!f.length && textMode === 'both') noFill = true
         }
@@ -610,7 +607,12 @@ export default function App() {
       return
     const t = window.setTimeout(async () => {
       try {
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
+        // PREVIEW resolution adapts to design size: small designs keep the
+        // full 6 px/mm (they're fast anyway, and small features like note
+        // heads fall apart on a coarse grid); only large designs trade
+        // resolution for fluid slider drags. Commits always re-run at 6.
+        const previewPx = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx)
         const hole = sizes[curSize]?.holeMm ?? 3
         const hardGap = hardGapOf(gap)
         const rhythm = hole + gap
@@ -636,8 +638,7 @@ export default function App() {
           const fRhythm = fHole + fGap
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-          for (const p of outline) fIdx.add(p, hole / 2)
-          const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+            const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
         }
         // same physics advisory text gets: artwork lines thinner than the
@@ -665,14 +666,11 @@ export default function App() {
   // ---------- generation ----------
   const addGenerated = useCallback(
     (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number) => {
-      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline' }))
-      mutate((prev) => {
-        // half-gap threshold: safety net for merges only — relaxed fills sit
-        // slightly under full pitch by design and must not get culled here
-        const all = [...prev, ...fresh]
-        const kept = removeCollisions(all, (s) => sizes[s.size]?.holeMm ?? 3, hardGapOf(gap) * 0.5)
-        return kept
-      })
+      // each commit is its own ELEMENT: a free-moving layer that may overlap
+      // other elements — nothing culls across elements anymore
+      const el = elSeq.current++
+      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
+      mutate((prev) => [...prev, ...fresh])
     },
     [curSize, gap, mutate, sizes],
   )
@@ -712,7 +710,7 @@ export default function App() {
           const fInset = fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
-      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
       return pts
@@ -775,8 +773,7 @@ export default function App() {
           const fRhythm = fHole + fGap
         const fInset = fHole / 2 + 0.1
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-        for (const p of outline) fIdx.add(p, hole / 2)
-        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick')
+        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
         pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
       }
       const last = lastImageRef.current
@@ -785,21 +782,20 @@ export default function App() {
       const offsetY = replacing
         ? last.offsetY
         : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+      const el = replacing && last.el != null ? last.el : elSeq.current++
       const fresh: Stone[] = pts.map((p) => ({
         x: p.x + 10,
         y: p.y + offsetY,
         size: p.size ?? curSize,
         color: p.color,
         layer: p.layer ?? 'outline',
+        el,
       }))
-      const kept = removeCollisions(
-        [...base, ...fresh],
-        (st) => sizes[st.size]?.holeMm ?? 3,
-        hardGapOf(gap) * 0.5,
-      )
+      // elements are free layers: no culling across elements on commit
+      const kept = [...base, ...fresh]
       if (!replacing) pushUndo(stones) // regens share the original undo point
       setStones(kept)
-      lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept }
+      lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept, el }
       setPreviewBaseY(null)
       setImagePreview(null)
       setStatus(
@@ -823,7 +819,7 @@ export default function App() {
     if (!last || last.file !== imageFile || stonesRef.current !== last.after) return
     const t = window.setTimeout(() => {
       void generateImageRef.current()
-    }, 400)
+    }, 650)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
@@ -886,13 +882,17 @@ export default function App() {
               } else if (d < boD) { boD = d; bo = i }
             }
             const best = bo >= 0 && (bf < 0 || boD <= bfD + 3) ? bo : bf
+            let el: number | undefined
             if (best >= 0) {
-              // blend in with the field being clicked into: layer and colour
-              // always follow the neighbour; size follows it only in Auto
+              // blend in with the field being clicked into: layer, colour and
+              // element always follow the neighbour; size only in Auto
               layer = stones[best].layer ?? 'outline'
               color = stones[best].color
+              el = stones[best].el
               if (addSize === 'auto') size = stones[best].size
             }
+            mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer, el }])
+            return
           }
           mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer }])
         }
@@ -966,6 +966,17 @@ export default function App() {
       const p = toMm(e)
       const start = stones.findIndex((st) => Math.hypot(st.x - p.x, st.y - p.y) <= holeOf(st) / 2 + 0.5)
       if (start < 0) return
+      // element-tagged designs select as a unit — free-moving layers
+      if (stones[start].el != null) {
+        const el = stones[start].el
+        const inSet = new Set<number>()
+        stones.forEach((st, i) => {
+          if (st.el === el) inSet.add(i)
+        })
+        setSelection(inSet)
+        setStatus(`Selected element: ${inSet.size} stones — drag to move, Del removes it`)
+        return
+      }
       const link = (a: Stone, b: Stone) =>
         Math.hypot(a.x - b.x, a.y - b.y) <= (holeOf(a) + holeOf(b)) / 2 + gap + 2.5
       const inSet = new Set<number>([start])
@@ -1097,6 +1108,35 @@ export default function App() {
       return next
     })
   }, [outlineColor])
+
+  // Scale stones about their centroid — the selection if there is one, the
+  // whole design otherwise. Positions scale; stone sizes don't (they're
+  // physical). Works whether or not the design is still regenerable.
+  const [scalePct, setScalePct] = useState(100)
+  const applyScale = useCallback(() => {
+    const f = scalePct / 100
+    if (!Number.isFinite(f) || f <= 0.05 || f === 1) return
+    mutate((prev) => {
+      const idxs = selection.size ? [...selection] : prev.map((_, i) => i)
+      if (!idxs.length) return prev
+      let cx = 0
+      let cy = 0
+      for (const i of idxs) {
+        cx += prev[i].x
+        cy += prev[i].y
+      }
+      cx /= idxs.length
+      cy /= idxs.length
+      const inSel = new Set(idxs)
+      return prev.map((st, i) =>
+        inSel.has(i) ? { ...st, x: cx + (st.x - cx) * f, y: cy + (st.y - cy) * f } : st,
+      )
+    })
+    setStatus(
+      `Scaled ${selection.size || 'all'} stones to ${scalePct}%` +
+        (scalePct < 100 ? ' — check spacing (⌘Z to undo)' : ''),
+    )
+  }, [scalePct, selection, mutate])
 
   // Even out fill spacing after manual edits: fill stones closer than their
   // legal pitch (to anything) push apart in small damped steps; outline
@@ -1614,7 +1654,7 @@ export default function App() {
                         })
                         const f = new File([blob], `${s.name}.png`, { type: blob.type || 'image/png' })
                         setImageFile(f)
-                        const a = await analyzeImage(f)
+                        const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
                         setImgThreshold(a.threshold)
                         setImgInvert(a.invert)
                         setImgAlphaKey(a.alphaKey)
@@ -1638,7 +1678,7 @@ export default function App() {
               try {
                 // pick settings that make the artwork the design, so a light
                 // logo or transparent background doesn't silently yield nothing
-                const a = await analyzeImage(f)
+                const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
                 setImgThreshold(a.threshold)
                 setImgInvert(a.invert)
                 setImgAlphaKey(a.alphaKey)
@@ -1681,6 +1721,29 @@ export default function App() {
               Respace fill — even out after edits
             </button>
           </div>
+          <div className="grid2">
+            <label>Scale %
+              <input
+                type="number"
+                min={10}
+                max={400}
+                step={5}
+                value={scalePct}
+                onChange={(e) => setScalePct(+e.target.value)}
+              />
+            </label>
+            <button
+              disabled={!stones.length || scalePct === 100}
+              style={{ alignSelf: 'end' }}
+              onClick={applyScale}
+            >
+              Scale {selection.size ? `${selection.size} selected` : 'all'}
+            </button>
+          </div>
+          <p className="hint">
+            Scales stone positions about the center (sizes stay physical). Double-click a design
+            to select it first, or scale everything.
+          </p>
           <div className="toolrow">
             <button
               disabled={!stones.length && !pending}

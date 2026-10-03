@@ -971,6 +971,11 @@ function analyzeContour(poly: Pt[], pitch: number, rhythm?: number): ContourInfo
   const target = rhythm ?? pitch * 1.15
   const path = makePath(poly, true)
   if (!path || path.total < pitch * 2.5) return { poly, path, corners: [], fallback: true }
+  // A TINY closed contour — an i-dot, a period, a small counter — has no true
+  // corners at stone scale: Douglas-Peucker vertices on a 28mm circle are
+  // artifacts, and corner-anchoring them rendered dots as tilted squares.
+  // Fall back to the even loop walk, which beads the ring uniformly.
+  if (path.total < pitch * 7) return { poly, path, corners: [], fallback: true }
   const step = 0.3
   const n = Math.max(16, Math.round(path.total / step))
   const ds = path.total / n
@@ -1358,9 +1363,14 @@ export function outlineOrSpine(
           dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
       )
         continue
-      const rr = dv * dv
-      const val = (2 * dv) / pxPerMm
-      const r0 = Math.ceil(dv)
+      // stamp radius is CAPPED: every width comparison in this function
+      // saturates near ~needW, so stamping a 50mm blob's true inscribed disk
+      // (hundreds of px) only burned time — widths clamp at the cap and the
+      // classifications are identical
+      const dvc = Math.min(dv, 7 * pxPerMm)
+      const rr = dvc * dvc
+      const val = (2 * dvc) / pxPerMm
+      const r0 = Math.ceil(dvc)
       for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
         const dy2 = yy - y
         const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
@@ -1666,6 +1676,34 @@ export function outlineOrSpine(
     const thin = new Uint8Array(w * h)
     for (let i2 = 0; i2 < w * h; i2++)
       thin[i2] = labels[i2] && wide[i2] > 0 && wide[i2] < needW ? 1 : 0
+    // ABSORB SMALL WALL ISLANDS. A serif flare at the tip of a hairline arm
+    // measures just over the two-row threshold, so a few square mm of "wall
+    // zone" sits inside line territory — and both machineries plant stones
+    // in it, which knots (Playfair E arms). A wall region has to be big
+    // enough to hold an actual wall RUN; smaller islands adjacent to thin
+    // material are traced by the line that runs through them.
+    {
+      const notThin = new Uint8Array(w * h)
+      for (let i2 = 0; i2 < w * h; i2++) notThin[i2] = labels[i2] && !thin[i2] ? 1 : 0
+      const wi = labelComponents(notThin, w, h)
+      if (wi.count) {
+        const areaW = new Int32Array(wi.count + 1)
+        const touchThin = new Uint8Array(wi.count + 1)
+        for (let y2 = 1; y2 < h - 1; y2++)
+          for (let x2 = 1; x2 < w - 1; x2++) {
+            const i2 = y2 * w + x2
+            const lb = wi.labels[i2]
+            if (!lb) continue
+            areaW[lb]++
+            if (thin[i2 - 1] || thin[i2 + 1] || thin[i2 - w] || thin[i2 + w]) touchThin[lb] = 1
+          }
+        const minIsland = (pitch * pxPerMm) ** 2 * 1.8
+        for (let i2 = 0; i2 < w * h; i2++) {
+          const lb = wi.labels[i2]
+          if (lb && touchThin[lb] && areaW[lb] < minIsland) thin[i2] = 1
+        }
+      }
+    }
     // A BAND-LIKE component — a double-outline font's ring, uniformly narrow
     // the whole way round — is spined as a WHOLE. Judged in thin patches, the
     // stretches of a hand-drawn ring that bulge past the threshold kept
@@ -1716,11 +1754,30 @@ export function outlineOrSpine(
             }
             return x1 - x0 >= holeMm || y1 - y0 >= holeMm
           })
-        if (bc.length === 2 && Math.min(bc[0].length, bc[1].length) >= Math.max(bc[0].length, bc[1].length) * 0.25) {
-          // a true RING: two boundary contours of comparable length. (A
-          // cursive word with one tiny loop counter also has two contours —
-          // pairing its giant outer against the little loop produced
-          // garbage, hence the length-ratio gate.)
+        // a true RING is two comparable contours that run PARALLEL a band
+        // apart the whole way round. Length ratio alone let a cursive word
+        // (big outer + one loop counter, ratio 0.33) classify as a ring and
+        // pair its entire outer against that single counter — the midline
+        // cut through empty counters and corner/edge stones followed it
+        // 2-6mm off the vector on every script loop.
+        const bandParallel = (): boolean => {
+          if (bc.length !== 2) return false
+          const [A, B] = bc
+          const ds: number[] = []
+          for (let k = 0; k < A.length; k += Math.max(1, Math.floor(A.length / 48))) {
+            const p = A[k]
+            let bd = Infinity
+            for (let j = 0; j < B.length; j += 2) {
+              const q = B[j]
+              const dd = (q.x - p.x) ** 2 + (q.y - p.y) ** 2
+              if (dd < bd) bd = dd
+            }
+            ds.push(Math.sqrt(bd))
+          }
+          ds.sort((x, y) => x - y)
+          return ds[Math.floor(ds.length * 0.9)] <= needW * 1.3
+        }
+        if (bc.length === 2 && Math.min(bc[0].length, bc[1].length) >= Math.max(bc[0].length, bc[1].length) * 0.25 && bandParallel()) {
           const [a, b] = bc
           bandRings.push(a.length >= b.length ? { outer: a, inner: b } : { outer: b, inner: a })
           bandLbls.add(lbl)
@@ -1890,14 +1947,46 @@ export function outlineOrSpine(
   // placement as an ordinary outline: corners stay crisp and the beat is
   // harmonized, neither of which a pixel-skeleton spine could give.
   for (const ring of bandRings) {
-    const mid: Pt[] = []
-    for (const p of ring.outer) {
-      let bx = 0, by = 0, bd = Infinity
-      for (const q of ring.inner) {
+    // CONTINUITY-CONSTRAINED pairing. Global nearest-point pairing jumps the
+    // counter at a loop's neck — a point on the outer contour is spatially
+    // closest to the inner contour's FAR side, the midpoint lands mid-void,
+    // and corner/edge stones followed it 2-6mm off the vector (every script
+    // loop: Allura/Sacramento/Pinyon l and e). Anchor at the most
+    // unambiguous pair, then walk the ring keeping the partner index LOCAL,
+    // so the pairing can only travel around the band, never across it.
+    const inN = ring.inner.length
+    const nearestTo = (p: Pt): { j: number; d2: number } => {
+      let bj = 0, bd = Infinity
+      for (let j = 0; j < inN; j++) {
+        const q = ring.inner[j]
         const dd = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
-        if (dd < bd) { bd = dd; bx = q.x; by = q.y }
+        if (dd < bd) { bd = dd; bj = j }
       }
-      mid.push({ x: (p.x + bx) / 2, y: (p.y + by) / 2 })
+      return { j: bj, d2: bd }
+    }
+    let anchor = 0
+    let anchorHit = { j: 0, d2: Infinity }
+    const aStep = Math.max(1, Math.floor(ring.outer.length / 64))
+    for (let i = 0; i < ring.outer.length; i += aStep) {
+      const hit = nearestTo(ring.outer[i])
+      if (hit.d2 < anchorHit.d2) { anchorHit = hit; anchor = i }
+    }
+    const W = Math.max(6, Math.round(inN * 0.08))
+    const mid: Pt[] = new Array(ring.outer.length)
+    let jPrev = anchorHit.j
+    for (let step = 0; step < ring.outer.length; step++) {
+      const i = (anchor + step) % ring.outer.length
+      const p = ring.outer[i]
+      let bj = jPrev, bd = Infinity
+      for (let o = -W; o <= W; o++) {
+        const j = ((jPrev + o) % inN + inN) % inN
+        const q = ring.inner[j]
+        const dd = (q.x - p.x) * (q.x - p.x) + (q.y - p.y) * (q.y - p.y)
+        if (dd < bd) { bd = dd; bj = j }
+      }
+      jPrev = bj
+      const q = ring.inner[bj]
+      mid[i] = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }
     }
     for (let pass = 0; pass < 2; pass++) {
       const n = mid.length
@@ -1946,24 +2035,44 @@ export function outlineOrSpine(
     const n = pts.length
     if (n < 8) continue
     const minArc = Math.max(3, band.medW * 2.2)
-    // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid)
+    // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid).
+    // Pairs beyond medW*1.8 are rejected below anyway, so the partner search
+    // only needs a spatial hash within that radius — the all-pairs scan was
+    // the hottest loop in the whole pipeline on long cursive words.
+    const maxPair = band.medW * 1.8
+    const cell = Math.max(1, maxPair)
+    const buckets = new Map<string, number[]>()
+    for (let j = 0; j < n; j++) {
+      const key = `${Math.floor(pts[j].x / cell)},${Math.floor(pts[j].y / cell)}`
+      let b = buckets.get(key)
+      if (!b) buckets.set(key, (b = []))
+      b.push(j)
+    }
     const cloudKeys = new Set<string>()
     const cloud: Pt[] = []
     for (let i = 0; i < n; i++) {
       let bj = -1
-      let bd = Infinity
-      for (let j = 0; j < n; j++) {
-        if (cid[j] === cid[i]) {
-          let arc = Math.abs(arcs[j] - arcs[i])
-          arc = Math.min(arc, totals[cid[i]] - arc)
-          if (arc < minArc) continue
+      let bd = maxPair * maxPair
+      const cx0 = Math.floor(pts[i].x / cell)
+      const cy0 = Math.floor(pts[i].y / cell)
+      for (let gy = cy0 - 1; gy <= cy0 + 1; gy++)
+        for (let gx = cx0 - 1; gx <= cx0 + 1; gx++) {
+          const b = buckets.get(`${gx},${gy}`)
+          if (!b) continue
+          for (const j of b) {
+            if (j === i) continue
+            if (cid[j] === cid[i]) {
+              let arc = Math.abs(arcs[j] - arcs[i])
+              arc = Math.min(arc, totals[cid[i]] - arc)
+              if (arc < minArc) continue
+            }
+            const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
+            if (dd < bd) {
+              bd = dd
+              bj = j
+            }
+          }
         }
-        const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
-        if (dd < bd) {
-          bd = dd
-          bj = j
-        }
-      }
       if (bj < 0) continue
       // a true opposite partner sits about a stroke-width away; a far-off
       // "nearest" means i is at a tip or junction mouth — skip it
@@ -1983,24 +2092,14 @@ export function outlineOrSpine(
         if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue
         if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * 0.33) continue
       }
-      // walls stand down exactly where the single line takes over: paint
-      // the mask as a disk covering the local stroke around this midpoint
-      {
-        const mr = Math.ceil((Math.sqrt(bd) / 2 + 0.5) * pxPerMm)
-        const mx = Math.round(m.x * pxPerMm + padPx)
-        const my = Math.round(m.y * pxPerMm + padPx)
-        for (let dy2 = -mr; dy2 <= mr; dy2++)
-          for (let dx2 = -mr; dx2 <= mr; dx2++) {
-            if (dx2 * dx2 + dy2 * dy2 > mr * mr) continue
-            const x2 = mx + dx2
-            const y2 = my + dy2
-            if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h) spinedMask[y2 * w + x2] = 1
-          }
-      }
       const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
       if (cloudKeys.has(key)) continue
       cloudKeys.add(key)
-      cloud.push(m)
+      // band width rides along so the mask can be painted LATER, only along
+      // chains that actually place stones — painting here banned walls on
+      // stretches whose chain was then dropped, leaving them bare (the crest
+      // of a script o: no wall, no line, a hole in the lettering)
+      cloud.push({ x: m.x, y: m.y, bw: Math.sqrt(bd) } as Pt)
     }
     // greedy-chain the cloud into open polylines
     const used = new Uint8Array(cloud.length)
@@ -2079,6 +2178,20 @@ export function outlineOrSpine(
       if (got.length) {
         dbg('vectorline', got)
         out.push(...got)
+        // walls stand down exactly where the single line ACTUALLY took over
+        for (const v of chain) {
+          const bw = (v as Pt & { bw?: number }).bw ?? band.medW
+          const mr = Math.ceil((bw / 2 + 0.5) * pxPerMm)
+          const mx = Math.round(v.x * pxPerMm + padPx)
+          const my = Math.round(v.y * pxPerMm + padPx)
+          for (let dy2 = -mr; dy2 <= mr; dy2++)
+            for (let dx2 = -mr; dx2 <= mr; dx2++) {
+              if (dx2 * dx2 + dy2 * dy2 > mr * mr) continue
+              const x2 = mx + dx2
+              const y2 = my + dy2
+              if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h) spinedMask[y2 * w + x2] = 1
+            }
+        }
       }
     }
   }
@@ -2303,11 +2416,9 @@ export function outlineOrSpine(
         run = []
       }
       for (const s of samples) {
-        let m = Infinity
-        for (const o of out) {
-          const dd = Math.hypot(s.p.x - o.x, s.p.y - o.y)
-          if (dd < m) m = dd
-        }
+        // "anything within covered?" needs the spatial index, not a scan of
+        // every stone per sample — this was a top-3 hot loop
+        const m = idx.within(s.p, covered).length ? 0 : Infinity
         // banned stretches (spined bands, detail-line zones) are bare BY
         // DESIGN — patching them puts wall stones back beside the line
         if (m > covered && !seam(s) && !bannedTest?.(s.p)) run.push(s)
@@ -2605,6 +2716,137 @@ export function outlineOrSpine(
   // Crowding is prevented where it happens instead: divideSpan re-divides a
   // span when a stone would land too near a foreign one, so a junction ends up
   // with fewer, evenly spaced stones rather than a jammed pair to clean up.
+
+  // BARE RESCUE — the last line of defence for "can this trace get closer to
+  // the original vector?". Whatever seam between producers left a stretch of
+  // material more than a beat from every stone (a pruned skeleton fragment at
+  // a junction, a masked wall with no line), find each bare blob and lay
+  // stones along ITS OWN medial line. Add-only: guarded by depth and spacing,
+  // it can fill a hole but never move or crowd what is already placed.
+  {
+    const sBin = new Uint8Array(w * h).fill(1)
+    for (const q of out) {
+      const px2 = Math.round(q.x * pxPerMm + padPx)
+      const py2 = Math.round(q.y * pxPerMm + padPx)
+      if (px2 >= 0 && py2 >= 0 && px2 < w && py2 < h) sBin[py2 * w + px2] = 0
+    }
+    const dStone = distanceTransform({ bin: sBin, w, h, pxPerMm, padPx })
+    const bare = new Uint8Array(w * h)
+    for (let i2 = 0; i2 < w * h; i2++) {
+      if (!bin[i2]) continue
+      if (dt[i2] / pxPerMm > pitch * 0.55) continue
+      if (dt[i2] / pxPerMm < 0.4) continue
+      if (dStone[i2] / pxPerMm > rhythm * 1.02) bare[i2] = 1
+    }
+    const bl = labelComponents(bare, w, h)
+    if (bl.count) {
+      const area = new Int32Array(bl.count + 1)
+      for (let i2 = 0; i2 < w * h; i2++) if (bl.labels[i2]) area[bl.labels[i2]]++
+      const minArea = (pitch * pxPerMm) ** 2 * 0.07
+      const blob = new Uint8Array(w * h)
+      for (let b2 = 1; b2 <= bl.count; b2++) {
+        if (area[b2] < minArea) continue
+        let medianW2 = 0
+        let blobMaxDt = 0
+        let deepestIdx = -1
+        {
+          const ws2: number[] = []
+          for (let i2 = 0; i2 < w * h; i2++) {
+            blob[i2] = bl.labels[i2] === b2 ? 1 : 0
+            if (blob[i2]) {
+              if (wide[i2] > 0) ws2.push(wide[i2])
+              if (dt[i2] > blobMaxDt) {
+                blobMaxDt = dt[i2]
+                deepestIdx = i2
+              }
+            }
+          }
+          if (ws2.length) {
+            ws2.sort((x2, y2) => x2 - y2)
+            medianW2 = ws2[Math.floor(ws2.length / 2)]
+          }
+        }
+        // demand only as much depth as this blob's geometry allows — the
+        // stroke's ideal centre may sit just outside a rim-hugging blob, and
+        // a stone 1mm inside the material beats a hole in the lettering
+        const minDeep3 = Math.min(
+          holeMm / 2 + 0.1,
+          Math.max(0.3, medianW2 * 0.35),
+          Math.max(0.3, (blobMaxDt / pxPerMm) * 0.8),
+        )
+        const deep3 = (q: Pt) => {
+          const xi = Math.round(q.x * pxPerMm + padPx)
+          const yi = Math.round(q.y * pxPerMm + padPx)
+          if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+          return dt[yi * w + xi] / pxPerMm >= minDeep3
+        }
+        const inBlob = (q: Pt) => {
+          const xi = Math.round(q.x * pxPerMm + padPx)
+          const yi = Math.round(q.y * pxPerMm + padPx)
+          if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+          for (let dy2 = -2; dy2 <= 2; dy2++)
+            for (let dx2 = -2; dx2 <= 2; dx2++) {
+              const x2 = xi + dx2
+              const y2 = yi + dy2
+              if (x2 >= 0 && y2 >= 0 && x2 < w && y2 < h && blob[y2 * w + x2]) return true
+            }
+          return false
+        }
+        let placedAny2 = false
+        const paths2: Pt[][] = []
+        if (medianW2 >= pitch * 1.3) {
+          // the bare material is the RIM of a wide region — its stones belong
+          // ON the outline, so rescue along the merged boundary through the
+          // blob, never down the bare zone's own middle
+          for (const ct of mergedOutline) {
+            let run: Pt[] = []
+            const flush = () => {
+              if (run.length >= 2) paths2.push(run)
+              run = []
+            }
+            for (let k2 = 0; k2 < ct.length; k2++) {
+              if (inBlob(ct[k2])) run.push(ct[k2])
+              else flush()
+            }
+            flush()
+          }
+        } else {
+          const skel2 = skeletonize(blob, w, h)
+          paths2.push(...traceSkeleton(skel2, w, h).map((pp) => smoothPath(pp, 4).map(toMm)))
+        }
+        paths2.sort((a2, b3) => b3.length - a2.length)
+        const wallMode = medianW2 >= pitch * 1.3
+        for (const pth2 of paths2) {
+          let len2 = 0
+          for (let k2 = 1; k2 < pth2.length; k2++)
+            len2 += Math.hypot(pth2[k2].x - pth2[k2 - 1].x, pth2[k2].y - pth2[k2 - 1].y)
+          if (len2 < rhythm * 0.5 && pth2.length < 3) continue
+          const got2 = placeOpenEven(pth2, pitch, idx, rhythm).filter((q) => {
+            if (!wallMode && !deep3(q)) {
+              idx.remove(q)
+              return false
+            }
+            return true
+          })
+          if (got2.length) {
+            dbg('rescue', got2)
+            out.push(...got2)
+            placedAny2 = true
+          }
+        }
+        // a blob whose skeleton gave nothing still deserves ONE stone at its
+        // deepest point — every blob pixel clears the floor by construction
+        if (!placedAny2 && deepestIdx >= 0) {
+          const q3 = toMm({ x: deepestIdx % w, y: Math.floor(deepestIdx / w) })
+          if (idx.canPlace(q3)) {
+            idx.add(q3)
+            dbg('rescue', [q3])
+            out.push(q3)
+          }
+        }
+      }
+    }
+  }
 
   return out
 }
@@ -2989,9 +3231,14 @@ export function fillStones(
   gapMm: number,
   startInsetMm: number,
   idx: SpacingIndex,
-  fixedPts: Pt[] = [], // outline stones (already in idx)
+  fixedPts: Pt[] = [], // outline stones
   rhythmMm?: number,
   brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
+  outlineHoleMm?: number, // when given, fill-to-OUTLINE clearance uses the
+  // absolute 0.5mm template floor instead of the design gap. Checking the
+  // design gap against the outline made legality flicker with the walls'
+  // stagger — a fill row through a medium stroke broke wherever an outline
+  // stone sat directly across, though the stone physically fit.
 ): Pt[] {
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
@@ -3015,8 +3262,10 @@ export function fillStones(
   // samples that ripple as a column flickering in and out row by row. Filling
   // in each stone's gap to its nearest neighbours makes the boundary a smooth
   // offset, so a row is either there across a run or not there at all.
+  const outlineNeed =
+    outlineHoleMm != null ? outlineHoleMm / 2 + holeMm / 2 + 0.5 : idx.minDist
   if (fixedPts.length) {
-    const clear = idx.minDist * pxPerMm
+    const clear = outlineNeed * pxPerMm
     const stamp = (xMm: number, yMm: number, radiusPx: number) => {
       const cx = Math.round(xMm * pxPerMm + padPx)
       const cy = Math.round(yMm * pxPerMm + padPx)
@@ -3072,9 +3321,12 @@ export function fillStones(
           dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
       )
         continue
-      const rr = dv * dv
-      const val = (2 * dv) / pxPerMm
-      const r0 = Math.ceil(dv)
+      // capped like the outline's wide[]: the row/lattice/dot thresholds all
+      // sit under ~12mm of width, so bigger inscribed disks only cost time
+      const dvc = Math.min(dv, 7 * pxPerMm)
+      const rr = dvc * dvc
+      const val = (2 * dvc) / pxPerMm
+      const r0 = Math.ceil(dvc)
       for (let yy = Math.max(0, y - r0); yy <= Math.min(h - 1, y + r0); yy++) {
         const dy2 = yy - y
         const sp2 = Math.floor(Math.sqrt(Math.max(0, rr - dy2 * dy2)))
@@ -3091,11 +3343,15 @@ export function fillStones(
   const strokeCut = pitch * 3
   const fillComps = labelComponents(mask, w, h)
   const compRows = new Uint8Array(fillComps.count + 1) // 1 = centered-row territory
+  const compDot = new Uint8Array(fillComps.count + 1) // 1 = dot: one centred stone
   {
     const wsBy = new Map<number, number[]>()
+    const areaBy = new Int32Array(fillComps.count + 1)
     for (let i = 0; i < w * h; i++) {
       const lbl = fillComps.labels[i]
-      if (!lbl || strokeW[i] <= 0) continue
+      if (!lbl) continue
+      areaBy[lbl]++
+      if (strokeW[i] <= 0) continue
       let a = wsBy.get(lbl)
       if (!a) wsBy.set(lbl, (a = []))
       a.push(strokeW[i])
@@ -3104,6 +3360,31 @@ export function fillStones(
       ws.sort((a, b) => a - b)
       if (ws[Math.floor(ws.length * 0.9)] < strokeCut * 1.15) compRows[lbl] = 1
     }
+    // a fill area barely bigger than a stone or two, whose MATERIAL is itself
+    // a small blob — an i-dot, a period — is a DOT: a 2x2 lattice block in it
+    // reads as a dice face. The material test matters: small POCKETS of a
+    // stem's fill channel are fragments of a stroke, not dots, and keep their
+    // centered-row treatment.
+    const dotArea = (pitch * pxPerMm) ** 2 * 2.2
+    const mat = labelComponents(grid.bin, w, h)
+    const matArea = new Int32Array(mat.count + 1)
+    for (let i = 0; i < w * h; i++) if (mat.labels[i]) matArea[mat.labels[i]]++
+    const matOf = new Int32Array(fillComps.count + 1)
+    for (let i = 0; i < w * h; i++) {
+      const lbl = fillComps.labels[i]
+      if (lbl && !matOf[lbl]) matOf[lbl] = mat.labels[i]
+    }
+    const dotMatArea = (2.6 * pitch * pxPerMm) ** 2
+    for (let lbl = 1; lbl <= fillComps.count; lbl++)
+      if (
+        areaBy[lbl] > 0 &&
+        areaBy[lbl] < dotArea &&
+        matOf[lbl] > 0 &&
+        matArea[matOf[lbl]] < dotMatArea
+      ) {
+        compDot[lbl] = 1
+        compRows[lbl] = 0
+      }
   }
   const compAt = (xMm: number, yMm: number) => {
     const xi = Math.round(xMm * pxPerMm + padPx)
@@ -3171,10 +3452,10 @@ export function fillStones(
         // exact sag: at the pair's midpoint the stones themselves allow the
         // fill this close to the path line — the per-stone check above still
         // enforces the true pairwise minimum everywhere
-        segs.push({ a, b, need: Math.sqrt(Math.max(0, idx.minDist ** 2 - (d / 2) ** 2)) })
+        segs.push({ a, b, need: Math.sqrt(Math.max(0, outlineNeed ** 2 - (d / 2) ** 2)) })
   }
   const clearOfOutline = (p: Pt) => {
-    const need = idx.minDist - 1e-6
+    const need = outlineNeed - 1e-6
     for (const s of fixedPts)
       if (Math.hypot(p.x - s.x, p.y - s.y) < need) return false
     for (const { a, b, need: segNeed } of segs) {
@@ -3241,7 +3522,10 @@ export function fillStones(
         }
         const p = { x: xMm, y: yMm }
         if (dtAt(xMm, yMm) < minPx) continue
-        if (compRows[compAt(xMm, yMm)]) continue // stroke channel: centered row owns it
+        {
+          const lbl2 = compAt(xMm, yMm)
+          if (compRows[lbl2] || compDot[lbl2]) continue // rows/dots own these
+        }
         if (!clearOfOutline(p)) continue
         if (!idx.canPlace(p)) continue
         got.push(p)
@@ -3288,16 +3572,45 @@ export function fillStones(
   // the channel's own midline — exactly what a hand-set fill does there. Wide
   // regions never qualify (their skeleton is deep inside covered area), so
   // solid shapes keep the pure lattice.
+  const dotStones = new Set<Pt>()
   {
     const cm = new Uint8Array(w * h)
     for (let lbl = 1; lbl <= fillComps.count; lbl++) {
+      if (compDot[lbl]) {
+        // one stone, dead centre of the dot
+        let best = -1
+        let bestD = 0
+        for (let i = 0; i < w * h; i++)
+          if (fillComps.labels[i] === lbl && dt[i] > bestD) {
+            bestD = dt[i]
+            best = i
+          }
+        if (best >= 0) {
+          const q = { x: toMmX(best % w), y: toMmY(Math.floor(best / w)) }
+          if (clearOfOutline(q) && idx.canPlace(q)) {
+            idx.add(q)
+            out.push(q)
+            dotStones.add(q)
+          }
+        }
+        continue
+      }
       if (!compRows[lbl]) continue // lattice territory: no centered rows
       let area = 0
+      let deepest = -1
+      let deepD = 0
       for (let i = 0; i < w * h; i++) {
         cm[i] = fillComps.labels[i] === lbl ? 1 : 0
-        if (cm[i]) area++
+        if (cm[i]) {
+          area++
+          if (dt[i] > deepD) {
+            deepD = dt[i]
+            deepest = i
+          }
+        }
       }
       if (area < (pitch * pxPerMm) ** 2 * 0.25) continue
+      let rowPlaced = false
       const skel = skeletonize(cm, w, h)
       const paths = traceSkeleton(skel, w, h)
         .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
@@ -3319,7 +3632,19 @@ export function fillStones(
           if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
           return true
         })
+        if (got.length) rowPlaced = true
         out.push(...got)
+      }
+      // a channel whose skeleton yielded nothing — a note head's interior,
+      // too big for the dot rule, too small for a traceable path — still
+      // deserves its deepest-point stone rather than sitting hollow
+      if (!rowPlaced && deepest >= 0) {
+        const q = { x: toMmX(deepest % w), y: toMmY(Math.floor(deepest / w)) }
+        if (clearOfOutline(q) && idx.canPlace(q)) {
+          idx.add(q)
+          out.push(q)
+          dotStones.add(q)
+        }
       }
     }
   }
@@ -3330,9 +3655,13 @@ export function fillStones(
   // Except lonely stones: a fill stone with no fill neighbour nearby isn't
   // part of a pattern, it reads as a mistake. That happens when the strokes
   // are too light for a fill and only tiny pockets survive the edge inset.
+  // a dot's centre stone is DELIBERATELY alone — the ring around it is
+  // outline, not fill, so the lonely-stone cull must not eat it
   const near = rhythm * 1.6
-  const keep = out.filter((p) =>
-    out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
+  const keep = out.filter(
+    (p) =>
+      dotStones.has(p) ||
+      out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
   )
   return keep
 }
@@ -3360,6 +3689,7 @@ export function fillByGlyph(
   fixedPts: Pt[],
   rhythmMm: number,
   brick = false,
+  outlineHoleMm?: number,
 ): Pt[] {
   interface Group {
     minX: number
@@ -3410,8 +3740,8 @@ export function fillByGlyph(
     // That rejects every second lattice point and leaves the fill
     // checkerboarded, with obvious unfilled space inside every stroke.
     const localIdx = new SpacingIndex(idx.minDist, idx.gap, idx.defaultR)
-    for (const p of localFixed) localIdx.add(p, outlineR)
-    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick)
+    if (outlineHoleMm == null) for (const p of localFixed) localIdx.add(p, outlineR)
+    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick, outlineHoleMm)
     for (const p of placed) {
       const q = { x: p.x + ox, y: p.y + oy }
       // cross-glyph legality still enforced against the global index
