@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
@@ -42,6 +42,11 @@ function loadPresets(): MaterialPreset[] {
   } catch { /* fall through */ }
   return DEFAULT_PRESETS
 }
+
+// Zoom is px per mm. 100% = the design at true size on a 96-dpi screen.
+const PX_PER_MM_100 = 96 / 25.4
+const ZOOM_MIN = 0.4
+const ZOOM_MAX = 40
 
 export default function App() {
   const [stones, setStones] = useState<Stone[]>([])
@@ -832,10 +837,103 @@ export default function App() {
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
-    const ro = new ResizeObserver(() => setAvail({ w: el.clientWidth, h: el.clientHeight }))
+    const ro = new ResizeObserver(() => { measured.current = true; setAvail({ w: el.clientWidth, h: el.clientHeight }) })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  const measured = useRef(false)
+
+  // ---------- view: fit + zoom about a point ----------
+  // Every zoom change goes through setView so the point the user cares about
+  // (cursor, viewport centre, or the design) stays put on screen. The scroll
+  // target is applied in a layout effect: the canvas only takes its new size
+  // after React commits, and scrolling before that gets clamped to the old
+  // (smaller) canvas.
+  const barRef = useRef<HTMLDivElement>(null)
+  const zoomRef = useRef(zoom)
+  zoomRef.current = zoom
+  const pendingScroll = useRef<{ left: number; top: number } | null>(null)
+  const [viewTick, setViewTick] = useState(0)
+  useLayoutEffect(() => {
+    const el = wrapRef.current
+    const p = pendingScroll.current
+    if (!el || !p) return
+    pendingScroll.current = null
+    el.scrollLeft = p.left
+    el.scrollTop = p.top
+  }, [zoom, viewTick])
+  // Put mm point `at` under viewport pixel `screen` (measured from the
+  // top-left of the visible canvas, just below the zoom bar) at zoom z.
+  const setView = useCallback((z: number, at: Pt, screen: Pt) => {
+    const zc = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
+    pendingScroll.current = { left: at.x * zc - screen.x, top: at.y * zc - screen.y }
+    setZoom(zc)
+    setViewTick((t) => t + 1)
+  }, [])
+  const viewport = useCallback(() => {
+    const el = wrapRef.current
+    const bar = barRef.current?.offsetHeight ?? 36
+    return { el, bar, w: el?.clientWidth ?? 0, h: (el?.clientHeight ?? 0) - bar }
+  }, [])
+  // Zoom keeping whatever is in the middle of the viewport in the middle.
+  const zoomAbout = useCallback((z: number) => {
+    const { el, bar, w, h } = viewport()
+    if (!el) return
+    const z0 = zoomRef.current
+    const centre = { x: (el.scrollLeft + w / 2) / z0, y: (el.scrollTop - bar + h / 2) / z0 }
+    setView(z, centre, { x: w / 2, y: h / 2 })
+  }, [setView, viewport])
+  // Zoom so a mm rectangle fills the viewport, centred.
+  const fitRect = useCallback((x: number, y: number, w: number, h: number, pad = 32) => {
+    const v = viewport()
+    if (!v.el || w <= 0 || h <= 0) return
+    const z = Math.min((v.w - pad * 2) / w, (v.h - pad * 2) / h)
+    setView(z, { x: x + w / 2, y: y + h / 2 }, { x: v.w / 2, y: v.h / 2 })
+  }, [setView, viewport])
+  const fitSheet = useCallback(() => fitRect(0, 0, boardWmm, boardHmm), [fitRect, boardWmm, boardHmm])
+  const fitDesign = useCallback(() => {
+    if (!stones.length) { fitSheet(); return }
+    fitRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY, 48)
+  }, [stones.length, bbox, fitRect, fitSheet])
+  // Pinch / ⌘-wheel zooms about the cursor. Native listener: React's wheel
+  // handler can't reliably preventDefault, and the page would zoom instead.
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return // plain wheel pans
+      e.preventDefault()
+      const svg = svgRef.current
+      if (!svg) return
+      const r = svg.getBoundingClientRect()
+      const wr = el.getBoundingClientRect()
+      const bar = barRef.current?.offsetHeight ?? 36
+      const z0 = zoomRef.current
+      // trackpad pinch sends many small deltas, a wheel sends few big ones —
+      // an exponential step with a clamp feels the same from both
+      const step = Math.max(-30, Math.min(30, e.deltaY))
+      setView(
+        z0 * Math.exp(-step * 0.012),
+        { x: (e.clientX - r.left) / z0, y: (e.clientY - r.top) / z0 },
+        { x: e.clientX - wr.left, y: e.clientY - wr.top - bar },
+      )
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [setView])
+  // Opening the app shows the whole sheet; adding the first design zooms to
+  // it. Nobody should have to hunt for a 2-inch design on an 18-inch sheet.
+  const stoneCountRef = useRef(0)
+  useEffect(() => {
+    if (stones.length && !stoneCountRef.current) fitDesign()
+    stoneCountRef.current = stones.length
+  }, [stones.length, fitDesign])
+  const didInitialFit = useRef(false)
+  useEffect(() => {
+    if (didInitialFit.current || !measured.current) return
+    didInitialFit.current = true
+    if (stoneCountRef.current) fitDesign(); else fitSheet()
+  }, [avail, fitDesign, fitSheet])
   const drag = useRef<{ startX: number; startY: number; moved: boolean; orig: Stone[] } | null>(null)
   // marquee: drag over empty canvas in Select mode to box-select stones
   const marqueeRef = useRef<{ x0: number; y0: number; additive: boolean } | null>(null)
@@ -1014,10 +1112,14 @@ export default function App() {
         e.preventDefault()
         setSelection(new Set(stones.map((_, i) => i)))
       }
+      if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAbout(zoomRef.current * 1.25) }
+      if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomAbout(zoomRef.current / 1.25) }
+      if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); fitSheet() }
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'f' || e.key === 'F')) fitDesign()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -1763,6 +1865,7 @@ export default function App() {
             >Clear all</button>
           </div>
           <p className="hint">Click = select · shift-click = multi · drag empty space = box select · double-click = select whole design · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
+          <p className="hint">Pinch or ⌘-scroll = zoom at the cursor · F = fit design · ⌘0 = fit sheet · ⌘+ / ⌘− = zoom.</p>
         </Section>
 
         <Section title="Material">
@@ -1903,11 +2006,22 @@ export default function App() {
         </Section>
       </aside>
 
-      <main className="canvas-wrap" ref={wrapRef}
-        onWheel={(e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); setZoom((z) => Math.min(30, Math.max(1.5, z * (e.deltaY < 0 ? 1.1 : 0.9)))) } }}>
-        <div className="zoombar">
-          <input type="range" min={1.5} max={30} step={0.5} value={zoom} onChange={(e) => setZoom(+e.target.value)} />
-          <span>{zoom.toFixed(1)} px/mm</span>
+      <main className="canvas-wrap" ref={wrapRef}>
+        <div className="zoombar" ref={barRef}>
+          <button className="zbtn" title="Zoom out (⌘−)" onClick={() => zoomAbout(zoom / 1.25)}>−</button>
+          <input
+            type="range"
+            min={Math.log(ZOOM_MIN)}
+            max={Math.log(ZOOM_MAX)}
+            step={0.01}
+            value={Math.log(zoom)}
+            onChange={(e) => zoomAbout(Math.exp(+e.target.value))}
+          />
+          <button className="zbtn" title="Zoom in (⌘+)" onClick={() => zoomAbout(zoom * 1.25)}>+</button>
+          <span className="zpct">{Math.round((zoom / PX_PER_MM_100) * 100)}%</span>
+          <button className="zbtn" disabled={!stones.length} title="Zoom to the design (F)" onClick={fitDesign}>Fit design</button>
+          <button className="zbtn" title="Show the whole sheet (⌘0)" onClick={fitSheet}>Fit sheet</button>
+          <button className="zbtn" title="Actual size" onClick={() => zoomAbout(PX_PER_MM_100)}>1:1</button>
           <span style={{ marginLeft: 12 }}>Artboard</span>
           <input
             type="number"
