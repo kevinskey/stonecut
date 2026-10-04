@@ -43,6 +43,14 @@ function loadPresets(): MaterialPreset[] {
   return DEFAULT_PRESETS
 }
 
+// Maximum cutting width per CE6000 model (Graphtec datasheet: 375 / 603 /
+// 1213 mm). The board is the LOADED media, so these only seed the width.
+const PLOTTERS: { id: string; name: string; cutIn: number }[] = [
+  { id: 'ce6000-40', name: 'CE6000-40', cutIn: 14.75 },
+  { id: 'ce6000-60', name: 'CE6000-60', cutIn: 23.75 },
+  { id: 'ce6000-120', name: 'CE6000-120', cutIn: 47.75 },
+]
+
 // Zoom is px per mm. 100% = the design at true size on a 96-dpi screen.
 const PX_PER_MM_100 = 96 / 25.4
 const ZOOM_MIN = 0.4
@@ -87,12 +95,12 @@ export default function App() {
   // the machine origin); 'artboard' keeps the stones where they sit on the
   // sheet, so what you positioned on the page is what gets cut.
   const [placement, setPlacement] = useState<'design' | 'artboard'>(
-    () => (localStorage.getItem('stonecut.placement') === 'artboard' ? 'artboard' : 'design'),
+    () => (localStorage.getItem('stonecut.placement') === 'design' ? 'design' : 'artboard'),
   )
   useEffect(() => { localStorage.setItem('stonecut.placement', placement) }, [placement])
   // Graphtec carriages home to the right, so 'br' is the common CE6000 setup.
   const [originCorner, setOriginCorner] = useState<OriginCorner>(
-    () => (localStorage.getItem('stonecut.origin') === 'br' ? 'br' : 'bl'),
+    () => (localStorage.getItem('stonecut.origin') === 'bl' ? 'bl' : 'br'),
   )
   useEffect(() => { localStorage.setItem('stonecut.origin', originCorner) }, [originCorner])
   // Must match MENU -> I/F -> STEP SIZE on the machine, or the job is scaled.
@@ -103,9 +111,10 @@ export default function App() {
   const [sendConditions, setSendConditions] = useState(
     () => localStorage.getItem('stonecut.sendcond') === '1',
   )
-  // Graphtec's first coordinate is the media-feed axis. Whether that is the
-  // model's X or Y is a machine convention, so it has to be selectable.
-  const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') === '1')
+  // Graphtec's first coordinate is the media-feed axis. The board is drawn
+  // with feed running up the screen (model Y), so swapped is the correct
+  // default; the toggle stays for a machine whose axes have been rotated.
+  const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') !== '0')
   useEffect(() => { localStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
   useEffect(() => { localStorage.setItem('stonecut.sendcond', sendConditions ? '1' : '0') }, [sendConditions])
   const boardWmm = boardWIn * 25.4
@@ -375,6 +384,24 @@ export default function App() {
     placement === 'artboard' &&
     stones.length > 0 &&
     (bbox.minX < 0 || bbox.minY < 0 || bbox.maxX > boardWmm || bbox.maxY > boardHmm)
+
+  // Where the design sits relative to the machine's ORIGIN corner, in inches:
+  // `across` along the carriage, `feed` up the media. This is what the
+  // operator can measure on the cutter, so it is what the inputs speak.
+  const fromOrigin = useMemo(() => {
+    if (!stones.length) return null
+    const acrossMm = originCorner === 'br' ? boardWmm - bbox.maxX : bbox.minX
+    const feedMm = boardHmm - bbox.maxY
+    return { across: acrossMm / 25.4, feed: feedMm / 25.4 }
+  }, [stones.length, bbox, originCorner, boardWmm, boardHmm])
+  const placeFromOrigin = useCallback((acrossIn: number, feedIn: number) => {
+    if (!fromOrigin) return
+    const dAcross = (acrossIn - fromOrigin.across) * 25.4
+    const dx = originCorner === 'br' ? -dAcross : dAcross
+    const dy = -(feedIn - fromOrigin.feed) * 25.4
+    if (!dx && !dy) return
+    mutate((prev) => prev.map((s) => ({ ...s, x: s.x + dx, y: s.y + dy })))
+  }, [fromOrigin, originCorner, mutate])
 
   // live text preview: sample the selected font before committing stones
   const textPreview = useMemo(() => {
@@ -1364,7 +1391,10 @@ export default function App() {
           {pending > 0 && (
             <div><b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b></div>
           )}
-          <div>{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
+          <div>
+            {status} · {stones.length} stones{stones.length > 0 && ` · ${((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}×${((bbox.maxY - bbox.minY) / 25.4).toFixed(2)} in`}
+            {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
+          </div>
         </div>
 
 
@@ -1944,8 +1974,8 @@ export default function App() {
           </p>
           <label>Position on material
             <select value={placement} onChange={(e) => setPlacement(e.target.value as typeof placement)}>
-              <option value="design">Design edge — always cut from the origin</option>
-              <option value="artboard">Artboard — cut where I placed it on the page</option>
+              <option value="artboard">On the board — cut exactly where it sits on the media</option>
+              <option value="design">From the origin — ignore the board, cut at the origin corner</option>
             </select>
           </label>
           {placement === 'design' ? (
@@ -1967,13 +1997,39 @@ export default function App() {
               </p>
             </>
           ) : (
-            <p className="hint">
-              The whole {boardWIn}″ × {boardHIn}″ sheet is the job — the machine travels to
-              wherever the design sits on it. Jog to the artboard's{' '}
-              <b>lower-{originCorner === 'br' ? 'RIGHT' : 'LEFT'}</b> corner, press ORIGIN, and
-              keep the design near that corner: art at the far edge of a {boardHIn}″ sheet makes
-              the cutter feed {boardHIn}″ of material before it cuts anything.
-            </p>
+            <>
+              {fromOrigin && (
+                <div className="toolrow">
+                  <label>Across from origin (in)
+                    <input
+                      key={`a${fromOrigin.across.toFixed(3)}`}
+                      type="number"
+                      step={0.125}
+                      defaultValue={fromOrigin.across.toFixed(2)}
+                      onBlur={(e) => placeFromOrigin(+e.target.value || 0, fromOrigin.feed)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                    />
+                  </label>
+                  <label>Up from origin (in)
+                    <input
+                      key={`f${fromOrigin.feed.toFixed(3)}`}
+                      type="number"
+                      step={0.125}
+                      defaultValue={fromOrigin.feed.toFixed(2)}
+                      onBlur={(e) => placeFromOrigin(fromOrigin.across, +e.target.value || 0)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                    />
+                  </label>
+                </div>
+              )}
+              <p className="hint">
+                The board is your loaded media, {boardWIn}″ across × {boardHIn}″ of length, ruled
+                from the machine's <b>lower-{originCorner === 'br' ? 'RIGHT' : 'LEFT'}</b> corner.
+                Jog the blade to that corner of the vinyl, press ORIGIN, and the design cuts exactly
+                where it sits on the board — the numbers above are what you'd measure with a ruler.
+                The further up the board it sits, the more media feeds before the first cut.
+              </p>
+            </>
           )}
           {offBoard && (
             <p className="hint" style={{ color: '#f0b95e' }}>
@@ -2022,12 +2078,21 @@ export default function App() {
           <button className="zbtn" disabled={!stones.length} title="Zoom to the design (F)" onClick={fitDesign}>Fit design</button>
           <button className="zbtn" title="Show the whole sheet (⌘0)" onClick={fitSheet}>Fit sheet</button>
           <button className="zbtn" title="Actual size" onClick={() => zoomAbout(PX_PER_MM_100)}>1:1</button>
-          <span style={{ marginLeft: 12 }}>Artboard</span>
+          <span style={{ marginLeft: 12 }}>Plotter</span>
+          <select
+            value={PLOTTERS.find((p) => p.cutIn === boardWIn)?.id ?? 'custom'}
+            onChange={(e) => { const p = PLOTTERS.find((q) => q.id === e.target.value); if (p) setBoardWIn(p.cutIn) }}
+            style={{ width: 'auto' }}
+          >
+            {PLOTTERS.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.cutIn}″ wide</option>)}
+            <option value="custom">Custom width</option>
+          </select>
+          <span title="Width of the loaded media between the pinch rollers, and how much length is loaded">Media</span>
           <input
             type="number"
             min={1}
             max={60}
-            step={0.5}
+            step={0.25}
             value={boardWIn}
             onChange={(e) => setBoardWIn(Math.max(1, +e.target.value || 1))}
             style={{ width: 54 }}
@@ -2069,49 +2134,51 @@ export default function App() {
             <pattern id="grid" width={10 * zoom} height={10 * zoom} patternUnits="userSpaceOnUse">
               <path d={`M ${10 * zoom} 0 L 0 0 0 ${10 * zoom}`} fill="none" stroke="#2a2f3a" strokeWidth="1" />
             </pattern>
+            <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0,0 L8,4 L0,8 z" fill="#f0b95e" />
+            </marker>
           </defs>
           <rect width="100%" height="100%" fill="url(#grid)" />
-          {/* artboard: the physical sheet at true scale, ruled in inches */}
+          {/* The board is the plotter's cutting area at true scale: the
+              loaded media, ruled in inches FROM THE MACHINE'S ORIGIN CORNER,
+              feed running up the screen. What you see is where it cuts. */}
           <g pointerEvents="none">
-            <rect
-              x={0}
-              y={0}
-              width={boardWmm * zoom}
-              height={boardHmm * zoom}
-              fill="#ffffff"
-              fillOpacity={0.035}
-              stroke="#7789ad"
-              strokeWidth={1.5}
-            />
-            {Array.from({ length: Math.max(0, Math.floor(boardWIn) - (Number.isInteger(boardWIn) ? 1 : 0)) }, (_, k) => k + 1).map((i) => (
-              <g key={`v${i}`}>
-                <line
-                  x1={i * 25.4 * zoom}
-                  y1={0}
-                  x2={i * 25.4 * zoom}
-                  y2={boardHmm * zoom}
-                  stroke="#3d4863"
-                  strokeWidth={1}
-                />
-                <text x={i * 25.4 * zoom + 3} y={12} fill="#8b97b5" fontSize={10}>{i}"</text>
-              </g>
-            ))}
-            {Array.from({ length: Math.max(0, Math.floor(boardHIn) - (Number.isInteger(boardHIn) ? 1 : 0)) }, (_, k) => k + 1).map((i) => (
-              <g key={`h${i}`}>
-                <line
-                  x1={0}
-                  y1={i * 25.4 * zoom}
-                  x2={boardWmm * zoom}
-                  y2={i * 25.4 * zoom}
-                  stroke="#3d4863"
-                  strokeWidth={1}
-                />
-                <text x={3} y={i * 25.4 * zoom - 3} fill="#8b97b5" fontSize={10}>{i}"</text>
-              </g>
-            ))}
-            <text x={boardWmm * zoom - 4} y={boardHmm * zoom - 6} fill="#7789ad" fontSize={11} textAnchor="end">
-              {boardWIn}" × {boardHIn}"
-            </text>
+            {(() => {
+              const W = boardWmm * zoom, H = boardHmm * zoom, inch = 25.4 * zoom
+              const right = originCorner === 'br'
+              const ox = right ? W : 0 // origin x on screen; carriage runs away from it
+              const dir = right ? -1 : 1
+              const cols = Math.max(0, Math.ceil(boardWIn) - 1)
+              const rows = Math.max(0, Math.ceil(boardHIn) - 1)
+              return (
+                <>
+                  <rect x={0} y={0} width={W} height={H} fill="#ffffff" fillOpacity={0.035} stroke="#7789ad" strokeWidth={1.5} />
+                  {Array.from({ length: cols }, (_, k) => k + 1).map((i) => (
+                    <g key={`v${i}`}>
+                      <line x1={ox + dir * i * inch} y1={0} x2={ox + dir * i * inch} y2={H} stroke="#3d4863" strokeWidth={1} />
+                      <text x={ox + dir * i * inch + (right ? 3 : -3)} y={H - 4} fill="#8b97b5" fontSize={10} textAnchor={right ? 'start' : 'end'}>{i}"</text>
+                    </g>
+                  ))}
+                  {Array.from({ length: rows }, (_, k) => k + 1).map((i) => (
+                    <g key={`h${i}`}>
+                      <line x1={0} y1={H - i * inch} x2={W} y2={H - i * inch} stroke="#3d4863" strokeWidth={1} />
+                      <text x={right ? W - 3 : 3} y={H - i * inch + 11} fill="#8b97b5" fontSize={10} textAnchor={right ? 'end' : 'start'}>{i}"</text>
+                    </g>
+                  ))}
+                  {/* origin corner + axes, drawn the way the operator sees the machine */}
+                  <circle cx={ox} cy={H} r={5} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
+                  <text x={ox + dir * 28} y={H - 40} fill="#f0b95e" fontSize={10} fontWeight={700} textAnchor={right ? 'end' : 'start'}>ORIGIN</text>
+                  {/* axes sit inboard of the ruler labels so neither hides the other */}
+                  <line x1={ox + dir * 28} y1={H - 52} x2={ox + dir * 28} y2={H - 112} stroke="#f0b95e" strokeWidth={1.5} markerEnd="url(#arrow)" />
+                  <text x={ox + dir * 34} y={H - 60} fill="#f0b95e" fontSize={10} textAnchor={right ? 'end' : 'start'}>feed ↑ into machine</text>
+                  <line x1={ox + dir * 40} y1={H - 28} x2={ox + dir * 100} y2={H - 28} stroke="#f0b95e" strokeWidth={1.5} markerEnd="url(#arrow)" />
+                  <text x={ox + dir * 106} y={H - 24} fill="#f0b95e" fontSize={10} textAnchor={right ? 'end' : 'start'}>carriage</text>
+                  <text x={right ? 4 : W - 4} y={12} fill="#7789ad" fontSize={11} textAnchor={right ? 'start' : 'end'}>
+                    media {boardWIn}" × {boardHIn}" · origin lower-{right ? 'right' : 'left'}
+                  </text>
+                </>
+              )
+            })()}
           </g>
           {marquee && (
             <rect
