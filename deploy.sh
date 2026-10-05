@@ -31,7 +31,8 @@ fi
 [ -f dist/index.html ] || { echo "!! no dist/index.html after build"; exit 1; }
 
 # nginx config files hold several server blocks; parse by block so the main
-# tshirtbrothers root is never mistaken for the StoneCut one.
+# tshirtbrothers root is never mistaken for the StoneCut one. `nginx -T`
+# dumps the whole effective config wherever the vhost file actually lives.
 find_root() {
   awk -v host="$HOST" '
     /server[[:space:]]*\{/ && depth == 0 { inblk = 1; blk = "" }
@@ -48,15 +49,28 @@ find_root() {
         }
         inblk = 0
       }
-    }' "$1"
+    }'
 }
-DOCROOT=""
-for f in $(grep -rl "$HOST" /etc/nginx/sites-enabled /etc/nginx/conf.d 2>/dev/null || true); do
-  DOCROOT="$(find_root "$f")"
-  [ -n "$DOCROOT" ] && break
-done
+DOCROOT="$(nginx -T 2>/dev/null | find_root || true)"
 if [ -z "$DOCROOT" ]; then
-  DOCROOT="$(grep -rl --include=index.html '<title>StoneCut' /var/www 2>/dev/null | head -1 | xargs -r dirname || true)"
+  for f in $(grep -rl "$HOST" /etc/nginx 2>/dev/null || true); do
+    DOCROOT="$(find_root < "$f")"
+    [ -n "$DOCROOT" ] && break
+  done
+fi
+if [ -z "$DOCROOT" ]; then
+  # fallback: a deployed StoneCut index.html, anywhere nginx is likely to
+  # serve from, that is not our own clone
+  CANDIDATES="$(grep -rli --include=index.html '<title>stonecut</title>' /var/www /srv /home /opt /usr/share/nginx 2>/dev/null | grep -v "^$SRC/" || true)"
+  [ -n "$CANDIDATES" ] && echo "==> index.html candidates:" && echo "$CANDIDATES"
+  DOCROOT="$(echo "$CANDIDATES" | head -1 | xargs -r dirname || true)"
+fi
+if [ -z "$DOCROOT" ]; then
+  echo "!! could not find the nginx root for $HOST. Diagnostics:"
+  echo "--- nginx -T mentions of the host:"; nginx -T 2>/dev/null | grep -n -i "rhinestones\|server_name\|root " | head -40
+  echo "--- /etc/nginx layout:"; ls -la /etc/nginx /etc/nginx/sites-enabled /etc/nginx/conf.d 2>&1 | head -40
+  echo "--- /var/www:"; ls -la /var/www 2>&1
+  exit 1
 fi
 case "$DOCROOT" in
   ""|/|/var/www|/var/www/tshirtbrothers|/var/www/tshirtbrothers/*|"$SRC"|"$SRC"/*)
