@@ -12,10 +12,30 @@
   width: 300px;
   min-width: 300px;
   overflow-y: auto;
-  padding: 14px 16px 40px;
+  padding: 14px 16px 0;
   background: #191d27;
   border-right: 1px solid #262c3a;
+  display: flex;
+  flex-direction: column;
 }
+.panel > * { flex-shrink: 0; }
+
+/* The Cut button rides the bottom of the sidebar whatever is open above it. */
+.cutbar {
+  position: sticky;
+  bottom: 0;
+  margin: auto -16px 0;
+  padding: 10px 16px 12px;
+  background: #191d27;
+  border-top: 1px solid #262c3a;
+  box-shadow: 0 -8px 16px -8px #0009;
+  z-index: 3;
+}
+.cutbar button { margin-top: 0; }
+.cutbar-meta { margin-top: 6px; font-size: 11px; color: #8b96ab; text-align: center; }
+
+details.sec.sub { margin-top: 8px; border-top: 1px dashed #2b3240; }
+details.sec.sub summary { font-size: 11px; letter-spacing: 0.8px; color: #6f7a93; padding: 8px 0 6px; }
 
 .panel h1 {
   margin: 0 0 4px;
@@ -304,9 +324,12 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   font-size: 11px;
   color: #8b96ab;
 }
+.zoombar { flex-wrap: wrap; row-gap: 6px; }
 .zoombar input[type="range"] { width: 140px; margin: 0; }
+.zoombar select { width: auto; margin: 0; padding: 3px 6px; font-size: 11px; }
 .zoombar .zbtn {
   width: auto;
+  white-space: nowrap;
   margin: 0;
   padding: 4px 9px;
   font-size: 11px;

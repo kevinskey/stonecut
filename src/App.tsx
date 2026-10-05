@@ -1913,12 +1913,6 @@ export default function App() {
         </Section>
 
         <Section title="Cut">
-          <label>Command mode
-            <select value={format} onChange={(e) => setFormat(e.target.value as 'gpgl' | 'hpgl')}>
-              <option value="gpgl">GP-GL (CE6000 factory default)</option>
-              <option value="hpgl">HP-GL (if COMMAND menu set to HP-GL)</option>
-            </select>
-          </label>
           <label>Layer
             <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value as typeof cutLayer)}>
               <option value="all">All stones ({stones.length})</option>
@@ -1931,47 +1925,6 @@ export default function App() {
               Layers share one frame — cut each on its own sheet and they line up when stacked.
             </p>
           )}
-          {format === 'gpgl' && (
-            <>
-              <label className="row">
-                <input type="checkbox" checked={swapAxes}
-                  onChange={(e) => setSwapAxes(e.target.checked)} />
-                {' '}Swap axes (feed axis is the model's Y)
-              </label>
-              <label className="row">
-                <input type="checkbox" checked={sendConditions}
-                  onChange={(e) => setSendConditions(e.target.checked)} />
-                {' '}Send speed/force from the app
-              </label>
-              <p className="hint">
-                Off (recommended): the cutter uses its own panel conditions and the job is pure
-                geometry. On: sends <code>!speed</code> and <code>*accel,force</code> — only
-                honoured if TOOLS SETTING → CONDITION PRIORITY is PROGRAM.
-              </p>
-              <label>GP-GL step size (must match the machine)
-                <select value={gpStep} onChange={(e) => setGpStep(+e.target.value)}>
-                  <option value={10}>0.100 mm — 254 steps/inch</option>
-                  <option value={20}>0.050 mm — 508 steps/inch</option>
-                  <option value={40}>0.025 mm — 1016 steps/inch</option>
-                  <option value={100}>0.010 mm — 2540 steps/inch</option>
-                </select>
-              </label>
-              <p className="hint">
-                MENU → I/F → STEP SIZE on the CE6000. A mismatch scales the whole job with no
-                error — 0.100 mm sent as 0.050 mm cuts everything at double size.
-              </p>
-            </>
-          )}
-          <label>Cutter origin corner
-            <select value={originCorner} onChange={(e) => setOriginCorner(e.target.value as OriginCorner)}>
-              <option value="bl">Lower-LEFT of the material</option>
-              <option value="br">Lower-RIGHT of the material (Graphtec default)</option>
-            </select>
-          </label>
-          <p className="hint">
-            Where you press ORIGIN on the machine. Graphtec carriages home to the right — if the
-            job feeds a long way before cutting, this is set to the wrong side.
-          </p>
           <label>Position on material
             <select value={placement} onChange={(e) => setPlacement(e.target.value as typeof placement)}>
               <option value="artboard">On the board — cut exactly where it sits on the media</option>
@@ -2037,7 +1990,62 @@ export default function App() {
               will clip whatever falls off the sheet. Move it back inside, or enlarge the artboard.
             </p>
           )}
-          <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <div className="toolrow">
+            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+          </div>
+          {/* Machine-level settings change once per cutter, not per job, so they
+              stay folded: the Cut button must never be a screen away. */}
+          <details className="sec sub">
+            <summary>Cutter setup</summary>
+            <div className="sec-body">
+          <label>Command mode
+            <select value={format} onChange={(e) => setFormat(e.target.value as 'gpgl' | 'hpgl')}>
+              <option value="gpgl">GP-GL (CE6000 factory default)</option>
+              <option value="hpgl">HP-GL (if COMMAND menu set to HP-GL)</option>
+            </select>
+          </label>
+          {format === 'gpgl' && (
+            <>
+              <label className="row">
+                <input type="checkbox" checked={swapAxes}
+                  onChange={(e) => setSwapAxes(e.target.checked)} />
+                {' '}Swap axes (feed axis is the model's Y)
+              </label>
+              <label className="row">
+                <input type="checkbox" checked={sendConditions}
+                  onChange={(e) => setSendConditions(e.target.checked)} />
+                {' '}Send speed/force from the app
+              </label>
+              <p className="hint">
+                Off (recommended): the cutter uses its own panel conditions and the job is pure
+                geometry. On: sends <code>!speed</code> and <code>*accel,force</code> — only
+                honoured if TOOLS SETTING → CONDITION PRIORITY is PROGRAM.
+              </p>
+              <label>GP-GL step size (must match the machine)
+                <select value={gpStep} onChange={(e) => setGpStep(+e.target.value)}>
+                  <option value={10}>0.100 mm — 254 steps/inch</option>
+                  <option value={20}>0.050 mm — 508 steps/inch</option>
+                  <option value={40}>0.025 mm — 1016 steps/inch</option>
+                  <option value={100}>0.010 mm — 2540 steps/inch</option>
+                </select>
+              </label>
+              <p className="hint">
+                MENU → I/F → STEP SIZE on the CE6000. A mismatch scales the whole job with no
+                error — 0.100 mm sent as 0.050 mm cuts everything at double size.
+              </p>
+            </>
+          )}
+          <label>Cutter origin corner
+            <select value={originCorner} onChange={(e) => setOriginCorner(e.target.value as OriginCorner)}>
+              <option value="bl">Lower-LEFT of the material</option>
+              <option value="br">Lower-RIGHT of the material (Graphtec default)</option>
+            </select>
+          </label>
+          <p className="hint">
+            Where you press ORIGIN on the machine. Graphtec carriages home to the right — if the
+            job feeds a long way before cutting, this is set to the wrong side.
+          </p>
           <p className="hint" style={{ marginTop: 10 }}>
             Diagnostic: a bare <b>L</b> (20 mm tall, 10 mm foot) 2 mm from the origin — nothing
             but M and D. Asymmetric on purpose: how the L comes out tells you the axis mapping
@@ -2055,11 +2063,16 @@ export default function App() {
             }}>Send test square</button>
             <button onClick={() => download('stonecut-testshape.plt', gpglTestShape(gpStep, 2, swapAxes))}>Download it</button>
           </div>
-          <div className="toolrow">
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
-          </div>
+            </div>
+          </details>
         </Section>
+        <div className="cutbar">
+          <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <div className="cutbar-meta">
+            {cutJob.stones.length ? `${cutJob.stones.length} stones` : 'add a design to cut'}
+            {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
+          </div>
+        </div>
       </aside>
 
       <main className="canvas-wrap" ref={wrapRef}>
