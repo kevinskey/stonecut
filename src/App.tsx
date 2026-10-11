@@ -585,9 +585,15 @@ export default function App() {
   const pendingText = previewLive ? previewStones?.length ?? 0 : 0
   const pendingImage = imagePreview?.length ?? 0
   const pending = pendingText + pendingImage
+  // A change to the TEXT itself (words, font, height, spacing) is a new
+  // design: show the preview again. Stone/fill setting changes are handled
+  // further down — they re-stone the design already on the board instead.
   useEffect(() => {
     setPreviewLive(true)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, fontOpen, pinPreviewBase])
+  // The last text commit, so stone-setting changes can regenerate it in
+  // place while its text is untouched (same idea as the image regen).
+  const lastTextRef = useRef<{ el: number; font: unknown; text: string; height: number; spacing: number } | null>(null)
   useEffect(() => {
     if (!textPreview) {
       setPreviewStones(null)
@@ -809,6 +815,7 @@ export default function App() {
       const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
       mutate((prev) => [...prev, ...fresh])
       if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
+      return el
     },
     [curSize, gap, mutate, sizes],
   )
@@ -865,7 +872,8 @@ export default function App() {
     // commit exactly where the preview showed; release the pin so the next
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
-    addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
+    const el = addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
+    lastTextRef.current = { el, font, text, height: textHeight, spacing: letterSpacing }
     setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
@@ -1191,7 +1199,7 @@ export default function App() {
   // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
   // side(s) opposite `handle` stay where `box` had them.
   const regenElement = useCallback(
-    (el: number, sx: number, sy: number, box: Box, handle: Handle) => {
+    (el: number, sx: number, sy: number, box: Box, handle: Handle, select = true) => {
       const r = elementsRef.current[el]
       if (!r) return
       const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * sx, y: q.y * sy })))
@@ -1211,12 +1219,43 @@ export default function App() {
       const next = [...base, ...fresh]
       stonesRef.current = next
       setStones(next)
-      setSelection(new Set(fresh.map((_, i) => base.length + i)))
+      if (select) setSelection(new Set(fresh.map((_, i) => base.length + i)))
       setElements((prev) => ({ ...prev, [el]: { ...prev[el], sx, sy } }))
       setStatus(`${fresh.length} stones at ${w.toFixed(0)} × ${h.toFixed(0)} mm`)
     },
     [contoursToStones, sizes, curSize],
   )
+  // Stone / fill setting changes: if the last text commit is still on the
+  // board with its text unchanged, re-stone THAT design in place (same
+  // size, new stones). Otherwise the change applies to the live preview.
+  // Before this, every size change popped a second copy of the text below
+  // the one already added, which read as "it creates a new graphic".
+  const settingsTick = useRef(0)
+  useEffect(() => {
+    if (settingsTick.current++ === 0) return // mount
+    const last = lastTextRef.current
+    const r = last && elementsRef.current[last.el]
+    const alive = !!r && stonesRef.current.some((st) => st.el === last!.el)
+    const sameText = !!last && last.font === font && last.text === text && last.height === textHeight && last.spacing === letterSpacing
+    if (!alive || !sameText || !r) { setPreviewLive(true); return }
+    const t = window.setTimeout(() => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const st of stonesRef.current) {
+        if (st.el !== last!.el) continue
+        const rad = holeOf(st) / 2
+        minX = Math.min(minX, st.x - rad); minY = Math.min(minY, st.y - rad)
+        maxX = Math.max(maxX, st.x + rad); maxY = Math.max(maxY, st.y + rad)
+      }
+      if (!isFinite(minX)) return
+      // the recipe keeps the text's mode in sync with the panel
+      elementsRef.current[last!.el] = { ...r, mode: textMode }
+      setElements((prev) => ({ ...prev, [last!.el]: { ...prev[last!.el], mode: textMode } }))
+      regenElement(last!.el, r.sx, r.sy, { minX, minY, maxX, maxY }, 'nw', false)
+    }, 250)
+    return () => window.clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, strokePolicy])
+
   // Typed size from the sidebar: uniform, anchored top-left.
   const resizeSelectedTo = useCallback(
     (widthMm: number | null, heightMm: number | null) => {
