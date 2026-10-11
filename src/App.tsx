@@ -106,17 +106,19 @@ export default function App() {
   // Must match MENU -> I/F -> STEP SIZE on the machine, or the job is scaled.
   const [gpStep, setGpStep] = useState(() => +(localStorage.getItem('stonecut.gpstep') ?? 20) || 20)
   useEffect(() => { localStorage.setItem('stonecut.gpstep', String(gpStep)) }, [gpStep])
-  // Off by default: the machine uses its own panel conditions unless
-  // CONDITION PRIORITY is set to PROGRAM.
+  // On by default: the app sends the preset's speed and force ahead of the
+  // geometry. The machine only honours them when TOOLS SETTING ->
+  // CONDITION PRIORITY is PROGRAM; otherwise the panel conditions still win.
+  // New storage key so browsers that saved the old off-default flip to on.
   const [sendConditions, setSendConditions] = useState(
-    () => localStorage.getItem('stonecut.sendcond') === '1',
+    () => localStorage.getItem('stonecut.sendcond2') !== '0',
   )
   // Graphtec's first coordinate is the media-feed axis. The board is drawn
   // with feed running up the screen (model Y), so swapped is the correct
   // default; the toggle stays for a machine whose axes have been rotated.
   const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') !== '0')
   useEffect(() => { localStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
-  useEffect(() => { localStorage.setItem('stonecut.sendcond', sendConditions ? '1' : '0') }, [sendConditions])
+  useEffect(() => { localStorage.setItem('stonecut.sendcond2', sendConditions ? '1' : '0') }, [sendConditions])
   const boardWmm = boardWIn * 25.4
   const boardHmm = boardHIn * 25.4
   const [status, setStatus] = useState('Ready')
@@ -2018,9 +2020,10 @@ export default function App() {
                 {' '}Send speed/force from the app
               </label>
               <p className="hint">
-                Off (recommended): the cutter uses its own panel conditions and the job is pure
-                geometry. On: sends <code>!speed</code> and <code>*accel,force</code> — only
-                honoured if TOOLS SETTING → CONDITION PRIORITY is PROGRAM.
+                On (default): sends the material preset's <code>!speed</code> and
+                <code>*accel,force</code> ahead of the geometry. The cutter only honours them
+                when TOOLS SETTING → CONDITION PRIORITY is PROGRAM. Off: pure geometry, the
+                panel conditions are used.
               </p>
               <label>GP-GL step size (must match the machine)
                 <select value={gpStep} onChange={(e) => setGpStep(+e.target.value)}>

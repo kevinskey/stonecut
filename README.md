@@ -49,7 +49,7 @@ for a fresh browser:
 | GP-GL step size | 0.050 mm (20 units/mm) — must match MENU → I/F → STEP SIZE |
 | Cutter origin corner | Lower-RIGHT |
 | Swap axes | ON (GP-GL's first coordinate is the feed axis = the board's vertical) |
-| Send speed/force | OFF (the panel conditions are the source of truth) |
+| Send speed/force | ON (the material preset's force/speed go ahead of the geometry; set TOOLS SETTING → CONDITION PRIORITY → PROGRAM on the cutter or the panel values still win) |
 | Position on material | On the board |
 
 - If a job **feeds media before cutting**, it is the data stream, not the

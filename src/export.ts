@@ -106,9 +106,9 @@ export function toGPGL(
   //              at the head of every single job.
   // Per the Graphtec GP-GL reference: speed is '!l', force/acceleration is
   // '*a,f'. Acceleration 2 is a safe mid-range default for a cutting head.
-  // Default: send NO conditions at all — geometry only. The CE6000 ignores
+  // Conditions are sent by default (App.tsx). The CE6000 ignores
   // program conditions unless TOOLS SETTING -> CONDITION PRIORITY is PROGRAM,
-  // so the panel is normally the source of truth, and a malformed condition
+  // in which case the panel is the source of truth. The toggle stays because a malformed condition
   // command is far more dangerous than a missing one.
   const cmds: string[] = sendConditions
     ? [`!${preset.speed}`, `*2,${preset.force}`]
