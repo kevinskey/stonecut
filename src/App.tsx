@@ -69,7 +69,7 @@ function loadPresets(): MaterialPreset[] {
       const saved = JSON.parse(raw) as MaterialPreset[]
       if (Array.isArray(saved) && saved.length) {
         const byName = new Map(DEFAULT_PRESETS.map((d) => [d.name, d]))
-        const merged = saved.map((p) => {
+        const merged: MaterialPreset[] = saved.map((p): MaterialPreset => {
           const d = byName.get(p.name)
           return d ? { ...d, ...p, group: d.group, blade: d.blade, note: d.note } : { ...p, group: p.group ?? 'My presets' }
         })
