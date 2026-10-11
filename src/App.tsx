@@ -6,6 +6,8 @@ import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths,
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { grantedCutter } from './usb'
 import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
+import { booleanPaths } from './boolean'
+import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
 import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
@@ -44,6 +46,32 @@ const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in
 // template-integrity floor (sticky flock ~0.5-1.2mm edge gap) regardless of
 // how wide the design spacing is set
 const hardGapOf = (spacing: number) => Math.max(0.5, Math.min(spacing, 1.2))
+
+// Illustrator-style glyphs for the Align / Pathfinder buttons.
+function AlignIcon({ kind }: { kind: string }) {
+  const c = 'currentColor'
+  const box = (x: number, y: number, w: number, h: number, fill = c, op = 1) => <rect x={x} y={y} width={w} height={h} fill={fill} fillOpacity={op} rx={1} />
+  const line = (x1: number, y1: number, x2: number, y2: number) => <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={c} strokeWidth={1.5} />
+  let body: React.ReactNode
+  switch (kind) {
+    case 'left': body = <>{line(3, 2, 3, 18)}{box(5, 4, 10, 4)}{box(5, 11, 6, 4)}</>; break
+    case 'hcenter': body = <>{line(10, 2, 10, 18)}{box(4, 4, 12, 4)}{box(6, 11, 8, 4)}</>; break
+    case 'right': body = <>{line(17, 2, 17, 18)}{box(5, 4, 10, 4)}{box(9, 11, 6, 4)}</>; break
+    case 'top': body = <>{line(2, 3, 18, 3)}{box(4, 5, 4, 10)}{box(11, 5, 4, 6)}</>; break
+    case 'vcenter': body = <>{line(2, 10, 18, 10)}{box(4, 4, 4, 12)}{box(11, 6, 4, 8)}</>; break
+    case 'bottom': body = <>{line(2, 17, 18, 17)}{box(4, 5, 4, 10)}{box(11, 9, 4, 6)}</>; break
+    case 'dist-h': body = <>{box(2, 6, 3, 8)}{box(8.5, 6, 3, 8)}{box(15, 6, 3, 8)}</>; break
+    case 'dist-v': body = <>{box(6, 2, 8, 3)}{box(6, 8.5, 8, 3)}{box(6, 15, 8, 3)}</>; break
+    case 'space-h': body = <>{line(2, 2, 2, 18)}{line(18, 2, 18, 18)}{box(5, 6, 3, 8)}{box(12, 6, 3, 8)}</>; break
+    case 'space-v': body = <>{line(2, 2, 18, 2)}{line(2, 18, 18, 18)}{box(6, 5, 8, 3)}{box(6, 12, 8, 3)}</>; break
+    case 'unite': body = <>{box(3, 3, 9, 9)}{box(8, 8, 9, 9)}</>; break
+    case 'minus': body = <>{box(3, 3, 9, 9)}{box(8, 8, 9, 9, '#12151c')}<rect x={8} y={8} width={9} height={9} fill="none" stroke={c} strokeWidth={1.2} /></>; break
+    case 'intersect': body = <><rect x={3} y={3} width={9} height={9} fill="none" stroke={c} strokeWidth={1.2} /><rect x={8} y={8} width={9} height={9} fill="none" stroke={c} strokeWidth={1.2} />{box(8, 8, 4, 4)}</>; break
+    case 'exclude': body = <>{box(3, 3, 9, 9)}{box(8, 8, 9, 9)}{box(8, 8, 4, 4, '#12151c')}</>; break
+    default: body = null
+  }
+  return <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">{body}</svg>
+}
 
 function Section({ title, defaultOpen = false, children }: {
   title: string
@@ -139,7 +167,8 @@ export default function App() {
   const vectorsRef = useRef<VecItem[]>(vectors)
   vectorsRef.current = vectors
   const vecSeq = useRef((savedDesign.current?.vectors ?? []).reduce((m, v) => Math.max(m, v.id), 0) + 1)
-  const [selVec, setSelVec] = useState<number | null>(null)
+  // Selected cut-line objects (several at once: shift-click, marquee).
+  const [selVecs, setSelVecs] = useState<Set<number>>(() => new Set())
   // Save the design shortly after it stops changing (drags fire many updates).
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1130,7 +1159,9 @@ export default function App() {
   }, [zoom, viewTick])
   const drag = useRef<{ startX: number; startY: number; moved: boolean; orig: Stone[] } | null>(null)
   // marquee: drag over empty canvas in Select mode to box-select stones
-  const marqueeRef = useRef<{ x0: number; y0: number; additive: boolean } | null>(null)
+  // x1/y1 live in the ref too: mouseup must not depend on React having
+  // rendered the last mousemove, or a quick drag selects with a stale box.
+  const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number; additive: boolean } | null>(null)
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
   const toMm = useCallback(
@@ -1357,17 +1388,27 @@ export default function App() {
         }
         if (bestV != null) {
           setSelection(new Set())
-          setSelVec(bestV)
-          vecDrag.current = { id: bestV, startX: p.x, startY: p.y, moved: false }
+          let ids: number[]
+          if (e.shiftKey) {
+            const n = new Set(selVecs)
+            if (n.has(bestV)) n.delete(bestV); else n.add(bestV)
+            setSelVecs(n)
+            ids = [...n]
+          } else if (selVecs.has(bestV)) {
+            ids = [...selVecs] // drag moves the whole selection
+          } else {
+            setSelVecs(new Set([bestV]))
+            ids = [bestV]
+          }
+          vecDrag.current = { ids, startX: p.x, startY: p.y, moved: false }
           if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
           return
         }
-        setSelVec(null)
-        if (!e.shiftKey) setSelection(new Set())
-        marqueeRef.current = { x0: p.x, y0: p.y, additive: e.shiftKey }
+        if (!e.shiftKey) { setSelVecs(new Set()); setSelection(new Set()) }
+        marqueeRef.current = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, additive: e.shiftKey }
         return
       }
-      setSelVec(null)
+      setSelVecs(new Set())
       setSelection((prev) => {
         const next = e.shiftKey ? new Set(prev) : prev.has(hit) ? new Set(prev) : new Set<number>()
         next.add(hit)
@@ -1376,14 +1417,16 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
+    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
   )
-  const vecDrag = useRef<{ id: number; startX: number; startY: number; moved: boolean } | null>(null)
+  const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean } | null>(null)
 
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
       if (marqueeRef.current && tool === 'select') {
         const p = toMm(e)
+        marqueeRef.current.x1 = p.x
+        marqueeRef.current.y1 = p.y
         setMarquee({ x0: marqueeRef.current.x0, y0: marqueeRef.current.y0, x1: p.x, y1: p.y })
         return
       }
@@ -1424,7 +1467,7 @@ export default function App() {
         if (!vd.moved && Math.hypot(dx, dy) * zoom < 3) return
         if (!vd.moved) { vd.moved = true; pushUndo(stonesRef.current) }
         vd.startX = p.x; vd.startY = p.y
-        setVectors((prev) => prev.map((v) => (v.id === vd.id ? { ...v, x: v.x + dx, y: v.y + dy } : v)))
+        setVectors((prev) => prev.map((v) => (vd.ids.includes(v.id) ? { ...v, x: v.x + dx, y: v.y + dy } : v)))
         return
       }
       if (!drag.current || tool !== 'select' || selection.size === 0) {
@@ -1466,11 +1509,11 @@ export default function App() {
     }
     const mq = marqueeRef.current
     marqueeRef.current = null
-    if (mq && marquee) {
-      const x0 = Math.min(mq.x0, marquee.x1)
-      const x1 = Math.max(mq.x0, marquee.x1)
-      const y0 = Math.min(mq.y0, marquee.y1)
-      const y1 = Math.max(mq.y0, marquee.y1)
+    if (mq) {
+      const x0 = Math.min(mq.x0, mq.x1)
+      const x1 = Math.max(mq.x0, mq.x1)
+      const y0 = Math.min(mq.y0, mq.y1)
+      const y1 = Math.max(mq.y0, mq.y1)
       if (x1 - x0 > 0.5 || y1 - y0 > 0.5) {
         setSelection((prev) => {
           const next = mq.additive ? new Set(prev) : new Set<number>()
@@ -1479,10 +1522,18 @@ export default function App() {
           })
           return next
         })
+        setSelVecs((prev) => {
+          const next = mq.additive ? new Set(prev) : new Set<number>()
+          for (const v of vectors) {
+            const b = vecBox(v)
+            if (b.minX >= x0 && b.maxX <= x1 && b.minY >= y0 && b.maxY <= y1) next.add(v.id)
+          }
+          return next
+        })
       }
     }
     setMarquee(null)
-  }, [marquee, stones, regenElement])
+  }, [marquee, stones, vectors, regenElement])
 
   // A drag released over the sidebar or outside the window still ends.
   // Leaving the SVG used to cancel it mid-move; now the move continues until
@@ -1539,9 +1590,9 @@ export default function App() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size) {
         mutate((prev) => prev.filter((_, i) => !selection.has(i)))
         setSelection(new Set())
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selVec != null) {
-        mutateVectors((prev) => prev.filter((v) => v.id !== selVec))
-        setSelVec(null)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selVecs.size) {
+        mutateVectors((prev) => prev.filter((v) => !selVecs.has(v.id)))
+        setSelVecs(new Set())
       }
       // arrow keys nudge the selection: 0.5 mm, Shift = 5 mm
       const nudge = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, [number, number]>)[e.key]
@@ -1550,17 +1601,17 @@ export default function App() {
         const step = e.shiftKey ? 5 : 0.5
         const [nx, ny] = nudge
         mutate((prev) => prev.map((s, i) => (selection.has(i) ? { ...s, x: s.x + nx * step, y: s.y + ny * step } : s)))
-      } else if (nudge && selVec != null) {
+      } else if (nudge && selVecs.size) {
         e.preventDefault()
         const step = e.shiftKey ? 5 : 0.5
         const [nx, ny] = nudge
-        mutateVectors((prev) => prev.map((v) => (v.id === selVec ? { ...v, x: v.x + nx * step, y: v.y + ny * step } : v)))
+        mutateVectors((prev) => prev.map((v) => (selVecs.has(v.id) ? { ...v, x: v.x + nx * step, y: v.y + ny * step } : v)))
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         const prev = undoStack.current.pop()
         if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
         setSelection(new Set())
-        setSelVec(null)
+        setSelVecs(new Set())
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
         e.preventDefault()
@@ -1573,7 +1624,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVec, mutateVectors])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -1843,7 +1894,7 @@ export default function App() {
     const y = at ? at.y : Math.max(10, Math.min(below, boardHmm - h * sc - 10))
     const x = at ? at.x : 10
     mutateVectors((prev) => [...prev, { id, name, base, baseW: w, baseH: h, x, y, s: sc }])
-    setSelVec(id)
+    setSelVecs(new Set([id]))
     setSelection(new Set())
     return { id, w, h, scale: sc, lines: base.length }
   }, [boardWmm, boardHmm, stones.length, vectors.length, bbox.maxY, mutateVectors])
@@ -1852,7 +1903,10 @@ export default function App() {
   // outline instead of holes.
   const textAsCutLines = useCallback(() => {
     if (!textPreview || !textPreview.contours.length) { setStatus('Type some text and pick a font first'); return }
-    const r = addVector(textPreview.contours, text.trim() || 'text', { x: 10, y: previewOffsetY })
+    // script fonts overlap letter to letter; unite them so the blade does
+    // not cut across the joins (holes in letters are kept)
+    const united = booleanPaths('union', [textPreview.contours])
+    const r = addVector(united.length ? united : textPreview.contours, text.trim() || 'text', { x: 10, y: previewOffsetY })
     if (!r) return
     setPreviewBaseY(null)
     setPreviewLive(false)
@@ -1878,7 +1932,7 @@ export default function App() {
         const below = stones.length || vectors.length ? bbox.maxY + 10 : 10
         const y = Math.max(10, Math.min(below, boardHmm - r.heightMm * s - 10))
         mutateVectors((prev) => [...prev, { id, name: r.name, base: r.paths, baseW: r.widthMm, baseH: r.heightMm, x: 10, y, s }])
-        setSelVec(id)
+        setSelVecs(new Set([id]))
         const pts = r.paths.reduce((n, p) => n + p.length, 0)
         setStatus(
           `Imported ${r.name}: ${r.paths.length} cut line${r.paths.length === 1 ? '' : 's'}, ${pts} points, ${r.widthMm.toFixed(0)} × ${r.heightMm.toFixed(0)} mm` +
@@ -1899,6 +1953,121 @@ export default function App() {
     }))
   }, [mutateVectors])
   ;(window as unknown as { __scParseSvg?: unknown }).__scParseSvg = parseSvgToPaths
+
+  // ---------- align / distribute / pathfinder ----------
+  // Objects = selected cut-line items + each selected stone element (stones
+  // that share an el move as one object; loose stones are objects of their
+  // own), each with its bounding box on the board.
+  type AlignObj = { key: string; box: Box; vec?: number; el?: number; stone?: number }
+  const [alignTo, setAlignTo] = useState<'selection' | 'board'>('selection')
+  const alignObjs = useMemo<AlignObj[]>(() => {
+    const out: AlignObj[] = []
+    for (const v of vectors) if (selVecs.has(v.id)) out.push({ key: `v${v.id}`, box: vecBox(v), vec: v.id })
+    const byEl = new Map<number, Box>()
+    for (const i of selection) {
+      const st = stones[i]
+      if (!st) continue
+      const r = holeOf(st) / 2
+      const b = { minX: st.x - r, minY: st.y - r, maxX: st.x + r, maxY: st.y + r }
+      if (st.el == null) { out.push({ key: `s${i}`, box: b, stone: i }); continue }
+      const e = byEl.get(st.el)
+      byEl.set(st.el, e ? { minX: Math.min(e.minX, b.minX), minY: Math.min(e.minY, b.minY), maxX: Math.max(e.maxX, b.maxX), maxY: Math.max(e.maxY, b.maxY) } : b)
+    }
+    for (const [el, box] of byEl) out.push({ key: `e${el}`, box, el })
+    return out
+  }, [vectors, selVecs, selection, stones, holeOf])
+  // apply per-object translations as ONE undo step
+  const moveObjs = useCallback((moves: Map<string, Pt>) => {
+    if (![...moves.values()].some((d) => d.x || d.y)) return
+    pushUndo(stonesRef.current)
+    const byObj = new Map(alignObjs.map((o) => [o.key, o]))
+    const stoneDelta = new Map<number, Pt>()
+    const elDelta = new Map<number, Pt>()
+    const vecDelta = new Map<number, Pt>()
+    for (const [key, d] of moves) {
+      const o = byObj.get(key)
+      if (!o) continue
+      if (o.vec != null) vecDelta.set(o.vec, d)
+      else if (o.el != null) elDelta.set(o.el, d)
+      else if (o.stone != null) stoneDelta.set(o.stone, d)
+    }
+    if (stoneDelta.size || elDelta.size)
+      setStones((prev) => prev.map((st, i) => {
+        const d = stoneDelta.get(i) ?? (st.el != null && selection.has(i) ? elDelta.get(st.el) : undefined)
+        return d ? { ...st, x: st.x + d.x, y: st.y + d.y } : st
+      }))
+    if (vecDelta.size)
+      setVectors((prev) => prev.map((v) => { const d = vecDelta.get(v.id); return d ? { ...v, x: v.x + d.x, y: v.y + d.y } : v }))
+  }, [alignObjs, selection, pushUndo])
+  type AlignEdge = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom'
+  const alignSelected = useCallback((edge: AlignEdge) => {
+    if (!alignObjs.length) return
+    let t: Box
+    if (alignTo === 'board' || alignObjs.length < 2) t = { minX: 0, minY: 0, maxX: boardWmm, maxY: boardHmm }
+    else t = alignObjs.reduce((a, o) => ({ minX: Math.min(a.minX, o.box.minX), minY: Math.min(a.minY, o.box.minY), maxX: Math.max(a.maxX, o.box.maxX), maxY: Math.max(a.maxY, o.box.maxY) }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity })
+    const moves = new Map<string, Pt>()
+    for (const o of alignObjs) {
+      const b = o.box
+      const d: Pt = { x: 0, y: 0 }
+      if (edge === 'left') d.x = t.minX - b.minX
+      if (edge === 'hcenter') d.x = (t.minX + t.maxX) / 2 - (b.minX + b.maxX) / 2
+      if (edge === 'right') d.x = t.maxX - b.maxX
+      if (edge === 'top') d.y = t.minY - b.minY
+      if (edge === 'vcenter') d.y = (t.minY + t.maxY) / 2 - (b.minY + b.maxY) / 2
+      if (edge === 'bottom') d.y = t.maxY - b.maxY
+      moves.set(o.key, d)
+    }
+    moveObjs(moves)
+  }, [alignObjs, alignTo, boardWmm, boardHmm, moveObjs])
+  // centers: even spacing between object centres, outer two stay put.
+  // spacing: equal gaps between neighbouring edges, outer two stay put.
+  const distributeSelected = useCallback((axis: 'x' | 'y', mode: 'centers' | 'spacing') => {
+    if (alignObjs.length < 3) { setStatus('Select three or more objects to distribute'); return }
+    const lo = (b: Box) => (axis === 'x' ? b.minX : b.minY)
+    const hi = (b: Box) => (axis === 'x' ? b.maxX : b.maxY)
+    const objs = [...alignObjs].sort((a, b) => (lo(a.box) + hi(a.box)) - (lo(b.box) + hi(b.box)))
+    const moves = new Map<string, Pt>()
+    const n = objs.length
+    if (mode === 'centers') {
+      const c0 = (lo(objs[0].box) + hi(objs[0].box)) / 2
+      const c1 = (lo(objs[n - 1].box) + hi(objs[n - 1].box)) / 2
+      objs.forEach((o, i) => {
+        const c = (lo(o.box) + hi(o.box)) / 2
+        const want = c0 + ((c1 - c0) * i) / (n - 1)
+        moves.set(o.key, axis === 'x' ? { x: want - c, y: 0 } : { x: 0, y: want - c })
+      })
+    } else {
+      const span = hi(objs[n - 1].box) - lo(objs[0].box)
+      const sizes = objs.reduce((t, o) => t + (hi(o.box) - lo(o.box)), 0)
+      const gap = (span - sizes) / (n - 1)
+      let cursor = lo(objs[0].box)
+      objs.forEach((o) => {
+        const d = cursor - lo(o.box)
+        moves.set(o.key, axis === 'x' ? { x: d, y: 0 } : { x: 0, y: d })
+        cursor += hi(o.box) - lo(o.box) + gap
+      })
+    }
+    moveObjs(moves)
+  }, [alignObjs, moveObjs])
+  // Pathfinder on the selected cut-line objects (back-most = keeper for
+  // Minus Front). Result replaces the operands as one new object.
+  const pathfinder = useCallback((op: BoolOp) => {
+    const ops = vectors.filter((v) => selVecs.has(v.id))
+    if (!ops.length || (op !== 'union' && ops.length < 2)) { setStatus(op === 'union' ? 'Select a cut-line object first' : 'Select two or more cut-line objects (shift-click)'); return }
+    const result = booleanPaths(op, ops.map(vecPaths))
+    if (!result.length) { setStatus('Nothing left after that operation — the shapes do not overlap'); return }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const pl of result) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+    const base = result.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY })))
+    const id = vecSeq.current++
+    const names: Record<BoolOp, string> = { union: 'Unite', difference: 'Minus front', intersection: 'Intersect', xor: 'Exclude' }
+    const item: VecItem = { id, name: `${names[op]} (${ops.map((o) => o.name).join(', ')})`, base, baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
+    const at = vectors.findIndex((v) => selVecs.has(v.id))
+    mutateVectors((prev) => { const rest = prev.filter((v) => !selVecs.has(v.id)); const idx = Math.min(at, rest.length); return [...rest.slice(0, idx), item, ...rest.slice(idx)] })
+    setSelVecs(new Set([id]))
+    setStatus(`${names[op]}: ${result.length} cut line${result.length === 1 ? '' : 's'}`)
+  }, [vectors, selVecs, mutateVectors])
+  const alignCount = alignObjs.length
 
   // ---------- menu bar ----------
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -1946,7 +2115,7 @@ export default function App() {
   const clearAll = useCallback(() => {
     if (stones.length) mutate(() => [])
     if (vectors.length) setVectors([])
-    setSelVec(null)
+    setSelVecs(new Set())
     setSelection(new Set())
     setText('')
     setImageFile(null)
@@ -1972,11 +2141,11 @@ export default function App() {
     const prev = undoStack.current.pop()
     if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
     setSelection(new Set())
-    setSelVec(null)
+    setSelVecs(new Set())
   }, [])
   const hasSel = selection.size > 0
   const hasStones = stones.length > 0
-  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Edit', 'Material', 'Cut']
+  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Material', 'Cut']
   const menus: Menu[] = [
     { label: 'File', items: [
       { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending && !vectors.length },
@@ -2006,7 +2175,20 @@ export default function App() {
       'sep',
       { label: 'Move to origin corner', disabled: !hasStones, onClick: () => placeFromOrigin(0.5, 0.5) },
       { label: 'Center on board', disabled: !hasStones, onClick: centerOnBoard },
-      { label: 'Nudge with arrow keys', disabled: true },
+      'sep',
+      { label: 'Align left', disabled: !alignCount, onClick: () => alignSelected('left') },
+      { label: 'Align horizontal centers', disabled: !alignCount, onClick: () => alignSelected('hcenter') },
+      { label: 'Align right', disabled: !alignCount, onClick: () => alignSelected('right') },
+      { label: 'Align top', disabled: !alignCount, onClick: () => alignSelected('top') },
+      { label: 'Align vertical centers', disabled: !alignCount, onClick: () => alignSelected('vcenter') },
+      { label: 'Align bottom', disabled: !alignCount, onClick: () => alignSelected('bottom') },
+      { label: 'Distribute horizontally', disabled: alignCount < 3, onClick: () => distributeSelected('x', 'centers') },
+      { label: 'Distribute vertically', disabled: alignCount < 3, onClick: () => distributeSelected('y', 'centers') },
+      'sep',
+      { label: 'Unite', disabled: !selVecs.size, onClick: () => pathfinder('union') },
+      { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => pathfinder('difference') },
+      { label: 'Intersect', disabled: selVecs.size < 2, onClick: () => pathfinder('intersection') },
+      { label: 'Exclude', disabled: selVecs.size < 2, onClick: () => pathfinder('xor') },
     ] },
     { label: 'Type', items: [
       { label: 'Add text…', onClick: () => openSection('Text', 'input') },
@@ -2547,7 +2729,7 @@ export default function App() {
           {vectors.map((v) => {
             const b = vecBox(v)
             return (
-              <div key={v.id} className={`veclist${selVec === v.id ? ' sel' : ''}`} onClick={() => { setSelVec(v.id); setSelection(new Set()) }}>
+              <div key={v.id} className={`veclist${selVecs.has(v.id) ? ' sel' : ''}`} onClick={(e) => { setSelVecs((prev) => e.shiftKey ? (prev.has(v.id) ? new Set([...prev].filter((x) => x !== v.id)) : new Set([...prev, v.id])) : new Set([v.id])); setSelection(new Set()) }}>
                 <div className="vecname">{v.name} <span className="dim">· {v.base.length} line{v.base.length === 1 ? '' : 's'}</span></div>
                 <div className="grid2" key={`vs-${v.id}-${v.s.toFixed(4)}`}>
                   <label>Width (mm)
@@ -2562,7 +2744,7 @@ export default function App() {
                   </label>
                 </div>
                 <div className="toolrow">
-                  <button onClick={(e) => { e.stopPropagation(); mutateVectors((prev) => prev.filter((x) => x.id !== v.id)); if (selVec === v.id) setSelVec(null) }}>Remove</button>
+                  <button onClick={(e) => { e.stopPropagation(); mutateVectors((prev) => prev.filter((x) => x.id !== v.id)); setSelVecs((prev) => { const n = new Set(prev); n.delete(v.id); return n }) }}>Remove</button>
                 </div>
               </div>
             )
@@ -2570,6 +2752,45 @@ export default function App() {
           {vectors.length > 0 && (
             <p className="hint">Click a line on the board to select it, drag to move, arrows nudge. Lines cut after the holes, in the same pass.</p>
           )}
+        </Section>
+
+        <Section title="Align & Pathfinder">
+          <p className="hint">
+            Works on what is selected: cut-line objects (shift-click or box-select for several) and stone designs.
+            {alignCount ? ` ${alignCount} object${alignCount === 1 ? '' : 's'} selected.` : ' Nothing selected.'}
+          </p>
+          <label>Align to
+            <select value={alignTo} onChange={(e) => setAlignTo(e.target.value as typeof alignTo)}>
+              <option value="selection">Selection</option>
+              <option value="board">Board</option>
+            </select>
+          </label>
+          <div className="iconrow">
+            {([
+              ['left', 'Align left', <AlignIcon kind="left" />],
+              ['hcenter', 'Align horizontal centers', <AlignIcon kind="hcenter" />],
+              ['right', 'Align right', <AlignIcon kind="right" />],
+              ['top', 'Align top', <AlignIcon kind="top" />],
+              ['vcenter', 'Align vertical centers', <AlignIcon kind="vcenter" />],
+              ['bottom', 'Align bottom', <AlignIcon kind="bottom" />],
+            ] as [AlignEdge, string, React.ReactNode][]).map(([k, title, icon]) => (
+              <button key={k} className="iconbtn" title={title} disabled={!alignCount} onClick={() => alignSelected(k)}>{icon}</button>
+            ))}
+          </div>
+          <div className="iconrow">
+            <button className="iconbtn" title="Distribute horizontal centers" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'centers')}><AlignIcon kind="dist-h" /></button>
+            <button className="iconbtn" title="Distribute vertical centers" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'centers')}><AlignIcon kind="dist-v" /></button>
+            <button className="iconbtn" title="Equal horizontal spacing" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'spacing')}><AlignIcon kind="space-h" /></button>
+            <button className="iconbtn" title="Equal vertical spacing" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'spacing')}><AlignIcon kind="space-v" /></button>
+          </div>
+          <p className="hint" style={{ marginTop: 10 }}>Pathfinder — shape modes on the selected cut-line objects. The result replaces them; Undo brings them back.</p>
+          <div className="iconrow">
+            <button className="iconbtn" title="Unite" disabled={!selVecs.size} onClick={() => pathfinder('union')}><AlignIcon kind="unite" /></button>
+            <button className="iconbtn" title="Minus front (back object keeps, front objects cut away)" disabled={selVecs.size < 2} onClick={() => pathfinder('difference')}><AlignIcon kind="minus" /></button>
+            <button className="iconbtn" title="Intersect" disabled={selVecs.size < 2} onClick={() => pathfinder('intersection')}><AlignIcon kind="intersect" /></button>
+            <button className="iconbtn" title="Exclude (overlap removed)" disabled={selVecs.size < 2} onClick={() => pathfinder('xor')}><AlignIcon kind="exclude" /></button>
+          </div>
+          <div className="iconlabels"><span>Unite</span><span>Minus front</span><span>Intersect</span><span>Exclude</span></div>
         </Section>
 
         <Section title="Edit">
@@ -2846,7 +3067,7 @@ export default function App() {
         <div className="cutbar">
           <button className="primary" disabled={!cutCount} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="cutbar-meta">
-            {cutJob.stones.length ? `${cutJob.stones.length} stones` : 'add a design to cut'}
+            {cutCount ? [cutJob.stones.length ? `${cutJob.stones.length} stones` : '', cutJob.paths?.length ? `${cutJob.paths.length} cut line${cutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
           </div>
         </div>
@@ -2988,8 +3209,8 @@ export default function App() {
               d={pathsToD(v.base)}
               transform={`translate(${v.x * zoom} ${v.y * zoom}) scale(${v.s * zoom})`}
               fill="none"
-              stroke={selVec === v.id ? '#f0b95e' : '#8fd3ff'}
-              strokeWidth={selVec === v.id ? 2 : 1.5}
+              stroke={selVecs.has(v.id) ? '#f0b95e' : '#8fd3ff'}
+              strokeWidth={selVecs.has(v.id) ? 2 : 1.5}
               vectorEffect="non-scaling-stroke"
               pointerEvents="none"
             />
