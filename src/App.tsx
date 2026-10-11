@@ -4,6 +4,7 @@ import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
+import { grantedCutter } from './usb'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
 import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
@@ -1502,8 +1503,17 @@ export default function App() {
     [format, cutJob, preset, originCorner, gpStep, sendConditions, swapAxes],
   )
 
+  // Cut goes through an in-app confirmation (styled like the rest of the
+  // panel, not a browser card). Chrome's own device chooser only appears the
+  // first time; after that the granted cutter is reopened silently.
+  const [cutConfirm, setCutConfirm] = useState<{ device: string | null } | null>(null)
   const doSend = useCallback(async () => {
     if (!stones.length) { setStatus('Nothing to cut'); return }
+    const d = await grantedCutter()
+    setCutConfirm({ device: d?.name ?? null })
+  }, [stones.length])
+  const doSendNow = useCallback(async () => {
+    setCutConfirm(null)
     try {
       setStatus('Connecting to cutter…')
       await sendToCutter(cutData(), (sent, total) =>
@@ -1513,7 +1523,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Send failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [stones.length, cutData])
+  }, [cutData])
 
   // The fill colour picker recolours the EXISTING fill layer live — colour
   // was baked into each stone at generation, so the picker otherwise only
@@ -1831,6 +1841,28 @@ export default function App() {
   return (
     <div className="app">
       <MenuBar brand="StoneCut" menus={menus} />
+      {cutConfirm && (
+        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setCutConfirm(null) }}>
+          <div className="modal" role="dialog" aria-modal="true">
+            <h3>⚡ Cut on Graphtec</h3>
+            <table className="modal-facts"><tbody>
+              <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Not connected yet — Chrome will ask which cutter to use, this once'}</td></tr>
+              <tr><td>Stones</td><td>{cutJob.stones.length}{cutLayer !== 'all' ? ` (${cutLayer} layer)` : ''}</td></tr>
+              <tr><td>Size</td><td>{((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}″ × {((bbox.maxY - bbox.minY) / 25.4).toFixed(2)}″</td></tr>
+              {fromOrigin && placement === 'artboard' && (
+                <tr><td>From origin</td><td>{fromOrigin.across.toFixed(2)}″ across, {fromOrigin.feed.toFixed(2)}″ up</td></tr>
+              )}
+              <tr><td>Material</td><td>{preset.name} · force {preset.force} · speed {preset.speed}{preset.passes > 1 ? ` · ${preset.passes} passes` : ''}{sendConditions ? '' : ' (panel settings)'}</td></tr>
+            </tbody></table>
+            {offBoard && <p className="modal-warn">Part of the design is off the board and will be clipped.</p>}
+            <p className="hint">Blade at the front-right corner of the material, ORIGIN pressed on the cutter.</p>
+            <div className="modal-actions">
+              <button onClick={() => setCutConfirm(null)}>Cancel</button>
+              <button className="primary" autoFocus onClick={() => { void doSendNow() }}>⚡ Cut now</button>
+            </div>
+          </div>
+        </div>
+      )}
       {showShortcuts && (
         <div className="shortcuts">
           <h3>Keyboard shortcuts</h3>

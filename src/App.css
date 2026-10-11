@@ -386,3 +386,22 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 .shortcuts td { padding: 3px 0; vertical-align: top; }
 .shortcuts td:first-child { color: #f0b95e; white-space: nowrap; padding-right: 12px; width: 1%; }
 .shortcuts button { margin-top: 10px; }
+
+/* ---------- in-app confirmation ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 70;
+  background: #0a0c12aa; backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  width: min(420px, calc(100vw - 32px));
+  background: #191d27; border: 1px solid #343c50; border-radius: 12px;
+  padding: 18px 20px 16px; box-shadow: 0 24px 60px #000c;
+}
+.modal h3 { margin: 0 0 12px; font-size: 16px; color: #fff; }
+.modal-facts { width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 13px; }
+.modal-facts td { padding: 4px 0; vertical-align: top; }
+.modal-facts td:first-child { color: #8b96ab; white-space: nowrap; padding-right: 14px; width: 1%; }
+.modal-warn { margin: 6px 0; padding: 6px 10px; border-radius: 6px; background: #3a2c14; color: #f0b95e; font-size: 12px; }
+.modal-actions { display: flex; gap: 10px; margin-top: 12px; }
+.modal-actions button { flex: 1; margin-top: 0; }
