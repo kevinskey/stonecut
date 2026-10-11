@@ -964,13 +964,15 @@ export default function App() {
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
   }, [setView])
-  // Opening the app shows the whole sheet; adding the first design zooms to
-  // it. Nobody should have to hunt for a 2-inch design on an 18-inch sheet.
+  // Opening the app fits the saved design, or the whole sheet if empty.
+  // There is deliberately NO auto-fit when the board goes from empty to
+  // non-empty: it used to zoom to the first thing placed, and a single hand-
+  // placed stone is a 3 mm dot, so every first click slammed the view to
+  // maximum zoom. The preview already shows where a design will land, so the
+  // operator is looking at it when it commits; F / Fit design is there when
+  // they want it.
   const stoneCountRef = useRef(0)
-  useEffect(() => {
-    if (stones.length && !stoneCountRef.current) fitDesign()
-    stoneCountRef.current = stones.length
-  }, [stones.length, fitDesign])
+  useEffect(() => { stoneCountRef.current = stones.length }, [stones.length])
   const didInitialFit = useRef(false)
   useEffect(() => {
     if (didInitialFit.current || !measured.current) return
