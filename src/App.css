@@ -1,6 +1,7 @@
 * { box-sizing: border-box; }
 
 .app {
+  flex-direction: column;
   display: flex;
   height: 100vh;
   background: #12151c;
@@ -341,3 +342,47 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 
 .sizeinfo.warn { border-color: #8a6d2f; background: #241d10; color: #e8d5a0; }
 .sizeinfo.warn .toolrow { margin-top: 6px; }
+
+/* ---------- menu bar ---------- */
+.app-body { display: flex; flex: 1; min-height: 0; }
+.menubar {
+  display: flex; align-items: center; gap: 2px;
+  height: 32px; padding: 0 8px;
+  background: #1d2230; border-bottom: 1px solid #2b3240;
+  font-size: 13px; user-select: none; z-index: 20; flex-shrink: 0;
+}
+.menubar .brand { font-weight: 700; color: #fff; letter-spacing: 0.4px; margin-right: 12px; font-size: 14px; }
+.menu { position: relative; }
+.menu-title {
+  background: none; border: 0; color: #dde3ee; padding: 5px 10px; margin: 0;
+  width: auto; border-radius: 5px; cursor: default; font: inherit;
+}
+.menu-title:hover, .menu.open .menu-title { background: #2d3447; color: #fff; }
+.menu-list {
+  position: absolute; top: 100%; left: 0; min-width: 240px;
+  background: #232838; border: 1px solid #343c50; border-radius: 8px;
+  padding: 5px; box-shadow: 0 12px 30px #000a; z-index: 50;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+  background: none; border: 0; color: #dde3ee; padding: 5px 8px; margin: 0;
+  border-radius: 5px; font: inherit; cursor: default; white-space: nowrap;
+}
+.menu-item:hover:not(:disabled) { background: #3b5bdb; color: #fff; }
+.menu-item:disabled { color: #6b7590; opacity: 1; cursor: default; }
+.menu-check { width: 12px; font-size: 11px; }
+.menu-label { flex: 1; }
+.menu-key { color: #8b96ab; font-size: 11px; margin-left: 18px; }
+.menu-item:hover:not(:disabled) .menu-key { color: #dfe6ff; }
+.menu-sep { height: 1px; background: #343c50; margin: 5px 4px; }
+
+.shortcuts {
+  position: fixed; top: 44px; right: 16px; z-index: 60; width: 320px;
+  background: #232838; border: 1px solid #343c50; border-radius: 10px;
+  padding: 12px 14px; box-shadow: 0 12px 30px #000a; font-size: 12px;
+}
+.shortcuts h3 { margin: 0 0 8px; font-size: 13px; color: #fff; }
+.shortcuts table { width: 100%; border-collapse: collapse; }
+.shortcuts td { padding: 3px 0; vertical-align: top; }
+.shortcuts td:first-child { color: #f0b95e; white-space: nowrap; padding-right: 12px; width: 1%; }
+.shortcuts button { margin-top: 10px; }

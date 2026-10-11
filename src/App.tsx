@@ -9,6 +9,8 @@ import { analyzeImage, imageToRaster } from './image'
 import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
+import { MenuBar } from './MenuBar'
+import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import './App.css'
@@ -1655,10 +1657,170 @@ export default function App() {
       .join('')
   }, [textPreview, zoom, previewOffsetY])
 
+  // ---------- menu bar ----------
+  const [showShortcuts, setShowShortcuts] = useState(false)
+  // Sidebar sections are plain <details>; the Window menu opens one by title
+  // and scrolls it into view (Kevin works at a big browser zoom, so finding
+  // a folded section by scrolling is the slow part).
+  const openSection = useCallback((title: string, focusSel?: string) => {
+    const secs = Array.from(document.querySelectorAll<HTMLDetailsElement>('details.sec'))
+    const d = secs.find((el) => el.querySelector('summary')?.textContent?.trim() === title)
+    if (!d) return
+    d.open = true
+    d.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
+  }, [])
+  const saveDesignFile = useCallback(() => {
+    download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements }), 'application/json')
+  }, [stones, sizes, elements])
+  const openDesignFile = useCallback(() => {
+    const inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = '.json,application/json'
+    inp.onchange = async () => {
+      const f = inp.files?.[0]
+      if (!f) return
+      try {
+        const d = JSON.parse(await f.text())
+        if (!Array.isArray(d?.stones)) throw new Error('not a StoneCut design file')
+        pushUndo(stonesRef.current)
+        const loaded = d.stones as Stone[]
+        setStones(loaded)
+        if (d.sizes && typeof d.sizes === 'object') setSizes({ ...DEFAULT_SIZES, ...d.sizes })
+        setElements(d.elements && typeof d.elements === 'object' ? d.elements : {})
+        elSeq.current = loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1
+        setSelection(new Set())
+        setStatus(`Opened ${f.name}: ${loaded.length} stones`)
+      } catch (e) {
+        setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    inp.click()
+  }, [pushUndo])
+  const clearAll = useCallback(() => {
+    if (stones.length) mutate(() => [])
+    setSelection(new Set())
+    setText('')
+    setImageFile(null)
+    setImagePreview(null)
+    setPreviewStones(null)
+    setPreviewLive(false)
+  }, [stones.length, mutate])
+  const selectWhere = useCallback((pred: (s: Stone, i: number) => boolean) => {
+    setSelection(new Set(stones.map((st, i) => (pred(st, i) ? i : -1)).filter((i) => i >= 0)))
+  }, [stones])
+  const expandToDesigns = useCallback(() => {
+    const els = new Set<number>()
+    for (const i of selection) { const e = stones[i]?.el; if (e != null) els.add(e) }
+    selectWhere((st, i) => selection.has(i) || (st.el != null && els.has(st.el)))
+  }, [selection, stones, selectWhere])
+  const centerOnBoard = useCallback(() => {
+    if (!stones.length) return
+    const dx = boardWmm / 2 - (bbox.minX + bbox.maxX) / 2
+    const dy = boardHmm / 2 - (bbox.minY + bbox.maxY) / 2
+    mutate((prev) => prev.map((st) => ({ ...st, x: st.x + dx, y: st.y + dy })))
+  }, [stones.length, bbox, boardWmm, boardHmm, mutate])
+  const undo = useCallback(() => {
+    const prev = undoStack.current.pop()
+    if (prev) { setStones(prev.stones); setElements(prev.elements) }
+    setSelection(new Set())
+  }, [])
+  const hasSel = selection.size > 0
+  const hasStones = stones.length > 0
+  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Edit', 'Material', 'Cut']
+  const menus: Menu[] = [
+    { label: 'File', items: [
+      { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending },
+      { label: 'Open design…', onClick: openDesignFile },
+      { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
+      'sep',
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutJob.stones.length },
+      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutJob.stones.length },
+      'sep',
+      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutJob.stones.length },
+    ] },
+    { label: 'Edit', items: [
+      { label: 'Undo', shortcut: '⌘Z', onClick: undo },
+      'sep',
+      { label: 'Select all', shortcut: '⌘A', onClick: () => selectWhere(() => true), disabled: !hasStones },
+      { label: 'Deselect', onClick: () => setSelection(new Set()), disabled: !hasSel },
+      { label: 'Delete selected', shortcut: '⌫', disabled: !hasSel, onClick: () => { mutate((prev) => prev.filter((_, i) => !selection.has(i))); setSelection(new Set()) } },
+      'sep',
+      { label: `Set selected to ${curSize}`, disabled: !hasSel, onClick: () => mutate((prev) => prev.map((st, i) => (selection.has(i) ? { ...st, size: curSize } : st))) },
+      'sep',
+      { label: 'Clear all', onClick: clearAll, disabled: !hasStones && !pending },
+    ] },
+    { label: 'Object', items: [
+      { label: 'Select whole design', disabled: !hasSel, onClick: expandToDesigns },
+      { label: 'Resize design…', disabled: selectedEl == null, onClick: () => openSection('Edit', 'input[type=number]') },
+      'sep',
+      { label: 'Move to origin corner', disabled: !hasStones, onClick: () => placeFromOrigin(0.5, 0.5) },
+      { label: 'Center on board', disabled: !hasStones, onClick: centerOnBoard },
+      { label: 'Nudge with arrow keys', disabled: true },
+    ] },
+    { label: 'Type', items: [
+      { label: 'Add text…', onClick: () => openSection('Text', 'input') },
+      { label: 'Fonts…', onClick: () => { openSection('Text'); setFontOpen(true) } },
+      'sep',
+      { label: 'Add a shape…', onClick: () => openSection('Shapes') },
+      { label: 'Trace an image…', onClick: () => openSection('Image') },
+    ] },
+    { label: 'Select', items: [
+      { label: 'All', shortcut: '⌘A', disabled: !hasStones, onClick: () => selectWhere(() => true) },
+      { label: 'Deselect', disabled: !hasSel, onClick: () => setSelection(new Set()) },
+      { label: 'Inverse', disabled: !hasStones, onClick: () => selectWhere((_, i) => !selection.has(i)) },
+      'sep',
+      { label: 'Outline stones', disabled: !hasStones, onClick: () => selectWhere((st) => (st.layer ?? 'outline') === 'outline') },
+      { label: 'Fill stones', disabled: !hasStones, onClick: () => selectWhere((st) => st.layer === 'fill') },
+      { label: `Same size as current (${curSize})`, disabled: !hasStones, onClick: () => selectWhere((st) => st.size === curSize) },
+      'sep',
+      { label: 'Whole design of selection', disabled: !hasSel, onClick: expandToDesigns },
+    ] },
+    { label: 'View', items: [
+      { label: 'Zoom in', shortcut: '⌘+', onClick: () => zoomAbout(zoomRef.current * 1.25) },
+      { label: 'Zoom out', shortcut: '⌘−', onClick: () => zoomAbout(zoomRef.current / 1.25) },
+      'sep',
+      { label: 'Fit design', shortcut: 'F', disabled: !hasStones, onClick: fitDesign },
+      { label: 'Fit sheet', shortcut: '⌘0', onClick: fitSheet },
+      { label: 'Actual size', shortcut: '1:1', onClick: () => zoomAbout(PX_PER_MM_100) },
+      'sep',
+      { label: 'Select / move tool', checked: tool === 'select', onClick: () => setTool('select') },
+      { label: 'Add / erase tool', checked: tool === 'add', onClick: () => setTool('add') },
+    ] },
+    { label: 'Window', items: sectionItems.map((t) => ({ label: t, onClick: () => openSection(t) })) },
+    { label: 'Help', items: [
+      { label: 'Keyboard shortcuts', onClick: () => setShowShortcuts(true) },
+      { label: 'Cutter setup notes', onClick: () => openSection('Cut') },
+      'sep',
+      { label: 'StoneCut on GitHub', onClick: () => window.open('https://github.com/kevinskey/stonecut#readme', '_blank', 'noopener') },
+    ] },
+  ]
+
   return (
     <div className="app">
+      <MenuBar brand="StoneCut" menus={menus} />
+      {showShortcuts && (
+        <div className="shortcuts">
+          <h3>Keyboard shortcuts</h3>
+          <table><tbody>
+            <tr><td>Click</td><td>select a hole · drag to move</td></tr>
+            <tr><td>Shift-click</td><td>add to the selection</td></tr>
+            <tr><td>Drag on board</td><td>box-select a group</td></tr>
+            <tr><td>Double-click</td><td>select the whole design (shows resize handles)</td></tr>
+            <tr><td>Arrows</td><td>nudge 0.5 mm · Shift: 5 mm</td></tr>
+            <tr><td>Delete</td><td>remove selected holes</td></tr>
+            <tr><td>⌘Z</td><td>undo</td></tr>
+            <tr><td>⌘A</td><td>select all</td></tr>
+            <tr><td>⌘+ / ⌘−</td><td>zoom in / out</td></tr>
+            <tr><td>⌘-wheel / pinch</td><td>zoom at the cursor · plain wheel pans</td></tr>
+            <tr><td>F</td><td>fit design</td></tr>
+            <tr><td>⌘0</td><td>fit sheet</td></tr>
+          </tbody></table>
+          <button onClick={() => setShowShortcuts(false)}>Close</button>
+        </div>
+      )}
+      <div className="app-body">
       <aside className="panel">
-        <h1>StoneCut</h1>
         <div className="statusbar">
           {pending > 0 && (
             <div><b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b></div>
@@ -2532,6 +2694,7 @@ export default function App() {
         />
         </div>
       </main>
+      </div>
     </div>
   )
 }
