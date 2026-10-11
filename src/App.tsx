@@ -56,15 +56,47 @@ const PX_PER_MM_100 = 96 / 25.4
 const ZOOM_MIN = 0.4
 const ZOOM_MAX = 40
 
+// The design itself (stones + the size table they index) is saved to the
+// browser so a refresh, a crash, or a closed tab does not wipe the work.
+// Settings were always saved; the stones were the one thing that was not.
+const DESIGN_KEY = 'stonecut.design'
+function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec> } | null {
+  try {
+    const raw = localStorage.getItem(DESIGN_KEY)
+    if (!raw) return null
+    const d = JSON.parse(raw)
+    if (!Array.isArray(d?.stones)) return null
+    const stones = (d.stones as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
+    const sizes = d.sizes && typeof d.sizes === 'object' ? { ...DEFAULT_SIZES, ...d.sizes } : { ...DEFAULT_SIZES }
+    return { stones, sizes }
+  } catch {
+    return null
+  }
+}
+
 export default function App() {
-  const [stones, setStones] = useState<Stone[]>([])
+  const savedDesign = useRef(loadDesign())
+  const [stones, setStones] = useState<Stone[]>(() => savedDesign.current?.stones ?? [])
   const stonesRef = useRef<Stone[]>([])
   // last image commit — while untouched, generation-setting changes REGENERATE
   // it in place instead of only affecting the next add
   const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[]; el?: number } | null>(null)
-  const elSeq = useRef(1)
+  // element ids continue past whatever the saved design used
+  const elSeq = useRef((savedDesign.current?.stones ?? []).reduce((m, s) => Math.max(m, s.el ?? 0), 0) + 1)
   const [selection, setSelection] = useState<Set<number>>(new Set())
-  const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => ({ ...DEFAULT_SIZES }))
+  const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => savedDesign.current?.sizes ?? { ...DEFAULT_SIZES })
+  // Save the design shortly after it stops changing (drags fire many updates).
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        if (stones.length) localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes }))
+        else localStorage.removeItem(DESIGN_KEY)
+      } catch (e) {
+        console.error('[stonecut] could not save design', e)
+      }
+    }, 400)
+    return () => clearTimeout(t)
+  }, [stones, sizes])
   const [curSize, setCurSize] = useState('SS10')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
