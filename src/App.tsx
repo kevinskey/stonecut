@@ -421,13 +421,27 @@ export default function App() {
   // hole grew the bbox and shoved the whole previewed design away from the
   // cursor — placing a hole on top of the artwork was impossible.
   const [previewBaseY, setPreviewBaseY] = useState<number | null>(null)
-  const layoutRef = useRef({ len: 0, maxY: 0 })
+  const layoutRef = useRef({ len: 0, maxY: 0, boardH: 0 })
   useEffect(() => {
-    layoutRef.current = { len: stones.length, maxY: bbox.maxY }
+    layoutRef.current = { len: stones.length, maxY: bbox.maxY, boardH: boardHmm }
     stonesRef.current = stones
   })
-  const pinPreviewBase = useCallback(() => {
-    setPreviewBaseY((prev) => prev ?? (layoutRef.current.len ? layoutRef.current.maxY + 10 : 10))
+  // An empty board releases the pin. Clear all / delete / undo used to leave
+  // the old pin behind, so the next preview sat wherever the LAST design
+  // ended — often below the bottom edge of the media.
+  useEffect(() => { if (!stones.length) setPreviewBaseY(null) }, [stones.length])
+  // designHmm: height of the thing being previewed. A new preview stacks
+  // below the existing stones, but never past the bottom of the media —
+  // if it won't fit underneath it is pulled up onto the sheet (it may
+  // overlap, and can be dragged), rather than parked off the cut area.
+  const pinPreviewBase = useCallback((designHmm = 0) => {
+    setPreviewBaseY((prev) => {
+      if (prev != null) return prev
+      const { len, maxY, boardH } = layoutRef.current
+      const below = len ? maxY + 10 : 10
+      const lowest = boardH - designHmm - 10
+      return Math.max(10, Math.min(below, lowest))
+    })
   }, [])
   const previewOffsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
 
@@ -608,7 +622,7 @@ export default function App() {
                   `those strokes are drawn as a single centre line. ${advice}`
                 : capMsg),
         )
-        pinPreviewBase()
+        pinPreviewBase(textHeight)
         setPreviewStones(pts)
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
         ;(window as unknown as { __scSpans?: unknown }).__scSpans = debugSpans.map((s) => ({ ...s, chords: [...s.chords] }))
@@ -683,7 +697,7 @@ export default function App() {
             `its lines sit closer together than the stones are allowed to be. ` +
             `Raise Width (try ${Math.ceil(imgWidth * 1.8)} mm) or pick a smaller stone.`,
           )
-        pinPreviewBase()
+        pinPreviewBase(pts.reduce((m, p) => Math.max(m, p.y), 0))
         setImagePreview(pts)
         ;(window as unknown as { __scPts?: unknown }).__scPts = pts
         ;(window as unknown as { __scDebug?: unknown }).__scDebug = [...debugStones]
