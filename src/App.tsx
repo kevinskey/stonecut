@@ -286,7 +286,7 @@ export default function App() {
     [fontMatches, loadGFont, weight],
   )
 
-  const [text, setText] = useState('GLEE')
+  const [text, setText] = useState('Joy')
   const [textHeight, setTextHeight] = useState(50)
   const [textMode, setTextMode] = useState<StoneMode>('outline')
   const [letterSpacing, setLetterSpacing] = useState(2)
