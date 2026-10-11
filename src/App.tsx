@@ -58,10 +58,26 @@ function Section({ title, defaultOpen = false, children }: {
   )
 }
 
+// Saved presets win (the operator's tuned numbers), but any built-in preset
+// missing from the saved list is added, so new manufacturer entries show up
+// in a browser that already has a saved list. Built-in metadata (group,
+// blade, note) is refreshed on saved entries of the same name.
 function loadPresets(): MaterialPreset[] {
   try {
     const raw = localStorage.getItem('stonecut.presets')
-    if (raw) return JSON.parse(raw)
+    if (raw) {
+      const saved = JSON.parse(raw) as MaterialPreset[]
+      if (Array.isArray(saved) && saved.length) {
+        const byName = new Map(DEFAULT_PRESETS.map((d) => [d.name, d]))
+        const merged = saved.map((p) => {
+          const d = byName.get(p.name)
+          return d ? { ...d, ...p, group: d.group, blade: d.blade, note: d.note } : { ...p, group: p.group ?? 'My presets' }
+        })
+        const have = new Set(merged.map((p) => p.name))
+        for (const d of DEFAULT_PRESETS) if (!have.has(d.name)) merged.push(d)
+        return merged
+      }
+    }
   } catch { /* fall through */ }
   return DEFAULT_PRESETS
 }
@@ -2649,9 +2665,20 @@ export default function App() {
         <Section title="Material">
           <label>Preset
             <select value={presetIdx} onChange={(e) => setPresetIdx(+e.target.value)}>
-              {presets.map((p, i) => <option key={i} value={i}>{p.name}</option>)}
+              {Array.from(new Set(presets.map((p) => p.group ?? 'My presets'))).map((g) => (
+                <optgroup key={g} label={g}>
+                  {presets.map((p, i) => (p.group ?? 'My presets') === g ? <option key={i} value={i}>{p.name}</option> : null)}
+                </optgroup>
+              ))}
             </select>
           </label>
+          {(preset.blade || preset.note) && (
+            <p className="hint">
+              {preset.blade && <><b>Blade:</b> {preset.blade}. </>}
+              {preset.note}
+              {' '}Starting point — always test cut; lower force if the liner is scored, raise it if the blade does not go through.
+            </p>
+          )}
           <div className="grid3">
             <label>Force<input type="number" min={1} max={38} value={preset.force} onChange={(e) => updatePreset({ force: +e.target.value })} /></label>
             <label>Speed<input type="number" min={1} max={64} value={preset.speed} onChange={(e) => updatePreset({ speed: +e.target.value })} /></label>
