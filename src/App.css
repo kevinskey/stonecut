@@ -405,3 +405,9 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 .modal-warn { margin: 6px 0; padding: 6px 10px; border-radius: 6px; background: #3a2c14; color: #f0b95e; font-size: 12px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 12px; }
 .modal-actions button { flex: 1; margin-top: 0; }
+
+/* ---------- vector cuts ---------- */
+.veclist { margin-top: 8px; padding: 8px 10px; border: 1px solid #2b3240; border-radius: 8px; background: #1d2230; }
+.veclist.sel { border-color: #f0b95e; }
+.vecname { font-weight: 600; margin-bottom: 4px; }
+.vecname .dim { font-weight: 400; color: #8b96ab; }

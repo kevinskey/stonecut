@@ -5,6 +5,7 @@ import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { grantedCutter } from './usb'
+import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToRaster } from './image'
 import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
@@ -25,6 +26,12 @@ type StoneMode = 'outline' | 'fill' | 'both'
 // laid out again at the panel's current stone size and spacing.
 interface Recipe { contours: Pt[][]; mode: StoneMode; wholeWord: boolean; sx: number; sy: number }
 type Elements = Record<number, Recipe>
+// A vector cut: an imported SVG flattened to mm polylines. `base` is the
+// file's geometry normalised to (0,0); x/y/s place and scale it on the board.
+// These are cut as LINES (pen down along the path), not as stone holes.
+interface VecItem { id: number; name: string; base: Pt[][]; baseW: number; baseH: number; x: number; y: number; s: number }
+const vecPaths = (v: VecItem): Pt[][] => v.base.map((p) => p.map((q) => ({ x: q.x * v.s + v.x, y: q.y * v.s + v.y })))
+const vecBox = (v: VecItem) => ({ minX: v.x, minY: v.y, maxX: v.x + v.baseW * v.s, maxY: v.y + v.baseH * v.s })
 const normaliseContours = (contours: Pt[][]): Pt[][] => {
   let minX = Infinity, minY = Infinity
   for (const c of contours) for (const q of c) { if (q.x < minX) minX = q.x; if (q.y < minY) minY = q.y }
@@ -76,20 +83,23 @@ const ZOOM_MAX = 40
 // browser so a refresh, a crash, or a closed tab does not wipe the work.
 // Settings were always saved; the stones were the one thing that was not.
 const DESIGN_KEY = 'stonecut.design'
-function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements } | null {
+function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements; vectors: VecItem[] } | null {
   try {
     const raw = localStorage.getItem(DESIGN_KEY)
     if (!raw) return null
     const d = JSON.parse(raw)
-    if (!Array.isArray(d?.stones)) return null
-    const stones = (d.stones as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
+    if (!Array.isArray(d?.stones) && !Array.isArray(d?.vectors)) return null
+    const stones = ((d.stones ?? []) as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
     const sizes = d.sizes && typeof d.sizes === 'object' ? { ...DEFAULT_SIZES, ...d.sizes } : { ...DEFAULT_SIZES }
     const elements: Elements = {}
     if (d.elements && typeof d.elements === 'object')
       for (const [k, r] of Object.entries(d.elements as Record<string, Recipe>))
         if (Array.isArray(r?.contours) && typeof r.sx === 'number' && typeof r.sy === 'number')
           elements[+k] = { contours: r.contours, mode: r.mode ?? 'outline', wholeWord: !!r.wholeWord, sx: r.sx, sy: r.sy }
-    return { stones, sizes, elements }
+    const vectors: VecItem[] = Array.isArray(d.vectors)
+      ? (d.vectors as VecItem[]).filter((v) => Array.isArray(v?.base) && typeof v.x === 'number' && typeof v.s === 'number')
+      : []
+    return { stones, sizes, elements, vectors }
   } catch {
     return null
   }
@@ -109,23 +119,28 @@ export default function App() {
   const [elements, setElements] = useState<Elements>(() => savedDesign.current?.elements ?? {})
   const elementsRef = useRef<Elements>(elements)
   elementsRef.current = elements
+  const [vectors, setVectors] = useState<VecItem[]>(() => savedDesign.current?.vectors ?? [])
+  const vectorsRef = useRef<VecItem[]>(vectors)
+  vectorsRef.current = vectors
+  const vecSeq = useRef((savedDesign.current?.vectors ?? []).reduce((m, v) => Math.max(m, v.id), 0) + 1)
+  const [selVec, setSelVec] = useState<number | null>(null)
   // Save the design shortly after it stops changing (drags fire many updates).
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        if (stones.length) {
+        if (stones.length || vectors.length) {
           // only keep recipes for elements that still have stones
           const live = new Set(stones.map((st) => st.el))
           const kept: Elements = {}
           for (const [k, r] of Object.entries(elements)) if (live.has(+k)) kept[+k] = r
-          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept }))
+          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept, vectors }))
         } else localStorage.removeItem(DESIGN_KEY)
       } catch (e) {
         console.error('[stonecut] could not save design', e)
       }
     }, 400)
     return () => clearTimeout(t)
-  }, [stones, sizes, elements])
+  }, [stones, sizes, elements, vectors])
   const [curSize, setCurSize] = useState('SS10')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
@@ -395,11 +410,18 @@ export default function App() {
   const [presetIdx, setPresetIdx] = useState(0)
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
-  const undoStack = useRef<{ stones: Stone[]; elements: Elements }[]>([])
+  const undoStack = useRef<{ stones: Stone[]; elements: Elements; vectors: VecItem[] }[]>([])
   const pushUndo = useCallback((prev: Stone[]) => {
-    undoStack.current.push({ stones: prev, elements: elementsRef.current })
+    undoStack.current.push({ stones: prev, elements: elementsRef.current, vectors: vectorsRef.current })
     if (undoStack.current.length > 50) undoStack.current.shift()
   }, [])
+  const mutateVectors = useCallback(
+    (fn: (prev: VecItem[]) => VecItem[]) => {
+      pushUndo(stonesRef.current)
+      setVectors((prev) => fn(prev))
+    },
+    [pushUndo],
+  )
   const mutate = useCallback(
     (fn: (prev: Stone[]) => Stone[]) => {
       setStones((prev) => {
@@ -413,15 +435,20 @@ export default function App() {
   const holeOf = useCallback((s: Stone) => sizes[s.size]?.holeMm ?? 3, [sizes])
 
   const bbox = useMemo(() => {
-    if (!stones.length) return { minX: 0, minY: 0, maxX: 100, maxY: 60 }
+    if (!stones.length && !vectors.length) return { minX: 0, minY: 0, maxX: 100, maxY: 60 }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const s of stones) {
       const r = holeOf(s) / 2
       minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
       maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
     }
+    for (const v of vectors) {
+      const b = vecBox(v)
+      minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY)
+      maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY)
+    }
     return { minX, minY, maxX, maxY }
-  }, [stones, holeOf])
+  }, [stones, vectors, holeOf])
 
   const job = useMemo(() => {
     if (placement === 'artboard') {
@@ -429,7 +456,7 @@ export default function App() {
       // machine origin, so on-screen placement is the cut placement.
       // NOT rounded: heightMm is the datum the exporters flip Y against, so
       // ceiling a 304.8mm sheet to 305 would shift the whole design 0.2mm.
-      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm }
+      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm, paths: vectors.flatMap(vecPaths) }
     }
     const w = bbox.maxX - bbox.minX + margin * 2
     const h = bbox.maxY - bbox.minY + margin * 2
@@ -438,25 +465,26 @@ export default function App() {
       sizes,
       widthMm: Math.ceil(w),
       heightMm: Math.ceil(h),
+      paths: vectors.flatMap(vecPaths).map((p) => p.map((q) => ({ x: q.x - bbox.minX + margin, y: q.y - bbox.minY + margin }))),
     }
-  }, [stones, bbox, sizes, margin, placement, boardWmm, boardHmm])
+  }, [stones, vectors, bbox, sizes, margin, placement, boardWmm, boardHmm])
 
   // In artboard mode anything past the sheet edge cuts at negative or
   // over-range coordinates, which the CE6000 silently clips.
   const offBoard =
     placement === 'artboard' &&
-    stones.length > 0 &&
+    (stones.length > 0 || vectors.length > 0) &&
     (bbox.minX < 0 || bbox.minY < 0 || bbox.maxX > boardWmm || bbox.maxY > boardHmm)
 
   // Where the design sits relative to the machine's ORIGIN corner, in inches:
   // `across` along the carriage, `feed` up the media. This is what the
   // operator can measure on the cutter, so it is what the inputs speak.
   const fromOrigin = useMemo(() => {
-    if (!stones.length) return null
+    if (!stones.length && !vectors.length) return null
     const acrossMm = originCorner === 'br' ? boardWmm - bbox.maxX : bbox.minX
     const feedMm = boardHmm - bbox.maxY
     return { across: acrossMm / 25.4, feed: feedMm / 25.4 }
-  }, [stones.length, bbox, originCorner, boardWmm, boardHmm])
+  }, [stones.length, vectors.length, bbox, originCorner, boardWmm, boardHmm])
   const placeFromOrigin = useCallback((acrossIn: number, feedIn: number) => {
     if (!fromOrigin) return
     const dAcross = (acrossIn - fromOrigin.across) * 25.4
@@ -1000,9 +1028,9 @@ export default function App() {
   }, [setView, viewport])
   const fitSheet = useCallback(() => fitRect(0, 0, boardWmm, boardHmm), [fitRect, boardWmm, boardHmm])
   const fitDesign = useCallback(() => {
-    if (!stones.length) { fitSheet(); return }
+    if (!stones.length && !vectors.length) { fitSheet(); return }
     fitRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY, 48)
-  }, [stones.length, bbox, fitRect, fitSheet])
+  }, [stones.length, vectors.length, bbox, fitRect, fitSheet])
   // Pinch / ⌘-wheel zooms about the cursor. Native listener: React's wheel
   // handler can't reliably preventDefault, and the page would zoom instead.
   useEffect(() => {
@@ -1265,10 +1293,26 @@ export default function App() {
         return
       }
       if (hit === -1) {
+        // a vector cut line under the cursor? nearest one within the slop
+        let bestV: number | null = null
+        let bestD = slop + 0.3
+        for (const v of vectors) {
+          const d = distToPaths(vecPaths(v), p)
+          if (d < bestD) { bestD = d; bestV = v.id }
+        }
+        if (bestV != null) {
+          setSelection(new Set())
+          setSelVec(bestV)
+          vecDrag.current = { id: bestV, startX: p.x, startY: p.y, moved: false }
+          if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
+          return
+        }
+        setSelVec(null)
         if (!e.shiftKey) setSelection(new Set())
         marqueeRef.current = { x0: p.x, y0: p.y, additive: e.shiftKey }
         return
       }
+      setSelVec(null)
       setSelection((prev) => {
         const next = e.shiftKey ? new Set(prev) : prev.has(hit) ? new Set(prev) : new Set<number>()
         next.add(hit)
@@ -1277,8 +1321,9 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
+    [toMm, stones, vectors, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
   )
+  const vecDrag = useRef<{ id: number; startX: number; startY: number; moved: boolean } | null>(null)
 
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
@@ -1317,6 +1362,16 @@ export default function App() {
         }, 90)
         return
       }
+      const vd = vecDrag.current
+      if (vd) {
+        const p = toMm(e)
+        const dx = p.x - vd.startX, dy = p.y - vd.startY
+        if (!vd.moved && Math.hypot(dx, dy) * zoom < 3) return
+        if (!vd.moved) { vd.moved = true; pushUndo(stonesRef.current) }
+        vd.startX = p.x; vd.startY = p.y
+        setVectors((prev) => prev.map((v) => (v.id === vd.id ? { ...v, x: v.x + dx, y: v.y + dy } : v)))
+        return
+      }
       if (!drag.current || tool !== 'select' || selection.size === 0) {
         // hover feedback: a hand over a stone says "this will move", a
         // resize arrow over a handle says "this will resize"
@@ -1345,6 +1400,7 @@ export default function App() {
 
   const onCanvasUp = useCallback(() => {
     drag.current = null
+    vecDrag.current = null
     if (svgRef.current) svgRef.current.style.cursor = ''
     const rz = resizeRef.current
     if (rz) {
@@ -1377,7 +1433,7 @@ export default function App() {
   // Leaving the SVG used to cancel it mid-move; now the move continues until
   // the button comes up, wherever that is.
   useEffect(() => {
-    const up = () => { if (drag.current || marqueeRef.current || resizeRef.current) onCanvasUp() }
+    const up = () => { if (drag.current || marqueeRef.current || resizeRef.current || vecDrag.current) onCanvasUp() }
     window.addEventListener('mouseup', up)
     return () => window.removeEventListener('mouseup', up)
   }, [onCanvasUp])
@@ -1428,6 +1484,9 @@ export default function App() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size) {
         mutate((prev) => prev.filter((_, i) => !selection.has(i)))
         setSelection(new Set())
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selVec != null) {
+        mutateVectors((prev) => prev.filter((v) => v.id !== selVec))
+        setSelVec(null)
       }
       // arrow keys nudge the selection: 0.5 mm, Shift = 5 mm
       const nudge = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, [number, number]>)[e.key]
@@ -1436,11 +1495,17 @@ export default function App() {
         const step = e.shiftKey ? 5 : 0.5
         const [nx, ny] = nudge
         mutate((prev) => prev.map((s, i) => (selection.has(i) ? { ...s, x: s.x + nx * step, y: s.y + ny * step } : s)))
+      } else if (nudge && selVec != null) {
+        e.preventDefault()
+        const step = e.shiftKey ? 5 : 0.5
+        const [nx, ny] = nudge
+        mutateVectors((prev) => prev.map((v) => (v.id === selVec ? { ...v, x: v.x + nx * step, y: v.y + ny * step } : v)))
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         const prev = undoStack.current.pop()
-        if (prev) { setStones(prev.stones); setElements(prev.elements) }
+        if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
         setSelection(new Set())
+        setSelVec(null)
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
         e.preventDefault()
@@ -1453,7 +1518,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVec, mutateVectors])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -1481,14 +1546,17 @@ export default function App() {
   // ---------- cut / export ----------
   // Cut layers: outline and fill are separate physical cuts, but BOTH use the
   // full design's frame so the two templates register when stacked.
-  const [cutLayer, setCutLayer] = useState<'all' | 'outline' | 'fill'>('all')
+  const [cutLayer, setCutLayer] = useState<'all' | 'outline' | 'fill' | 'lines'>('all')
   const cutJob = useMemo(
     () =>
       cutLayer === 'all'
         ? job
-        : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer) },
+        : cutLayer === 'lines'
+          ? { ...job, stones: [] }
+          : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] },
     [job, cutLayer],
   )
+  const cutCount = cutJob.stones.length + (cutJob.paths?.length ?? 0)
   const layerCounts = useMemo(() => {
     let o = 0
     let f = 0
@@ -1508,10 +1576,10 @@ export default function App() {
   // first time; after that the granted cutter is reopened silently.
   const [cutConfirm, setCutConfirm] = useState<{ device: string | null } | null>(null)
   const doSend = useCallback(async () => {
-    if (!stones.length) { setStatus('Nothing to cut'); return }
+    if (!cutCount) { setStatus('Nothing to cut'); return }
     const d = await grantedCutter()
     setCutConfirm({ device: d?.name ?? null })
-  }, [stones.length])
+  }, [cutCount])
   const doSendNow = useCallback(async () => {
     setCutConfirm(null)
     try {
@@ -1699,6 +1767,44 @@ export default function App() {
       .join('')
   }, [textPreview, zoom, previewOffsetY])
 
+  // ---------- vector cuts ----------
+  const importSvg = useCallback(() => {
+    const inp = document.createElement('input')
+    inp.type = 'file'
+    inp.accept = '.svg,image/svg+xml'
+    inp.onchange = async () => {
+      const f = inp.files?.[0]
+      if (!f) return
+      try {
+        const r = parseSvgToPaths(await f.text(), f.name.replace(/\.svg$/i, ''))
+        // fit onto the board if the file is larger than the media
+        const s = Math.min(1, (boardWmm - 20) / r.widthMm, (boardHmm - 20) / r.heightMm)
+        const id = vecSeq.current++
+        const below = stones.length || vectors.length ? bbox.maxY + 10 : 10
+        const y = Math.max(10, Math.min(below, boardHmm - r.heightMm * s - 10))
+        mutateVectors((prev) => [...prev, { id, name: r.name, base: r.paths, baseW: r.widthMm, baseH: r.heightMm, x: 10, y, s }])
+        setSelVec(id)
+        const pts = r.paths.reduce((n, p) => n + p.length, 0)
+        setStatus(
+          `Imported ${r.name}: ${r.paths.length} cut line${r.paths.length === 1 ? '' : 's'}, ${pts} points, ${r.widthMm.toFixed(0)} × ${r.heightMm.toFixed(0)} mm` +
+          (s < 1 ? ` (scaled to ${Math.round(s * 100)}% to fit the board)` : '') +
+          (r.skipped ? ` · ${r.skipped} text/image element${r.skipped === 1 ? '' : 's'} skipped` : ''),
+        )
+      } catch (e) {
+        setStatus(`SVG import failed: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    inp.click()
+  }, [boardWmm, boardHmm, stones.length, vectors.length, bbox.maxY, mutateVectors])
+  const resizeVector = useCallback((id: number, widthMm: number | null, heightMm: number | null) => {
+    mutateVectors((prev) => prev.map((v) => {
+      if (v.id !== id) return v
+      const s = widthMm != null ? widthMm / v.baseW : heightMm != null ? heightMm / v.baseH : v.s
+      return isFinite(s) && s > 0 ? { ...v, s } : v
+    }))
+  }, [mutateVectors])
+  ;(window as unknown as { __scParseSvg?: unknown }).__scParseSvg = parseSvgToPaths
+
   // ---------- menu bar ----------
   const [showShortcuts, setShowShortcuts] = useState(false)
   // Sidebar sections are plain <details>; the Window menu opens one by title
@@ -1713,8 +1819,8 @@ export default function App() {
     if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
   }, [])
   const saveDesignFile = useCallback(() => {
-    download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements }), 'application/json')
-  }, [stones, sizes, elements])
+    download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements, vectors }), 'application/json')
+  }, [stones, sizes, elements, vectors])
   const openDesignFile = useCallback(() => {
     const inp = document.createElement('input')
     inp.type = 'file'
@@ -1724,12 +1830,15 @@ export default function App() {
       if (!f) return
       try {
         const d = JSON.parse(await f.text())
-        if (!Array.isArray(d?.stones)) throw new Error('not a StoneCut design file')
+        if (!Array.isArray(d?.stones) && !Array.isArray(d?.vectors)) throw new Error('not a StoneCut design file')
         pushUndo(stonesRef.current)
-        const loaded = d.stones as Stone[]
+        const loaded = (d.stones ?? []) as Stone[]
         setStones(loaded)
         if (d.sizes && typeof d.sizes === 'object') setSizes({ ...DEFAULT_SIZES, ...d.sizes })
         setElements(d.elements && typeof d.elements === 'object' ? d.elements : {})
+        const vecs: VecItem[] = Array.isArray(d.vectors) ? d.vectors : []
+        setVectors(vecs)
+        vecSeq.current = vecs.reduce((m, v) => Math.max(m, v.id), 0) + 1
         elSeq.current = loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1
         setSelection(new Set())
         setStatus(`Opened ${f.name}: ${loaded.length} stones`)
@@ -1741,13 +1850,15 @@ export default function App() {
   }, [pushUndo])
   const clearAll = useCallback(() => {
     if (stones.length) mutate(() => [])
+    if (vectors.length) setVectors([])
+    setSelVec(null)
     setSelection(new Set())
     setText('')
     setImageFile(null)
     setImagePreview(null)
     setPreviewStones(null)
     setPreviewLive(false)
-  }, [stones.length, mutate])
+  }, [stones.length, vectors.length, mutate])
   const selectWhere = useCallback((pred: (s: Stone, i: number) => boolean) => {
     setSelection(new Set(stones.map((st, i) => (pred(st, i) ? i : -1)).filter((i) => i >= 0)))
   }, [stones])
@@ -1764,22 +1875,24 @@ export default function App() {
   }, [stones.length, bbox, boardWmm, boardHmm, mutate])
   const undo = useCallback(() => {
     const prev = undoStack.current.pop()
-    if (prev) { setStones(prev.stones); setElements(prev.elements) }
+    if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
     setSelection(new Set())
+    setSelVec(null)
   }, [])
   const hasSel = selection.size > 0
   const hasStones = stones.length > 0
-  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Edit', 'Material', 'Cut']
+  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Edit', 'Material', 'Cut']
   const menus: Menu[] = [
     { label: 'File', items: [
-      { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending },
+      { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending && !vectors.length },
       { label: 'Open design…', onClick: openDesignFile },
+      { label: 'Import vector cut (SVG)…', onClick: importSvg },
       { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
       'sep',
-      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutJob.stones.length },
-      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutJob.stones.length },
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutCount },
+      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutCount },
       'sep',
-      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutJob.stones.length },
+      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount },
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
@@ -1847,7 +1960,8 @@ export default function App() {
             <h3>⚡ Cut on Graphtec</h3>
             <table className="modal-facts"><tbody>
               <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Not connected yet — Chrome will ask which cutter to use, this once'}</td></tr>
-              <tr><td>Stones</td><td>{cutJob.stones.length}{cutLayer !== 'all' ? ` (${cutLayer} layer)` : ''}</td></tr>
+              <tr><td>Stones</td><td>{cutJob.stones.length}{cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
+              {(cutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{cutJob.paths!.length} path{cutJob.paths!.length === 1 ? '' : 's'}</td></tr>}
               <tr><td>Size</td><td>{((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}″ × {((bbox.maxY - bbox.minY) / 25.4).toFixed(2)}″</td></tr>
               {fromOrigin && placement === 'artboard' && (
                 <tr><td>From origin</td><td>{fromOrigin.across.toFixed(2)}″ across, {fromOrigin.feed.toFixed(2)}″ up</td></tr>
@@ -2325,6 +2439,40 @@ export default function App() {
           </button>
         </Section>
 
+        <Section title="Vector cut">
+          <p className="hint">
+            Cut an SVG's outlines as lines on the Graphtec — vinyl, stencils, the template's own border.
+            Every shape in the file becomes a cut path; text must be converted to outlines first.
+          </p>
+          <button onClick={importSvg}>Import SVG…</button>
+          {vectors.map((v) => {
+            const b = vecBox(v)
+            return (
+              <div key={v.id} className={`veclist${selVec === v.id ? ' sel' : ''}`} onClick={() => { setSelVec(v.id); setSelection(new Set()) }}>
+                <div className="vecname">{v.name} <span className="dim">· {v.base.length} line{v.base.length === 1 ? '' : 's'}</span></div>
+                <div className="grid2" key={`vs-${v.id}-${v.s.toFixed(4)}`}>
+                  <label>Width (mm)
+                    <input type="number" min={1} step={1} defaultValue={Math.round(b.maxX - b.minX)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { resizeVector(v.id, +(e.target as HTMLInputElement).value || null, null); (e.target as HTMLInputElement).blur() } }}
+                      onBlur={(e) => { const n = +e.target.value; if (n && Math.abs(n - (b.maxX - b.minX)) >= 0.5) resizeVector(v.id, n, null) }} />
+                  </label>
+                  <label>Height (mm)
+                    <input type="number" min={1} step={1} defaultValue={Math.round(b.maxY - b.minY)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { resizeVector(v.id, null, +(e.target as HTMLInputElement).value || null); (e.target as HTMLInputElement).blur() } }}
+                      onBlur={(e) => { const n = +e.target.value; if (n && Math.abs(n - (b.maxY - b.minY)) >= 0.5) resizeVector(v.id, null, n) }} />
+                  </label>
+                </div>
+                <div className="toolrow">
+                  <button onClick={(e) => { e.stopPropagation(); mutateVectors((prev) => prev.filter((x) => x.id !== v.id)); if (selVec === v.id) setSelVec(null) }}>Remove</button>
+                </div>
+              </div>
+            )
+          })}
+          {vectors.length > 0 && (
+            <p className="hint">Click a line on the board to select it, drag to move, arrows nudge. Lines cut after the holes, in the same pass.</p>
+          )}
+        </Section>
+
         <Section title="Edit">
           <div className="toolrow">
             <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
@@ -2432,9 +2580,10 @@ export default function App() {
         <Section title="Cut">
           <label>Layer
             <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value as typeof cutLayer)}>
-              <option value="all">All stones ({stones.length})</option>
-              <option value="outline">Outline only ({layerCounts.o})</option>
-              <option value="fill">Fill only ({layerCounts.f})</option>
+              <option value="all">Everything ({stones.length} stones{vectors.length ? ` + ${job.paths?.length ?? 0} cut lines` : ''})</option>
+              <option value="outline">Outline stones only ({layerCounts.o})</option>
+              <option value="fill">Fill stones only ({layerCounts.f})</option>
+              {vectors.length > 0 && <option value="lines">Vector cut lines only ({job.paths?.length ?? 0})</option>}
             </select>
           </label>
           {cutLayer !== 'all' && (
@@ -2508,8 +2657,8 @@ export default function App() {
             </p>
           )}
           <div className="toolrow">
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
           </div>
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
@@ -2585,7 +2734,7 @@ export default function App() {
           </details>
         </Section>
         <div className="cutbar">
-          <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <button className="primary" disabled={!cutCount} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="cutbar-meta">
             {cutJob.stones.length ? `${cutJob.stones.length} stones` : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
@@ -2723,6 +2872,18 @@ export default function App() {
               pointerEvents="none"
             />
           )}
+          {vectors.map((v) => (
+            <path
+              key={v.id}
+              d={pathsToD(v.base)}
+              transform={`translate(${v.x * zoom} ${v.y * zoom}) scale(${v.s * zoom})`}
+              fill="none"
+              stroke={selVec === v.id ? '#f0b95e' : '#8fd3ff'}
+              strokeWidth={selVec === v.id ? 2 : 1.5}
+              vectorEffect="non-scaling-stroke"
+              pointerEvents="none"
+            />
+          ))}
           {tool === 'select' && selBox && (() => {
             const b = resizeBox ?? selBox
             const w = b.maxX - b.minX, h = b.maxY - b.minY

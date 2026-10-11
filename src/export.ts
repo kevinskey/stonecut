@@ -1,4 +1,4 @@
-import type { MaterialPreset, Stone, StoneSpec } from './model'
+import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { orderNearestNeighbor } from './geometry'
 
 export interface Job {
@@ -6,6 +6,9 @@ export interface Job {
   sizes: Record<string, StoneSpec>
   widthMm: number
   heightMm: number
+  // Vector cut lines (mm polylines in the same frame as the stones). Cut
+  // AFTER the holes so the sheet stays anchored while the small circles go.
+  paths?: Pt[][]
 }
 
 const holeOf = (job: Job, s: Stone) => (job.sizes[s.size]?.holeMm ?? 3) / 2
@@ -28,10 +31,14 @@ export function toSVG(job: Job): string {
         `  <circle cx="${s.x.toFixed(3)}" cy="${s.y.toFixed(3)}" r="${holeOf(job, s).toFixed(3)}"/>`,
     )
     .join('\n')
+  const lines = (job.paths ?? [])
+    .map((p) => `  <path d="M${p.map((q) => `${q.x.toFixed(3)},${q.y.toFixed(3)}`).join('L')}"/>`)
+    .join('\n')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${job.widthMm}mm" height="${job.heightMm}mm" viewBox="0 0 ${job.widthMm} ${job.heightMm}">
 <g fill="none" stroke="#000" stroke-width="0.1">
 ${circles}
+${lines}
 </g>
 </svg>
 `
@@ -66,6 +73,11 @@ export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 
       lines.push(`PU${pts[0]};`)
       lines.push(`PD${pts.slice(1).join(',')};`)
     }
+  }
+  for (const p of job.paths ?? []) {
+    const pts = p.map((q) => `${Math.round(mapX(job, origin, q.x) * U)},${Math.round((job.heightMm - q.y) * U)}`)
+    lines.push(`PU${pts[0]};`)
+    lines.push(`PD${pts.slice(1).join(',')};`)
   }
   lines.push('PU0,0;', 'SP0;', 'IN;')
   return lines.join('\n') + '\n'
@@ -130,6 +142,15 @@ export function toGPGL(
       cmds.push(`M${pt(0)}`)
       for (let i = 1; i <= n; i++) cmds.push(`D${pt(i)}`)
     }
+  }
+  for (const p of job.paths ?? []) {
+    const enc = (q: Pt) => {
+      const px = Math.round(mapX(job, origin, q.x) * U)
+      const py = Math.round((job.heightMm - q.y) * U)
+      return swapAxes ? `${py},${px}` : `${px},${py}`
+    }
+    cmds.push(`M${enc(p[0])}`)
+    for (let i = 1; i < p.length; i++) cmds.push(`D${enc(p[i])}`)
   }
   cmds.push('M0,0')
   return cmds.join('\x03') + '\x03'
