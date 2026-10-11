@@ -1807,6 +1807,46 @@ export default function App() {
   }, [textPreview, zoom, previewOffsetY])
 
   // ---------- vector cuts ----------
+  // Put a set of mm polylines on the board as a cut-line item. Closed shapes
+  // get their last point joined back to the first so the blade finishes the
+  // loop. `at` is the top-left in board mm; default is below the design.
+  const addVector = useCallback((paths: Pt[][], name: string, at?: Pt) => {
+    const closed = paths.map((pl) => {
+      if (pl.length < 3) return pl
+      const a = pl[0], b = pl[pl.length - 1]
+      return Math.hypot(a.x - b.x, a.y - b.y) > 0.01 ? [...pl, { x: a.x, y: a.y }] : pl
+    })
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const pl of closed) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+    if (!isFinite(minX)) { setStatus('Nothing to cut in that'); return null }
+    const base = closed.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY })))
+    const w = maxX - minX, h = maxY - minY
+    const sc = Math.min(1, (boardWmm - 20) / w, (boardHmm - 20) / h)
+    const id = vecSeq.current++
+    const below = stones.length || vectors.length ? bbox.maxY + 10 : 10
+    const y = at ? at.y : Math.max(10, Math.min(below, boardHmm - h * sc - 10))
+    const x = at ? at.x : 10
+    mutateVectors((prev) => [...prev, { id, name, base, baseW: w, baseH: h, x, y, s: sc }])
+    setSelVec(id)
+    setSelection(new Set())
+    return { id, w, h, scale: sc, lines: base.length }
+  }, [boardWmm, boardHmm, stones.length, vectors.length, bbox.maxY, mutateVectors])
+  // Text as cut lines: the same font outlines the stone preview is drawn
+  // from, placed exactly where the preview shows, cut as a vinyl-style
+  // outline instead of holes.
+  const textAsCutLines = useCallback(() => {
+    if (!textPreview || !textPreview.contours.length) { setStatus('Type some text and pick a font first'); return }
+    const r = addVector(textPreview.contours, text.trim() || 'text', { x: 10, y: previewOffsetY })
+    if (!r) return
+    setPreviewBaseY(null)
+    setPreviewLive(false)
+    setStatus(`Added "${text.trim()}" as ${r.lines} cut line${r.lines === 1 ? '' : 's'} · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm`)
+  }, [textPreview, text, previewOffsetY, addVector])
+  const shapeAsCutLines = useCallback(() => {
+    const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
+    const r = addVector(contours, shapeKind)
+    if (r) setStatus(`Added ${shapeKind} as a cut line · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm`)
+  }, [shapeKind, shapeW, shapeH, addVector])
   const importSvg = useCallback(() => {
     const inp = document.createElement('input')
     inp.type = 'file'
@@ -1954,6 +1994,7 @@ export default function App() {
     ] },
     { label: 'Type', items: [
       { label: 'Add text…', onClick: () => openSection('Text', 'input') },
+      { label: 'Add text as cut lines', onClick: textAsCutLines, disabled: !textPreview },
       { label: 'Fonts…', onClick: () => { openSection('Text'); setFontOpen(true) } },
       'sep',
       { label: 'Add a shape…', onClick: () => openSection('Shapes') },
@@ -2253,6 +2294,8 @@ export default function App() {
           <button className={`primary${pendingText ? ' urgent' : ''}`} onClick={generateText}>
             {pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones'}
           </button>
+          <button onClick={textAsCutLines} disabled={!textPreview}>Add text as cut lines (no stones)</button>
+          <p className="hint">Cut lines follow the letter outlines — vinyl lettering, a stencil, or a border around the stones.</p>
         </Section>
         <Section title="Fill">
           <div className="grid2">
@@ -2323,6 +2366,7 @@ export default function App() {
             the Stones and Fill panels. Shapes are added below the existing design.
           </p>
           <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
+          <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
         </Section>
 
         <Section title="Templates" defaultOpen={false}>
