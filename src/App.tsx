@@ -1024,14 +1024,33 @@ export default function App() {
     [zoom],
   )
 
+  // Hit slop in SCREEN pixels, converted to mm at the current zoom. A fixed
+  // 0.5 mm slop was under a pixel when zoomed out to see the whole sheet,
+  // where an SS10 hole is a 5 px target — selecting anything was luck.
+  // Picks the NEAREST stone inside the slop, not the first one found.
+  const HIT_SLOP_PX = 7
+  const pickStone = useCallback(
+    (p: Pt, slopMm: number) => {
+      let best = -1
+      let bestD = Infinity
+      for (let i = 0; i < stones.length; i++) {
+        const d = Math.hypot(stones[i].x - p.x, stones[i].y - p.y)
+        if (d <= holeOf(stones[i]) / 2 + slopMm && d < bestD) { bestD = d; best = i }
+      }
+      return best
+    },
+    [stones, holeOf],
+  )
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
+      if (e.button !== 0) return
+      e.preventDefault() // no text selection / native drag while moving stones
       const p = toMm(e)
-      // Add mode gets NO hit slop: dense fills sit closer together than the
-      // 0.5mm select-mode slop, so with slop every click in a gap "hit" a
-      // neighbour and erased it — adding a hole between stones was impossible.
-      const slop = tool === 'add' ? 0 : 0.5
-      const hit = stones.findIndex((s) => Math.hypot(s.x - p.x, s.y - p.y) <= holeOf(s) / 2 + slop)
+      // Add mode gets NO hit slop: dense fills sit closer together than any
+      // slop, so with slop every click in a gap "hit" a neighbour and erased
+      // it — adding a hole between stones was impossible.
+      const slop = tool === 'add' ? 0 : Math.max(0.5, HIT_SLOP_PX / zoom)
+      const hit = pickStone(p, slop)
       if (tool === 'add') {
         if (hit === -1) {
           // "auto" matches whatever field the click lands in: a click inside
@@ -1085,8 +1104,9 @@ export default function App() {
         return next
       })
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
+      if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, tool, curSize, addSize, holeOf, mutate],
+    [toMm, stones, tool, curSize, addSize, mutate, pickStone, zoom],
   )
 
   const onCanvasMove = useCallback(
@@ -1096,11 +1116,19 @@ export default function App() {
         setMarquee({ x0: marqueeRef.current.x0, y0: marqueeRef.current.y0, x1: p.x, y1: p.y })
         return
       }
-      if (!drag.current || tool !== 'select' || selection.size === 0) return
+      if (!drag.current || tool !== 'select' || selection.size === 0) {
+        // hover feedback: a hand over a stone says "this will move"
+        if (tool === 'select' && svgRef.current && !drag.current) {
+          const over = pickStone(toMm(e), Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
+          svgRef.current.style.cursor = over ? 'grab' : ''
+        }
+        return
+      }
       const p = toMm(e)
       const dx = p.x - drag.current.startX
       const dy = p.y - drag.current.startY
-      if (!drag.current.moved && Math.hypot(dx, dy) < 0.3) return
+      // 3 screen px before a click turns into a drag, at any zoom
+      if (!drag.current.moved && Math.hypot(dx, dy) * zoom < 3) return
       if (!drag.current.moved) {
         drag.current.moved = true
         pushUndo(drag.current.orig)
@@ -1108,11 +1136,12 @@ export default function App() {
       const orig = drag.current.orig
       setStones(orig.map((s, i) => (selection.has(i) ? { ...s, x: s.x + dx, y: s.y + dy } : s)))
     },
-    [toMm, tool, selection, pushUndo],
+    [toMm, tool, selection, pushUndo, pickStone, zoom],
   )
 
   const onCanvasUp = useCallback(() => {
     drag.current = null
+    if (svgRef.current) svgRef.current.style.cursor = ''
     const mq = marqueeRef.current
     marqueeRef.current = null
     if (mq && marquee) {
@@ -1133,13 +1162,22 @@ export default function App() {
     setMarquee(null)
   }, [marquee, stones])
 
+  // A drag released over the sidebar or outside the window still ends.
+  // Leaving the SVG used to cancel it mid-move; now the move continues until
+  // the button comes up, wherever that is.
+  useEffect(() => {
+    const up = () => { if (drag.current || marqueeRef.current) onCanvasUp() }
+    window.addEventListener('mouseup', up)
+    return () => window.removeEventListener('mouseup', up)
+  }, [onCanvasUp])
+
   // double-click a stone: select every stone chained to it — outline and fill
   // link at ~3.75mm, neighbouring stones at the rhythm, while a separate
   // design sits 10mm+ away and stays unselected
   const onCanvasDoubleClick = useCallback(
     (e: React.MouseEvent) => {
       const p = toMm(e)
-      const start = stones.findIndex((st) => Math.hypot(st.x - p.x, st.y - p.y) <= holeOf(st) / 2 + 0.5)
+      const start = pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom))
       if (start < 0) return
       // element-tagged designs select as a unit — free-moving layers
       if (stones[start].el != null) {
@@ -1169,7 +1207,7 @@ export default function App() {
       setSelection(inSet)
       setStatus(`Selected design: ${inSet.size} stones — Del removes it`)
     },
-    [toMm, stones, holeOf, gap],
+    [toMm, stones, holeOf, gap, pickStone, zoom],
   )
 
   useEffect(() => {
@@ -1179,6 +1217,14 @@ export default function App() {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size) {
         mutate((prev) => prev.filter((_, i) => !selection.has(i)))
         setSelection(new Set())
+      }
+      // arrow keys nudge the selection: 0.5 mm, Shift = 5 mm
+      const nudge = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, [number, number]>)[e.key]
+      if (nudge && selection.size) {
+        e.preventDefault()
+        const step = e.shiftKey ? 5 : 0.5
+        const [nx, ny] = nudge
+        mutate((prev) => prev.map((s, i) => (selection.has(i) ? { ...s, x: s.x + nx * step, y: s.y + ny * step } : s)))
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         const prev = undoStack.current.pop()
@@ -1882,6 +1928,11 @@ export default function App() {
             <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
             <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')}>Add / erase</button>
           </div>
+          <p className="hint">
+            {tool === 'select'
+              ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group, double-click grabs a whole design. Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
+              : 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'}
+          </p>
           <label>New stone size
             <select value={addSize} onChange={(e) => setAddSize(e.target.value)}>
               <option value="auto">Auto — match nearest stone</option>
@@ -2191,7 +2242,6 @@ export default function App() {
           onMouseDown={onCanvasDown}
           onMouseMove={onCanvasMove}
           onMouseUp={onCanvasUp}
-          onMouseLeave={onCanvasUp}
           onDoubleClick={onCanvasDoubleClick}
         >
           <defs>

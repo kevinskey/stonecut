@@ -308,6 +308,7 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   display: block;
   background: #171b24;
   cursor: crosshair;
+  user-select: none;
 }
 
 .zoombar {
