@@ -15,6 +15,19 @@ import './App.css'
 
 type Tool = 'select' | 'add'
 type StoneMode = 'outline' | 'fill' | 'both'
+// What a committed design was generated FROM, kept so it can be re-stoned
+// at another size. Contours are normalised to a (0,0) top-left corner at
+// the scale they were generated; sx/sy is the scale the element is at now.
+// Resizing never scales holes: the contours are scaled and the stones are
+// laid out again at the panel's current stone size and spacing.
+interface Recipe { contours: Pt[][]; mode: StoneMode; wholeWord: boolean; sx: number; sy: number }
+type Elements = Record<number, Recipe>
+const normaliseContours = (contours: Pt[][]): Pt[][] => {
+  let minX = Infinity, minY = Infinity
+  for (const c of contours) for (const q of c) { if (q.x < minX) minX = q.x; if (q.y < minY) minY = q.y }
+  if (!isFinite(minX)) return contours
+  return contours.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY })))
+}
 
 const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in the Cut panel
 
@@ -60,7 +73,7 @@ const ZOOM_MAX = 40
 // browser so a refresh, a crash, or a closed tab does not wipe the work.
 // Settings were always saved; the stones were the one thing that was not.
 const DESIGN_KEY = 'stonecut.design'
-function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec> } | null {
+function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements } | null {
   try {
     const raw = localStorage.getItem(DESIGN_KEY)
     if (!raw) return null
@@ -68,7 +81,12 @@ function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec> } | n
     if (!Array.isArray(d?.stones)) return null
     const stones = (d.stones as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
     const sizes = d.sizes && typeof d.sizes === 'object' ? { ...DEFAULT_SIZES, ...d.sizes } : { ...DEFAULT_SIZES }
-    return { stones, sizes }
+    const elements: Elements = {}
+    if (d.elements && typeof d.elements === 'object')
+      for (const [k, r] of Object.entries(d.elements as Record<string, Recipe>))
+        if (Array.isArray(r?.contours) && typeof r.sx === 'number' && typeof r.sy === 'number')
+          elements[+k] = { contours: r.contours, mode: r.mode ?? 'outline', wholeWord: !!r.wholeWord, sx: r.sx, sy: r.sy }
+    return { stones, sizes, elements }
   } catch {
     return null
   }
@@ -85,18 +103,26 @@ export default function App() {
   const elSeq = useRef((savedDesign.current?.stones ?? []).reduce((m, s) => Math.max(m, s.el ?? 0), 0) + 1)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => savedDesign.current?.sizes ?? { ...DEFAULT_SIZES })
+  const [elements, setElements] = useState<Elements>(() => savedDesign.current?.elements ?? {})
+  const elementsRef = useRef<Elements>(elements)
+  elementsRef.current = elements
   // Save the design shortly after it stops changing (drags fire many updates).
   useEffect(() => {
     const t = setTimeout(() => {
       try {
-        if (stones.length) localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes }))
-        else localStorage.removeItem(DESIGN_KEY)
+        if (stones.length) {
+          // only keep recipes for elements that still have stones
+          const live = new Set(stones.map((st) => st.el))
+          const kept: Elements = {}
+          for (const [k, r] of Object.entries(elements)) if (live.has(+k)) kept[+k] = r
+          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept }))
+        } else localStorage.removeItem(DESIGN_KEY)
       } catch (e) {
         console.error('[stonecut] could not save design', e)
       }
     }, 400)
     return () => clearTimeout(t)
-  }, [stones, sizes])
+  }, [stones, sizes, elements])
   const [curSize, setCurSize] = useState('SS10')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
@@ -366,9 +392,9 @@ export default function App() {
   const [presetIdx, setPresetIdx] = useState(0)
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
-  const undoStack = useRef<Stone[][]>([])
+  const undoStack = useRef<{ stones: Stone[]; elements: Elements }[]>([])
   const pushUndo = useCallback((prev: Stone[]) => {
-    undoStack.current.push(prev)
+    undoStack.current.push({ stones: prev, elements: elementsRef.current })
     if (undoStack.current.length > 50) undoStack.current.shift()
   }, [])
   const mutate = useCallback(
@@ -461,7 +487,7 @@ export default function App() {
   // An empty board releases the pin. Clear all / delete / undo used to leave
   // the old pin behind, so the next preview sat wherever the LAST design
   // ended — often below the bottom edge of the media.
-  useEffect(() => { if (!stones.length) setPreviewBaseY(null) }, [stones.length])
+  useEffect(() => { if (!stones.length) { setPreviewBaseY(null); setElements({}) } }, [stones.length])
   // designHmm: height of the thing being previewed. A new preview stacks
   // below the existing stones, but never past the bottom of the media —
   // if it won't fit underneath it is pulled up onto the sheet (it may
@@ -745,12 +771,13 @@ export default function App() {
 
   // ---------- generation ----------
   const addGenerated = useCallback(
-    (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number) => {
+    (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number, recipe?: Omit<Recipe, 'sx' | 'sy'>) => {
       // each commit is its own ELEMENT: a free-moving layer that may overlap
       // other elements — nothing culls across elements anymore
       const el = elSeq.current++
       const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
       mutate((prev) => [...prev, ...fresh])
+      if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
     },
     [curSize, gap, mutate, sizes],
   )
@@ -758,19 +785,19 @@ export default function App() {
   // The contours -> stones stage, shared by text and shapes. Both feed the
   // same outline/fill machinery; only where the contours come from differs.
   const contoursToStones = useCallback(
-    (contours: Pt[][], mode: StoneMode) => {
+    (contours: Pt[][], mode: StoneMode, wholeWord = true) => {
     const hole = sizes[curSize]?.holeMm ?? 3
     const hardGap = hardGapOf(gap)
     const rhythm = hole + gap
     const idx = new SpacingIndex(hole + hardGap)
-    const pts: { x: number; y: number; size?: string; color?: string }[] = []
+    const pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[] = []
     const grid = rasterizeContours(contours, 6, outlineDesign === 'ghost' || outlineDesign === 'double' ? rhythm + hole : 0.5)
     let outline: { x: number; y: number }[] = []
     if (mode !== 'fill') {
       if (outlineDesign === 'ghost') {
         outline = offsetRows(grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
       } else {
-        outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, true, rhythm, uniformRhythm)
+        outline = outlineOrSpine(contours, grid, hole, hardGap, idx, outlineStyle, wholeWord, rhythm, uniformRhythm)
         if (outlineDesign === 'double')
           outline = outline.concat(offsetRows(grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
       }
@@ -790,7 +817,9 @@ export default function App() {
           const fInset = fHole / 2 + 0.1
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
-      const f = fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+      const f = wholeWord
+        ? fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+        : fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
       return pts
@@ -805,7 +834,7 @@ export default function App() {
     // commit exactly where the preview showed; release the pin so the next
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
-    addGenerated(pts, offsetY)
+    addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
     setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
@@ -819,7 +848,7 @@ export default function App() {
       return
     }
     const offsetY = stones.length ? bbox.maxY + 10 : 10
-    addGenerated(pts, offsetY)
+    addGenerated(pts, offsetY, { contours, mode: shapeMode, wholeWord: true })
     setStatus(`Added ${pts.length} stones from ${shapeKind}`)
   }, [shapeKind, shapeW, shapeH, shapeMode, contoursToStones, stones.length, bbox.maxY, addGenerated])
 
@@ -875,6 +904,7 @@ export default function App() {
       const kept = [...base, ...fresh]
       if (!replacing) pushUndo(stones) // regens share the original undo point
       setStones(kept)
+      setElements((prev) => ({ ...prev, [el]: { contours: normaliseContours(raster.contours), mode: imgMode, wholeWord: false, sx: 1, sy: 1 } }))
       lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept, el }
       setPreviewBaseY(null)
       setImagePreview(null)
@@ -1041,6 +1071,103 @@ export default function App() {
     },
     [stones, holeOf],
   )
+  // ---------- resize a whole design ----------
+  // Handles appear when the selection is exactly one complete element that
+  // has a recipe (double-click a design to get that). Dragging a handle
+  // re-stones the design at the new size from its recipe: the holes keep
+  // the panel's stone size, only how many there are and where they sit
+  // changes. Corner handles keep the proportions, edge handles stretch one
+  // axis.
+  type Box = { minX: number; minY: number; maxX: number; maxY: number }
+  type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+  const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+  const HANDLE_PX = 9
+  const handlePos = (b: Box, h: Handle): Pt => ({
+    x: h.includes('w') ? b.minX : h.includes('e') ? b.maxX : (b.minX + b.maxX) / 2,
+    y: h.includes('n') ? b.minY : h.includes('s') ? b.maxY : (b.minY + b.maxY) / 2,
+  })
+  const handleCursor = (h: Handle) =>
+    h === 'n' || h === 's' ? 'ns-resize' : h === 'e' || h === 'w' ? 'ew-resize' : h === 'nw' || h === 'se' ? 'nwse-resize' : 'nesw-resize'
+  const selectedEl = useMemo(() => {
+    if (!selection.size) return null
+    let el: number | undefined
+    for (const i of selection) {
+      const e = stones[i]?.el
+      if (e == null || (el != null && e !== el)) return null
+      el = e
+    }
+    if (el == null || !elements[el]) return null
+    for (let i = 0; i < stones.length; i++) if (stones[i].el === el && !selection.has(i)) return null
+    return el
+  }, [selection, stones, elements])
+  const selBox = useMemo<Box | null>(() => {
+    if (selectedEl == null) return null
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const st of stones) {
+      if (st.el !== selectedEl) continue
+      const r = holeOf(st) / 2
+      minX = Math.min(minX, st.x - r); minY = Math.min(minY, st.y - r)
+      maxX = Math.max(maxX, st.x + r); maxY = Math.max(maxY, st.y + r)
+    }
+    return isFinite(minX) ? { minX, minY, maxX, maxY } : null
+  }, [selectedEl, stones, holeOf])
+  const hitHandle = useCallback(
+    (p: Pt): Handle | null => {
+      if (!selBox || tool !== 'select') return null
+      const r = (HANDLE_PX / 2 + 4) / zoom
+      for (const h of HANDLES) {
+        const q = handlePos(selBox, h)
+        if (Math.abs(p.x - q.x) <= r && Math.abs(p.y - q.y) <= r) return h
+      }
+      return null
+    },
+    [selBox, tool, zoom],
+  )
+  const resizeRef = useRef<{ el: number; handle: Handle; box: Box; sx0: number; sy0: number; fx: number; fy: number; timer: number | null } | null>(null)
+  const [resizeBox, setResizeBox] = useState<Box | null>(null)
+  // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
+  // side(s) opposite `handle` stay where `box` had them.
+  const regenElement = useCallback(
+    (el: number, sx: number, sy: number, box: Box, handle: Handle) => {
+      const r = elementsRef.current[el]
+      if (!r) return
+      const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * sx, y: q.y * sy })))
+      const pts = contoursToStones(scaled, r.mode, r.wholeWord)
+      if (!pts.length) { setStatus('Too small to hold stones at this size'); return }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const q of pts) {
+        const rad = (sizes[q.size ?? curSize]?.holeMm ?? 3) / 2
+        minX = Math.min(minX, q.x - rad); minY = Math.min(minY, q.y - rad)
+        maxX = Math.max(maxX, q.x + rad); maxY = Math.max(maxY, q.y + rad)
+      }
+      const w = maxX - minX, h = maxY - minY
+      const left = handle.includes('w') ? box.maxX - w : handle.includes('e') ? box.minX : (box.minX + box.maxX) / 2 - w / 2
+      const top = handle.includes('n') ? box.maxY - h : handle.includes('s') ? box.minY : (box.minY + box.maxY) / 2 - h / 2
+      const base = stonesRef.current.filter((st) => st.el !== el)
+      const fresh: Stone[] = pts.map((q) => ({ x: q.x - minX + left, y: q.y - minY + top, size: q.size ?? curSize, color: q.color, layer: q.layer ?? 'outline', el }))
+      const next = [...base, ...fresh]
+      stonesRef.current = next
+      setStones(next)
+      setSelection(new Set(fresh.map((_, i) => base.length + i)))
+      setElements((prev) => ({ ...prev, [el]: { ...prev[el], sx, sy } }))
+      setStatus(`${fresh.length} stones at ${w.toFixed(0)} × ${h.toFixed(0)} mm`)
+    },
+    [contoursToStones, sizes, curSize],
+  )
+  // Typed size from the sidebar: uniform, anchored top-left.
+  const resizeSelectedTo = useCallback(
+    (widthMm: number | null, heightMm: number | null) => {
+      if (selectedEl == null || !selBox) return
+      const r = elementsRef.current[selectedEl]
+      if (!r) return
+      const w0 = selBox.maxX - selBox.minX, h0 = selBox.maxY - selBox.minY
+      const f = widthMm != null ? widthMm / w0 : heightMm != null ? heightMm / h0 : 1
+      if (!isFinite(f) || f <= 0) return
+      pushUndo(stonesRef.current)
+      regenElement(selectedEl, r.sx * f, r.sy * f, selBox, 'se')
+    },
+    [selectedEl, selBox, pushUndo, regenElement],
+  )
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button !== 0) return
@@ -1049,6 +1176,15 @@ export default function App() {
       // Add mode gets NO hit slop: dense fills sit closer together than any
       // slop, so with slop every click in a gap "hit" a neighbour and erased
       // it — adding a hole between stones was impossible.
+      const handle = hitHandle(p)
+      if (handle && selectedEl != null && selBox) {
+        const r = elementsRef.current[selectedEl]
+        pushUndo(stonesRef.current)
+        resizeRef.current = { el: selectedEl, handle, box: selBox, sx0: r.sx, sy0: r.sy, fx: 1, fy: 1, timer: null }
+        setResizeBox(selBox)
+        if (svgRef.current) svgRef.current.style.cursor = handleCursor(handle)
+        return
+      }
       const slop = tool === 'add' ? 0 : Math.max(0.5, HIT_SLOP_PX / zoom)
       const hit = pickStone(p, slop)
       if (tool === 'add') {
@@ -1106,7 +1242,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, tool, curSize, addSize, mutate, pickStone, zoom],
+    [toMm, stones, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
   )
 
   const onCanvasMove = useCallback(
@@ -1116,11 +1252,44 @@ export default function App() {
         setMarquee({ x0: marqueeRef.current.x0, y0: marqueeRef.current.y0, x1: p.x, y1: p.y })
         return
       }
+      const rz = resizeRef.current
+      if (rz) {
+        const p = toMm(e)
+        const b = rz.box
+        const w0 = b.maxX - b.minX, h0 = b.maxY - b.minY
+        const ax = rz.handle.includes('w') ? b.maxX : b.minX
+        const ay = rz.handle.includes('n') ? b.maxY : b.minY
+        const horiz = rz.handle.includes('e') || rz.handle.includes('w')
+        const vert = rz.handle.includes('n') || rz.handle.includes('s')
+        let fx = horiz ? Math.abs(p.x - ax) / w0 : 1
+        let fy = vert ? Math.abs(p.y - ay) / h0 : 1
+        if (horiz && vert) fx = fy = (fx + fy) / 2 // corners keep proportions
+        fx = Math.max(fx, 5 / w0)
+        fy = Math.max(fy, 5 / h0)
+        rz.fx = fx; rz.fy = fy
+        const w = w0 * fx, h = h0 * fy
+        setResizeBox({
+          minX: rz.handle.includes('w') ? b.maxX - w : b.minX,
+          maxX: rz.handle.includes('w') ? b.maxX : b.minX + w,
+          minY: rz.handle.includes('n') ? b.maxY - h : b.minY,
+          maxY: rz.handle.includes('n') ? b.maxY : b.minY + h,
+        })
+        // re-stone live, but not on every pixel of movement
+        if (rz.timer != null) window.clearTimeout(rz.timer)
+        rz.timer = window.setTimeout(() => {
+          rz.timer = null
+          regenElement(rz.el, rz.sx0 * rz.fx, rz.sy0 * rz.fy, rz.box, rz.handle)
+        }, 90)
+        return
+      }
       if (!drag.current || tool !== 'select' || selection.size === 0) {
-        // hover feedback: a hand over a stone says "this will move"
+        // hover feedback: a hand over a stone says "this will move", a
+        // resize arrow over a handle says "this will resize"
         if (tool === 'select' && svgRef.current && !drag.current) {
-          const over = pickStone(toMm(e), Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
-          svgRef.current.style.cursor = over ? 'grab' : ''
+          const p = toMm(e)
+          const h = hitHandle(p)
+          const over = !h && pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
+          svgRef.current.style.cursor = h ? handleCursor(h) : over ? 'grab' : ''
         }
         return
       }
@@ -1136,12 +1305,19 @@ export default function App() {
       const orig = drag.current.orig
       setStones(orig.map((s, i) => (selection.has(i) ? { ...s, x: s.x + dx, y: s.y + dy } : s)))
     },
-    [toMm, tool, selection, pushUndo, pickStone, zoom],
+    [toMm, tool, selection, pushUndo, pickStone, zoom, hitHandle, regenElement],
   )
 
   const onCanvasUp = useCallback(() => {
     drag.current = null
     if (svgRef.current) svgRef.current.style.cursor = ''
+    const rz = resizeRef.current
+    if (rz) {
+      resizeRef.current = null
+      if (rz.timer != null) window.clearTimeout(rz.timer)
+      if (rz.fx !== 1 || rz.fy !== 1) regenElement(rz.el, rz.sx0 * rz.fx, rz.sy0 * rz.fy, rz.box, rz.handle)
+      setResizeBox(null)
+    }
     const mq = marqueeRef.current
     marqueeRef.current = null
     if (mq && marquee) {
@@ -1160,13 +1336,13 @@ export default function App() {
       }
     }
     setMarquee(null)
-  }, [marquee, stones])
+  }, [marquee, stones, regenElement])
 
   // A drag released over the sidebar or outside the window still ends.
   // Leaving the SVG used to cancel it mid-move; now the move continues until
   // the button comes up, wherever that is.
   useEffect(() => {
-    const up = () => { if (drag.current || marqueeRef.current) onCanvasUp() }
+    const up = () => { if (drag.current || marqueeRef.current || resizeRef.current) onCanvasUp() }
     window.addEventListener('mouseup', up)
     return () => window.removeEventListener('mouseup', up)
   }, [onCanvasUp])
@@ -1228,7 +1404,7 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         const prev = undoStack.current.pop()
-        if (prev) setStones(prev)
+        if (prev) { setStones(prev.stones); setElements(prev.elements) }
         setSelection(new Set())
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
@@ -1930,9 +2106,23 @@ export default function App() {
           </div>
           <p className="hint">
             {tool === 'select'
-              ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group, double-click grabs a whole design. Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
+              ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group. Double-click a design to grab all of it: drag its handles to resize (holes stay the same size, the count changes). Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
               : 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'}
           </p>
+          {selectedEl != null && selBox && (
+            <div className="grid2" key={`sz-${selectedEl}-${selBox.minX.toFixed(1)}-${(selBox.maxX - selBox.minX).toFixed(1)}`}>
+              <label>Design width (mm)
+                <input type="number" min={5} step={1} defaultValue={Math.round(selBox.maxX - selBox.minX)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { resizeSelectedTo(+(e.target as HTMLInputElement).value || null, null); (e.target as HTMLInputElement).blur() } }}
+                  onBlur={(e) => { const v = +e.target.value; if (v && Math.abs(v - (selBox.maxX - selBox.minX)) >= 0.5) resizeSelectedTo(v, null) }} />
+              </label>
+              <label>Design height (mm)
+                <input type="number" min={5} step={1} defaultValue={Math.round(selBox.maxY - selBox.minY)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { resizeSelectedTo(null, +(e.target as HTMLInputElement).value || null); (e.target as HTMLInputElement).blur() } }}
+                  onBlur={(e) => { const v = +e.target.value; if (v && Math.abs(v - (selBox.maxY - selBox.minY)) >= 0.5) resizeSelectedTo(null, v) }} />
+              </label>
+            </div>
+          )}
           <label>New stone size
             <select value={addSize} onChange={(e) => setAddSize(e.target.value)}>
               <option value="auto">Auto — match nearest stone</option>
@@ -2307,6 +2497,22 @@ export default function App() {
               pointerEvents="none"
             />
           )}
+          {tool === 'select' && selBox && (() => {
+            const b = resizeBox ?? selBox
+            const w = b.maxX - b.minX, h = b.maxY - b.minY
+            return (
+              <g pointerEvents="none">
+                <rect x={b.minX * zoom} y={b.minY * zoom} width={w * zoom} height={h * zoom} fill="none" stroke="#f0b95e" strokeWidth={1.5} strokeDasharray="6 3" />
+                {HANDLES.map((hd) => {
+                  const q = handlePos(b, hd)
+                  return <rect key={hd} x={q.x * zoom - HANDLE_PX / 2} y={q.y * zoom - HANDLE_PX / 2} width={HANDLE_PX} height={HANDLE_PX} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
+                })}
+                <text x={b.minX * zoom} y={b.minY * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
+                  {w.toFixed(0)} × {h.toFixed(0)} mm · {(w / 25.4).toFixed(2)}″ × {(h / 25.4).toFixed(2)}″
+                </text>
+              </g>
+            )
+          })()}
           {previewLive && previewPath && (
             <path
               d={previewPath}
