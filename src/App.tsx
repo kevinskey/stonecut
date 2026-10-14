@@ -1260,6 +1260,34 @@ export default function App() {
   )
   const resizeRef = useRef<{ el: number; handle: Handle; box: Box; sx0: number; sy0: number; fx: number; fy: number; timer: number | null } | null>(null)
   const [resizeBox, setResizeBox] = useState<Box | null>(null)
+
+  // ---------- resize selected cut-line objects on canvas ----------
+  // Same handles as stone designs. Cut shapes always scale uniformly —
+  // stretching one axis distorts letterforms.
+  const vecSelBox = useMemo<Box | null>(() => {
+    if (!selVecs.size || tool !== 'select') return null
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const v of vectors) {
+      if (!selVecs.has(v.id)) continue
+      const b = vecBox(v)
+      minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY)
+      maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY)
+    }
+    return isFinite(minX) ? { minX, minY, maxX, maxY } : null
+  }, [selVecs, vectors, tool])
+  const hitVecHandle = useCallback(
+    (p: Pt): Handle | null => {
+      if (!vecSelBox || tool !== 'select') return null
+      const r = (HANDLE_PX / 2 + 4) / zoom
+      for (const h of HANDLES) {
+        const q = handlePos(vecSelBox, h)
+        if (Math.abs(p.x - q.x) <= r && Math.abs(p.y - q.y) <= r) return h
+      }
+      return null
+    },
+    [vecSelBox, tool, zoom],
+  )
+  const vecResize = useRef<{ handle: Handle; box: Box; orig: VecItem[]; moved: boolean } | null>(null)
   // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
   // side(s) opposite `handle` stay where `box` had them.
   const regenElement = useCallback(
@@ -1351,6 +1379,13 @@ export default function App() {
         if (svgRef.current) svgRef.current.style.cursor = handleCursor(handle)
         return
       }
+      const vHandle = hitVecHandle(p)
+      if (vHandle && selVecs.size && vecSelBox) {
+        pushUndo(stonesRef.current)
+        vecResize.current = { handle: vHandle, box: vecSelBox, orig: vectors.map((v) => ({ ...v })), moved: false }
+        if (svgRef.current) svgRef.current.style.cursor = handleCursor(vHandle)
+        return
+      }
       const slop = tool === 'add' ? 0 : Math.max(0.5, HIT_SLOP_PX / zoom)
       const hit = pickStone(p, slop)
       if (tool === 'add') {
@@ -1434,7 +1469,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, selectedEl, selBox, pushUndo],
+    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, vecSelBox, selectedEl, selBox, pushUndo],
   )
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean } | null>(null)
 
@@ -1477,6 +1512,26 @@ export default function App() {
         }, 90)
         return
       }
+      const vr = vecResize.current
+      if (vr) {
+        const p = toMm(e)
+        const b = vr.box
+        const w0 = b.maxX - b.minX, h0 = b.maxY - b.minY
+        const ax = vr.handle.includes('w') ? b.maxX : b.minX
+        const ay = vr.handle.includes('n') ? b.maxY : b.minY
+        const horiz = vr.handle.includes('e') || vr.handle.includes('w')
+        const vert = vr.handle.includes('n') || vr.handle.includes('s')
+        let f = horiz && vert
+          ? (Math.abs(p.x - ax) / w0 + Math.abs(p.y - ay) / h0) / 2
+          : horiz ? Math.abs(p.x - ax) / w0 : Math.abs(p.y - ay) / h0
+        f = Math.max(f, 5 / Math.max(w0, h0))
+        vr.moved = true
+        setVectors(vr.orig.map((v) =>
+          selVecs.has(v.id)
+            ? { ...v, s: v.s * f, x: ax + (v.x - ax) * f, y: ay + (v.y - ay) * f }
+            : v))
+        return
+      }
       const vd = vecDrag.current
       if (vd) {
         const p = toMm(e)
@@ -1492,7 +1547,7 @@ export default function App() {
         // resize arrow over a handle says "this will resize"
         if (tool === 'select' && svgRef.current && !drag.current) {
           const p = toMm(e)
-          const h = hitHandle(p)
+          const h = hitHandle(p) ?? hitVecHandle(p)
           const over = !h && pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
           svgRef.current.style.cursor = h ? handleCursor(h) : over ? 'grab' : ''
         }
@@ -1510,12 +1565,13 @@ export default function App() {
       const orig = drag.current.orig
       setStones(orig.map((s, i) => (selection.has(i) ? { ...s, x: s.x + dx, y: s.y + dy } : s)))
     },
-    [toMm, tool, selection, pushUndo, pickStone, zoom, hitHandle, regenElement],
+    [toMm, tool, selection, selVecs, pushUndo, pickStone, zoom, hitHandle, hitVecHandle, regenElement],
   )
 
   const onCanvasUp = useCallback(() => {
     drag.current = null
     vecDrag.current = null
+    vecResize.current = null
     if (svgRef.current) svgRef.current.style.cursor = ''
     const rz = resizeRef.current
     if (rz) {
@@ -3385,6 +3441,22 @@ export default function App() {
               pointerEvents="none"
             />
           ))}
+          {tool === 'select' && vecSelBox && (() => {
+            const b = vecSelBox
+            const w = b.maxX - b.minX, h = b.maxY - b.minY
+            return (
+              <g pointerEvents="none">
+                <rect x={b.minX * zoom} y={b.minY * zoom} width={w * zoom} height={h * zoom} fill="none" stroke="#f0b95e" strokeWidth={1.5} strokeDasharray="6 3" />
+                {HANDLES.map((hd) => {
+                  const q = handlePos(b, hd)
+                  return <rect key={hd} x={q.x * zoom - HANDLE_PX / 2} y={q.y * zoom - HANDLE_PX / 2} width={HANDLE_PX} height={HANDLE_PX} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
+                })}
+                <text x={b.minX * zoom} y={b.minY * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
+                  {w.toFixed(0)} × {h.toFixed(0)} mm · {(w / 25.4).toFixed(2)}″ × {(h / 25.4).toFixed(2)}″
+                </text>
+              </g>
+            )
+          })()}
           {tool === 'select' && selBox && (() => {
             const b = resizeBox ?? selBox
             const w = b.maxX - b.minX, h = b.maxY - b.minY
