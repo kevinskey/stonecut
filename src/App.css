@@ -351,7 +351,8 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   background: #1d2230; border-bottom: 1px solid #2b3240;
   font-size: 13px; user-select: none; z-index: 20; flex-shrink: 0;
 }
-.menubar .brand { font-weight: 700; color: #fff; letter-spacing: 0.4px; margin-right: 12px; font-size: 14px; }
+/* brand pins left, menus sit on the right side of the bar (Kevin, 2026-10-14) */
+.menubar .brand { font-weight: 700; color: #fff; letter-spacing: 0.4px; margin-right: auto; font-size: 14px; }
 .menu { position: relative; }
 .menu-title {
   background: none; border: 0; color: #dde3ee; padding: 5px 10px; margin: 0;
@@ -359,7 +360,9 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 }
 .menu-title:hover, .menu.open .menu-title { background: #2d3447; color: #fff; }
 .menu-list {
-  position: absolute; top: 100%; left: 0; min-width: 240px;
+  /* right-anchored so dropdowns stay on-screen now that menus live at the
+     right edge of the bar */
+  position: absolute; top: 100%; left: auto; right: 0; min-width: 240px;
   background: #232838; border: 1px solid #343c50; border-radius: 8px;
   padding: 5px; box-shadow: 0 12px 30px #000a; z-index: 50;
 }
