@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
-import type { MaterialPreset, Stone, StoneSpec } from './model'
+import type { CutPathEl, MaterialPreset, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, haloOutline, offsetRows, outlineOrSpine, padGrid, rasterizeContours, HALO_CLEAR } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
@@ -49,7 +49,7 @@ export default function App() {
   const elSeq = useRef(1)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => ({ ...DEFAULT_SIZES }))
-  const [curSize, setCurSize] = useState('SS10')
+  const [curSize, setCurSize] = useState('SS6')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
   const [addSize, setAddSize] = useState<'auto' | string>('auto') // stone size for manual adds
@@ -210,6 +210,19 @@ export default function App() {
   const [textHeight, setTextHeight] = useState(50)
   const [textMode, setTextMode] = useState<StoneMode>('outline')
   const [letterSpacing, setLetterSpacing] = useState(2)
+  // What the text BECOMES: stone holes, vector cut lines, or both. Until the
+  // user says "rhinestones", the preview shows only the letter outlines — no
+  // holes (Kevin, 2026-10-14). Remembered across sessions once chosen.
+  const [textOutput, setTextOutputRaw] = useState<'stones' | 'lines' | 'both' | null>(() => {
+    const v = localStorage.getItem('stonecut.textout')
+    return v === 'stones' || v === 'lines' || v === 'both' ? v : null
+  })
+  const setTextOutput = (v: 'stones' | 'lines' | 'both') => {
+    setTextOutputRaw(v)
+    localStorage.setItem('stonecut.textout', v)
+  }
+  const wantStones = textOutput === 'stones' || textOutput === 'both'
+  const wantLines = textOutput === 'lines' || textOutput === 'both'
 
   // image panel
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -290,9 +303,15 @@ export default function App() {
   const [presetIdx, setPresetIdx] = useState(0)
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
-  const undoStack = useRef<Stone[][]>([])
-  const pushUndo = useCallback((prev: Stone[]) => {
-    undoStack.current.push(prev)
+  // committed vector-cut elements (letter outlines cut as lines, not holes)
+  const [cutPaths, setCutPaths] = useState<CutPathEl[]>([])
+  const cutPathsRef = useRef<CutPathEl[]>([])
+  useEffect(() => { cutPathsRef.current = cutPaths }, [cutPaths])
+
+  // one undo stack for both layers — an entry snapshots stones AND cut lines
+  const undoStack = useRef<{ s: Stone[]; p: CutPathEl[] }[]>([])
+  const pushUndo = useCallback((prev: Stone[], prevPaths?: CutPathEl[]) => {
+    undoStack.current.push({ s: prev, p: prevPaths ?? cutPathsRef.current })
     if (undoStack.current.length > 50) undoStack.current.shift()
   }, [])
   const mutate = useCallback(
@@ -307,16 +326,56 @@ export default function App() {
 
   const holeOf = useCallback((s: Stone) => sizes[s.size]?.holeMm ?? 3, [sizes])
 
+  // Design autosave: a closed tab must not lose the working design. Loaded
+  // once on boot; written (debounced) on every change.
+  const designLoaded = useRef(false)
+  useEffect(() => {
+    if (designLoaded.current) return
+    designLoaded.current = true
+    try {
+      const raw = localStorage.getItem('stonecut.design')
+      if (!raw) return
+      const d = JSON.parse(raw) as { stones?: Stone[]; cutPaths?: CutPathEl[]; elSeq?: number }
+      if (Array.isArray(d.stones) && d.stones.length) setStones(d.stones)
+      if (Array.isArray(d.cutPaths) && d.cutPaths.length) { cutPathsRef.current = d.cutPaths; setCutPaths(d.cutPaths) }
+      if (typeof d.elSeq === 'number') elSeq.current = Math.max(elSeq.current, d.elSeq)
+    } catch { /* corrupted autosave — start fresh */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useEffect(() => {
+    if (!designLoaded.current) return
+    const t = window.setTimeout(() => {
+      try {
+        localStorage.setItem('stonecut.design', JSON.stringify({ stones, cutPaths, elSeq: elSeq.current }))
+      } catch { /* quota — autosave is best-effort */ }
+    }, 800)
+    return () => window.clearTimeout(t)
+  }, [stones, cutPaths])
+
+  const clearAll = useCallback(() => {
+    pushUndo(stonesRef.current.length ? stonesRef.current : [])
+    setStones([])
+    cutPathsRef.current = []
+    setCutPaths([])
+    setSelection(new Set())
+  }, [pushUndo])
+
   const bbox = useMemo(() => {
-    if (!stones.length) return { minX: 0, minY: 0, maxX: 100, maxY: 60 }
+    if (!stones.length && !cutPaths.length) return { minX: 0, minY: 0, maxX: 100, maxY: 60 }
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const s of stones) {
       const r = holeOf(s) / 2
       minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
       maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
     }
+    for (const cp of cutPaths)
+      for (const c of cp.contours)
+        for (const p of c) {
+          minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+          maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+        }
     return { minX, minY, maxX, maxY }
-  }, [stones, holeOf])
+  }, [stones, cutPaths, holeOf])
 
   const job = useMemo(() => {
     const w = bbox.maxX - bbox.minX + MARGIN * 2
@@ -326,8 +385,10 @@ export default function App() {
       sizes,
       widthMm: Math.ceil(w),
       heightMm: Math.ceil(h),
+      paths: cutPaths.flatMap((cp) =>
+        cp.contours.map((c) => c.map((p) => ({ x: p.x - bbox.minX + MARGIN, y: p.y - bbox.minY + MARGIN })))),
     }
-  }, [stones, bbox, sizes])
+  }, [stones, cutPaths, bbox, sizes])
 
   // live text preview: sample the selected font before committing stones
   const textPreview = useMemo(() => {
@@ -398,7 +459,10 @@ export default function App() {
     setPreviewLive(true)
   }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
   useEffect(() => {
-    if (!textPreview) {
+    // No holes until the user says "rhinestones" — cut-lines-only (and
+    // not-yet-chosen) previews show the letter outlines, which also makes
+    // font browsing instant since no stone layout is computed.
+    if (!textPreview || !wantStones) {
       setPreviewStones(null)
       return
     }
@@ -540,7 +604,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, wantStones, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, haloRows, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
@@ -618,19 +682,39 @@ export default function App() {
 
   // ---------- generation ----------
   const addGenerated = useCallback(
-    (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number) => {
+    (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number, opts?: { skipUndo?: boolean }) => {
       // each commit is its own ELEMENT: a free-moving layer that may overlap
       // other elements — nothing culls across elements anymore
       const el = elSeq.current++
       const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
-      mutate((prev) => [...prev, ...fresh])
+      // skipUndo: caller already pushed one undo entry covering this commit
+      // (stones + cut lines land as a single ⌘Z step)
+      if (opts?.skipUndo) setStones((prev) => [...prev, ...fresh])
+      else mutate((prev) => [...prev, ...fresh])
     },
     [curSize, gap, mutate, sizes],
   )
 
   const generateText = useCallback(() => {
     if (!font) { setStatus('Upload a font file first (.ttf/.otf)'); return }
+    if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
     const { contours } = textToContours(font, text, textHeight, letterSpacing)
+    const commitOffsetY = previewBaseY ?? ((stones.length || cutPaths.length) ? bbox.maxY + 10 : 10)
+    const linesEl = (): CutPathEl => ({
+      el: elSeq.current++,
+      contours: contours.map((c) => c.map((p) => ({ x: p.x + 10, y: p.y + commitOffsetY }))),
+    })
+    if (!wantStones) {
+      // cut lines only — no holes anywhere in this flow
+      pushUndo(stones)
+      const el = linesEl()
+      cutPathsRef.current = [...cutPathsRef.current, el]
+      setCutPaths((prev) => [...prev, el])
+      setPreviewBaseY(null)
+      setPreviewLive(false)
+      setStatus(`Added cut lines (${contours.length} paths) — no stones`)
+      return
+    }
     const hole = sizes[curSize]?.holeMm ?? 3
     const hardGap = hardGapOf(gap)
     const rhythm = hole + gap
@@ -674,17 +758,28 @@ export default function App() {
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
     // commit exactly where the preview showed; release the pin so the next
-    // preview session stacks below the committed stones
-    const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
-    addGenerated(pts, offsetY)
+    // preview session stacks below the committed stones. 'both' pushes ONE
+    // undo entry up front covering stones + lines, so a single ⌘Z removes
+    // the whole commit.
+    if (wantLines) {
+      pushUndo(stones)
+      addGenerated(pts, commitOffsetY, { skipUndo: true })
+      const el = linesEl()
+      cutPathsRef.current = [...cutPathsRef.current, el]
+      setCutPaths((prev) => [...prev, el])
+    } else {
+      addGenerated(pts, commitOffsetY)
+    }
     setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(
       outlineDesign === 'halo'
         ? `Added ${pts.length} halo stones — cut the letters with Vinyl SVG in the Text panel`
-        : `Added ${pts.length} stones from text`,
+        : wantLines
+          ? `Added ${pts.length} stones + cut lines from text`
+          : `Added ${pts.length} stones from text`,
     )
-  }, [font, text, textHeight, letterSpacing, textMode, curSize, gap, sizes, stones.length, bbox.maxY, previewBaseY, addGenerated, uniformRhythm, outlineDesign, haloRows, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [font, text, textHeight, letterSpacing, textMode, textOutput, wantStones, wantLines, curSize, gap, sizes, stones, cutPaths.length, bbox.maxY, previewBaseY, addGenerated, pushUndo, uniformRhythm, outlineDesign, haloRows, outlineStyle, fillStyle, fillSize, fillColor])
 
   // the vinyl layer of a halo design: the letters as one solid cut file
   const downloadVinyl = useCallback(() => {
@@ -961,7 +1056,7 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         const prev = undoStack.current.pop()
-        if (prev) setStones(prev)
+        if (prev) { setStones(prev.s); setCutPaths(prev.p) }
         setSelection(new Set())
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
@@ -1004,9 +1099,15 @@ export default function App() {
     () =>
       cutLayer === 'all'
         ? job
-        : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer) },
+        : {
+            ...job,
+            stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer),
+            // cut lines ride with the outline layer, never the fill sheet
+            paths: cutLayer === 'outline' ? job.paths : [],
+          },
     [job, cutLayer],
   )
+  const cuttable = cutJob.stones.length > 0 || (cutJob.paths?.length ?? 0) > 0
   const layerCounts = useMemo(() => {
     let o = 0
     let f = 0
@@ -1019,7 +1120,7 @@ export default function App() {
   )
 
   const doSend = useCallback(async () => {
-    if (!stones.length) { setStatus('Nothing to cut'); return }
+    if (!stones.length && !cutPaths.length) { setStatus('Nothing to cut'); return }
     try {
       setStatus('Connecting to cutter…')
       await sendToCutter(cutData(), (sent, total) =>
@@ -1029,7 +1130,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Send failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [stones.length, cutData])
+  }, [stones.length, cutPaths.length, cutData])
 
   // The fill colour picker recolours the EXISTING fill layer live — colour
   // was baked into each stone at generation, so the picker otherwise only
@@ -1205,11 +1306,20 @@ export default function App() {
       .join('')
   }, [textPreview, zoom, previewOffsetY])
 
+  // committed vector-cut elements, drawn as solid cut lines on the board
+  const committedPathD = useMemo(() => {
+    if (!cutPaths.length) return ''
+    return cutPaths
+      .flatMap((cp) => cp.contours)
+      .map((c) => 'M' + c.map((p) => `${(p.x * zoom).toFixed(1)},${(p.y * zoom).toFixed(1)}`).join('L') + 'Z')
+      .join('')
+  }, [cutPaths, zoom])
+
   return (
     <div className="app">
       <aside className="panel">
         <h1>StoneCut</h1>
-        <div className="statusbar">{status} · {stones.length} stones · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
+        <div className="statusbar">{status} · {stones.length} stones{cutPaths.length ? ` · ${cutPaths.reduce((n, c) => n + c.contours.length, 0)} cut lines` : ''} · {job.widthMm}×{job.heightMm} mm ({(job.widthMm / 25.4).toFixed(1)}×{(job.heightMm / 25.4).toFixed(1)} in)</div>
 
 
         <Section title="Stones">
@@ -1295,6 +1405,17 @@ export default function App() {
         </Section>
 
         <Section title="Text">
+          {/* Output comes FIRST: no stone holes appear until the user says
+              rhinestones; cut-lines-only shows just the letter outlines. */}
+          <label>Output</label>
+          <div className="chiprow" style={{ marginBottom: 8 }}>
+            {([['stones', '💎 Rhinestones'], ['lines', '✂️ Cut lines'], ['both', 'Both']] as const).map(([v, lbl]) => (
+              <button key={v} className={`chip ${textOutput === v ? 'active' : ''}`} onClick={() => setTextOutput(v)}>{lbl}</button>
+            ))}
+          </div>
+          {textOutput === null && (
+            <div className="sizeinfo">Pick what this text becomes. Stone holes preview only after you choose Rhinestones; Cut lines cuts the letter outlines themselves (vinyl, stencil).</div>
+          )}
           <label>Text<input value={text} onChange={(e) => setText(e.target.value)} /></label>
           <div className="fontpicker" ref={pickerRef}>
             <label>Font</label>
@@ -1337,9 +1458,12 @@ export default function App() {
                         key={f.id}
                         className={`${selFont === f.id ? 'active' : ''} ${hiIdx === i ? 'hi' : ''}`}
                         onClick={() => {
-                          if (selFont === f.id) { setFontOpen(false); return } // second click confirms
+                          // one click picks the font AND puts the panel away —
+                          // it was burying the rest of the column until Esc
+                          // (Kevin, 2026-10-14). Arrow keys still browse live.
                           setHiIdx(i)
                           void loadGFont(f, weight)
+                          setFontOpen(false)
                         }}
                       >
                         {f.f}
@@ -1413,14 +1537,23 @@ export default function App() {
                 <option value="regular">Regular</option>
               </select>
             </label>
-            <label>Style
-              <select value={textMode} onChange={(e) => setTextMode(e.target.value as StoneMode)}>
-                <option value="outline">Outline</option>
-                <option value="fill">Fill</option>
-                <option value="both">Outline + fill</option>
-              </select>
-            </label>
+            {wantStones ? (
+              <label>Stone placement
+                <select value={textMode} onChange={(e) => setTextMode(e.target.value as StoneMode)}>
+                  <option value="outline">Outline only</option>
+                  <option value="fill">Solid fill only</option>
+                  <option value="both">Outline + fill</option>
+                </select>
+              </label>
+            ) : (
+              <div />
+            )}
           </div>
+          {wantStones && (
+            <div className="sizeinfo">
+              Outline rings the letters with stones; fill packs the inside. Stone size and spacing live in the Stones section above.
+            </div>
+          )}
           <div className="grid2">
             <label>Height (mm)
               <input type="number" min={10} max={500} value={textHeight} onChange={(e) => setTextHeight(+e.target.value)} />
@@ -1456,7 +1589,9 @@ export default function App() {
               </div>
             </>
           )}
-          <button className="primary" onClick={generateText}>Add text stones</button>
+          <button className="primary" disabled={!textOutput} onClick={generateText}>
+            {textOutput === 'lines' ? 'Add cut lines' : textOutput === 'both' ? 'Add stones + cut lines' : 'Add text stones'}
+          </button>
         </Section>
         <Section title="Graphic" defaultOpen={false}>
           <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
@@ -1652,7 +1787,7 @@ export default function App() {
             to select it first, or scale everything.
           </p>
           <div className="toolrow">
-            <button disabled={!stones.length} onClick={() => { mutate(() => []); setSelection(new Set()) }}>Clear all</button>
+            <button disabled={!stones.length && !cutPaths.length} onClick={clearAll}>Clear all</button>
           </div>
           <p className="hint">Click = select · shift-click = multi · drag empty space = box select · double-click = select whole design · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
         </Section>
@@ -1690,10 +1825,10 @@ export default function App() {
               Layers share one frame — cut each on its own sheet and they line up when stacked.
             </p>
           )}
-          <button className="primary" disabled={!cutJob.stones.length} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <button className="primary" disabled={!cuttable} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="toolrow">
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutJob.stones.length} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cuttable} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cuttable} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
           </div>
         </Section>
       </aside>
@@ -1725,9 +1860,9 @@ export default function App() {
           />
           <span>in</span>
           <button
-            disabled={!stones.length}
+            disabled={!stones.length && !cutPaths.length}
             style={{ marginLeft: 'auto', width: 'auto', marginTop: 0 }}
-            onClick={() => { mutate(() => []); setSelection(new Set()) }}
+            onClick={clearAll}
           >
             Clear all
           </button>
@@ -1807,14 +1942,25 @@ export default function App() {
               pointerEvents="none"
             />
           )}
+          {committedPathD && (
+            <path
+              d={committedPathD}
+              fill="none"
+              stroke="#6fd0ff"
+              strokeOpacity={0.9}
+              strokeWidth={1.5}
+              fillRule="evenodd"
+              pointerEvents="none"
+            />
+          )}
           {previewLive && previewPath && (
             <path
               d={previewPath}
               fill="#5b7bd9"
               fillOpacity={0.1}
               stroke="#5b7bd9"
-              strokeOpacity={0.3}
-              strokeWidth={1}
+              strokeOpacity={wantStones ? 0.3 : 0.8}
+              strokeWidth={wantStones ? 1 : 1.5}
               fillRule="evenodd"
               pointerEvents="none"
             />
