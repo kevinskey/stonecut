@@ -186,7 +186,7 @@ export default function App() {
     }, 400)
     return () => clearTimeout(t)
   }, [stones, sizes, elements, vectors])
-  const [curSize, setCurSize] = useState('SS10')
+  const [curSize, setCurSize] = useState('SS6')
   const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
   const [tool, setTool] = useState<Tool>('select')
   const [addSize, setAddSize] = useState<'auto' | string>('auto') // stone size for manual adds
@@ -379,6 +379,20 @@ export default function App() {
   const [textHeight, setTextHeight] = useState(50)
   const [textMode, setTextMode] = useState<StoneMode>('outline')
   const [letterSpacing, setLetterSpacing] = useState(2)
+  // What the text BECOMES: stone holes, vector cut lines, or both. Until the
+  // user says "rhinestones", no holes preview — cut-lines-only (and
+  // not-yet-chosen) shows just the letter outlines (Kevin, 2026-10-14).
+  // Remembered across sessions once chosen.
+  const [textOutput, setTextOutputRaw] = useState<'stones' | 'lines' | 'both' | null>(() => {
+    const v = localStorage.getItem('stonecut.textout')
+    return v === 'stones' || v === 'lines' || v === 'both' ? v : null
+  })
+  const setTextOutput = (v: 'stones' | 'lines' | 'both') => {
+    setTextOutputRaw(v)
+    localStorage.setItem('stonecut.textout', v)
+  }
+  const wantStones = textOutput === 'stones' || textOutput === 'both'
+  const wantLines = textOutput === 'lines' || textOutput === 'both'
 
   // image panel
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -640,7 +654,10 @@ export default function App() {
   // place while its text is untouched (same idea as the image regen).
   const lastTextRef = useRef<{ el: number; font: unknown; text: string; height: number; spacing: number } | null>(null)
   useEffect(() => {
-    if (!textPreview) {
+    // No holes until the user says "rhinestones" — cut-lines-only (and
+    // not-yet-chosen) previews show the letter outlines only, which also
+    // makes font browsing instant: no stone layout is computed.
+    if (!textPreview || !wantStones) {
       setPreviewStones(null)
       return
     }
@@ -778,7 +795,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, wantStones, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
@@ -1912,6 +1929,18 @@ export default function App() {
     setPreviewLive(false)
     setStatus(`Added "${text.trim()}" as ${r.lines} cut line${r.lines === 1 ? '' : 's'} · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm`)
   }, [textPreview, text, previewOffsetY, addVector])
+  // One Add button, driven by the Output choice up top.
+  const addTextOutput = useCallback(() => {
+    if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
+    if (wantStones) generateText()
+    if (wantLines) textAsCutLines()
+  }, [textOutput, wantStones, wantLines, generateText, textAsCutLines])
+  const addTextLabel = textOutput === 'lines'
+    ? 'Add cut lines'
+    : textOutput === 'both'
+      ? (pendingText ? `Add ${pendingText} stones + cut lines` : 'Add stones + cut lines')
+      : (pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones')
+
   const shapeAsCutLines = useCallback(() => {
     const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
     const r = addVector(contours, shapeKind)
@@ -2289,6 +2318,17 @@ export default function App() {
 
 
         <Section title="Text">
+          {/* Output comes FIRST: no stone holes appear until the user says
+              rhinestones; cut-lines-only shows just the letter outlines. */}
+          <label>Output</label>
+          <div className="chiprow" style={{ marginBottom: 8 }}>
+            {([['stones', '💎 Rhinestones'], ['lines', '✂️ Cut lines'], ['both', 'Both']] as const).map(([v, lbl]) => (
+              <button key={v} className={`chip ${textOutput === v ? 'active' : ''}`} onClick={() => setTextOutput(v)}>{lbl}</button>
+            ))}
+          </div>
+          {textOutput === null && (
+            <div className="sizeinfo">Pick what this text becomes. Rhinestones previews the stone holes; Cut lines cuts the letter outlines themselves (vinyl lettering, a stencil); Both does both, aligned.</div>
+          )}
           <label>Text<input value={text} onChange={(e) => setText(e.target.value)} /></label>
           <div className="fontpicker" ref={pickerRef}>
             <label>Font</label>
@@ -2331,9 +2371,12 @@ export default function App() {
                         key={f.id}
                         className={`${selFont === f.id ? 'active' : ''} ${hiIdx === i ? 'hi' : ''}`}
                         onClick={() => {
-                          if (selFont === f.id) { setFontOpen(false); return } // second click confirms
+                          // one click picks the font AND puts the panel away —
+                          // it buried the rest of the column until Esc
+                          // (Kevin, 2026-10-14). Arrow keys still browse live.
                           setHiIdx(i)
                           void loadGFont(f, weight)
+                          setFontOpen(false)
                         }}
                       >
                         {f.f}
@@ -2407,13 +2450,17 @@ export default function App() {
                 <option value="regular">Regular</option>
               </select>
             </label>
-            <label>Style
-              <select value={textMode} onChange={(e) => setTextMode(e.target.value as StoneMode)}>
-                <option value="outline">Outline</option>
-                <option value="fill">Fill</option>
-                <option value="both">Outline + fill</option>
-              </select>
-            </label>
+            {wantStones ? (
+              <label>Stone placement
+                <select value={textMode} onChange={(e) => setTextMode(e.target.value as StoneMode)}>
+                  <option value="outline">Outline only</option>
+                  <option value="fill">Solid fill only</option>
+                  <option value="both">Outline + fill</option>
+                </select>
+              </label>
+            ) : (
+              <div />
+            )}
           </div>
           <div className="grid2">
             <label>Height (mm)
@@ -2429,6 +2476,11 @@ export default function App() {
               <span> · {Math.round(textPreview.widthMm)} × {textHeight} mm in {fontName}{previewStones ? ` · ${previewStones.length} stones` : ''}</span>
             </div>
           )}
+          {/* The commit button lives HERE too — the Stones section's copy was
+              below the fold of a collapsed panel and nobody found it. */}
+          <button className={`primary${pendingText ? ' urgent' : ''}`} disabled={!textOutput || !textPreview} onClick={addTextOutput}>
+            {addTextLabel}
+          </button>
         </Section>
         <Section title="Stones">
           <div className="grid2">
@@ -2489,11 +2541,12 @@ export default function App() {
               </select>
             </label>
           </div>
-          <button className={`primary${pendingText ? ' urgent' : ''}`} onClick={generateText}>
-            {pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones'}
+          <button className={`primary${pendingText ? ' urgent' : ''}`} disabled={!textOutput || !textPreview} onClick={addTextOutput}>
+            {addTextLabel}
           </button>
-          <button onClick={textAsCutLines} disabled={!textPreview}>Add text as cut lines (no stones)</button>
-          <p className="hint">Cut lines follow the letter outlines — vinyl lettering, a stencil, or a border around the stones.</p>
+          {wantLines && (
+            <p className="hint">Cut lines follow the letter outlines — vinyl lettering, a stencil, or a border around the stones.</p>
+          )}
         </Section>
         <Section title="Fill">
           <div className="grid2">
