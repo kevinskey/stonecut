@@ -335,7 +335,7 @@ function norm(v: Pt): Pt {
   return { x: v.x / l, y: v.y / l }
 }
 
-function pointInPoly(poly: Pt[], p: Pt): boolean {
+export function pointInPoly(poly: Pt[], p: Pt): boolean {
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const a = poly[i]

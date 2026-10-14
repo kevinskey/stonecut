@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
-import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { loadFontFile, parseFontBuffer, textToContours } from './text'
 import { grantedCutter } from './usb'
 import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
@@ -2096,6 +2096,81 @@ export default function App() {
     setSelVecs(new Set([id]))
     setStatus(`${names[op]}: ${result.length} cut line${result.length === 1 ? '' : 's'}`)
   }, [vectors, selVecs, mutateVectors])
+  // Ungroup: split selected cut-line object(s) into separate objects — one
+  // per letter/shape. A contour nested inside another is a hole and stays
+  // with its parent; disjoint outer contours whose x-ranges overlap (the dot
+  // of an i above its stem) stay together. Very tight kerning can land two
+  // letters in one piece — run Ungroup again after nudging them apart.
+  const ungroup = useCallback(() => {
+    const ops = vectors.filter((v) => selVecs.has(v.id))
+    if (!ops.length) { setStatus('Select a cut-line object first'); return }
+    // compute every split FIRST (pure), then commit once — state updaters
+    // must stay side-effect free
+    const splits = new Map<number, VecItem[]>()
+    const newIds: number[] = []
+    for (const v of ops) {
+      {
+        const paths = vecPaths(v)
+        if (paths.length < 2) continue
+        const bb = paths.map((c) => {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+          return { minX, minY, maxX, maxY }
+        })
+        // holes attach to the smallest contour that contains them
+        const parent = paths.map((c, i) => {
+          let best = -1, bestArea = Infinity
+          for (let j = 0; j < paths.length; j++) {
+            if (i === j) continue
+            const inBox = bb[i].minX >= bb[j].minX && bb[i].maxX <= bb[j].maxX && bb[i].minY >= bb[j].minY && bb[i].maxY <= bb[j].maxY
+            if (inBox && pointInPoly(paths[j], c[0])) {
+              const area = (bb[j].maxX - bb[j].minX) * (bb[j].maxY - bb[j].minY)
+              if (area < bestArea) { bestArea = area; best = j }
+            }
+          }
+          return best
+        })
+        const topOf = (i: number): number => (parent[i] === -1 ? i : topOf(parent[i]))
+        const tops = [...new Set(paths.map((_, i) => topOf(i)))]
+        // cluster top-level contours by x-overlap (transitive chain)
+        const sorted = tops.sort((a, b) => bb[a].minX - bb[b].minX)
+        const groups: number[][] = []
+        let cur: number[] = []
+        let curMax = -Infinity
+        for (const t of sorted) {
+          if (!cur.length || bb[t].minX <= curMax + 0.01) { cur.push(t); curMax = Math.max(curMax, bb[t].maxX) }
+          else { groups.push(cur); cur = [t]; curMax = bb[t].maxX }
+        }
+        if (cur.length) groups.push(cur)
+        if (groups.length < 2) continue
+        const pieces: VecItem[] = groups.map((g, k) => {
+          const set = new Set(g)
+          const cs = paths.filter((_, i) => set.has(topOf(i)))
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const c of cs) for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+          const id = vecSeq.current++
+          newIds.push(id)
+          return {
+            id,
+            name: `${v.name} ${k + 1}`,
+            base: cs.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+            baseW: maxX - minX,
+            baseH: maxY - minY,
+            x: minX,
+            y: minY,
+            s: 1,
+          }
+        })
+        splits.set(v.id, pieces)
+      }
+    }
+    if (!newIds.length) { setStatus('Nothing to ungroup — that object is a single shape'); return }
+    mutateVectors((prev) =>
+      prev.flatMap((n) => (splits.has(n.id) ? splits.get(n.id)! : [n])))
+    setSelVecs(new Set(newIds))
+    setStatus(`Ungrouped into ${newIds.length} objects`)
+  }, [vectors, selVecs, mutateVectors])
+
   const alignCount = alignObjs.length
 
   // ---------- menu bar ----------
@@ -2213,6 +2288,8 @@ export default function App() {
       { label: 'Align bottom', disabled: !alignCount, onClick: () => alignSelected('bottom') },
       { label: 'Distribute horizontally', disabled: alignCount < 3, onClick: () => distributeSelected('x', 'centers') },
       { label: 'Distribute vertically', disabled: alignCount < 3, onClick: () => distributeSelected('y', 'centers') },
+      'sep',
+      { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: ungroup },
       'sep',
       { label: 'Unite', disabled: !selVecs.size, onClick: () => pathfinder('union') },
       { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => pathfinder('difference') },
@@ -2844,6 +2921,8 @@ export default function App() {
             <button className="iconbtn" title="Exclude (overlap removed)" disabled={selVecs.size < 2} onClick={() => pathfinder('xor')}><AlignIcon kind="exclude" /></button>
           </div>
           <div className="iconlabels"><span>Unite</span><span>Minus front</span><span>Intersect</span><span>Exclude</span></div>
+          <button style={{ marginTop: 8 }} disabled={!selVecs.size} onClick={ungroup}>Ungroup — split into letters</button>
+          <p className="hint">Splits a text cut-line object into one object per letter (holes stay with their letter), so you can move or restyle letters independently.</p>
         </Section>
 
         <Section title="Edit">
