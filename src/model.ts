@@ -7,6 +7,13 @@ export interface Stone {
   el?: number // element id — each committed design is a free-moving unit
 }
 
+// A committed vector-cut element: the letter outlines themselves, cut as
+// lines (vinyl lettering, a stencil, or a border) instead of stone holes.
+export interface CutPathEl {
+  el: number // element id, same sequence as stones
+  contours: { x: number; y: number }[][] // mm, absolute board coordinates
+}
+
 export interface StoneSpec {
   stoneMm: number // actual rhinestone diameter
   holeMm: number // template hole diameter (stone + clearance)

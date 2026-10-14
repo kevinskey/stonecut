@@ -6,6 +6,8 @@ export interface Job {
   sizes: Record<string, StoneSpec>
   widthMm: number
   heightMm: number
+  // vector cut lines (letter outlines etc.) cut alongside the stone holes
+  paths?: Pt[][]
 }
 
 const holeOf = (job: Job, s: Stone) => (job.sizes[s.size]?.holeMm ?? 3) / 2
@@ -18,10 +20,17 @@ export function toSVG(job: Job): string {
         `  <circle cx="${s.x.toFixed(3)}" cy="${s.y.toFixed(3)}" r="${holeOf(job, s).toFixed(3)}"/>`,
     )
     .join('\n')
+  const paths = (job.paths ?? [])
+    .filter((c) => c.length >= 2)
+    .map(
+      (c) =>
+        `  <path d="M${c.map((p) => `${p.x.toFixed(3)} ${p.y.toFixed(3)}`).join(' L')} Z"/>`,
+    )
+    .join('\n')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${job.widthMm}mm" height="${job.heightMm}mm" viewBox="0 0 ${job.widthMm} ${job.heightMm}">
 <g fill="none" stroke="#000" stroke-width="0.1">
-${circles}
+${circles}${paths ? '\n' + paths : ''}
 </g>
 </svg>
 `
@@ -85,6 +94,15 @@ export function toHPGL(job: Job, preset: MaterialPreset): string {
       lines.push(`PD${pts.slice(1).join(',')};`)
     }
   }
+  // vector cut lines after the holes, one pass per preset pass
+  for (let pass = 0; pass < preset.passes; pass++) {
+    for (const c of job.paths ?? []) {
+      if (c.length < 2) continue
+      const pts = c.map((p) => `${Math.round(p.x * U)},${Math.round((job.heightMm - p.y) * U)}`)
+      lines.push(`PU${pts[0]};`)
+      lines.push(`PD${pts.slice(1).join(',')},${pts[0]};`)
+    }
+  }
   lines.push('PU0,0;', 'SP0;', 'IN;')
   return lines.join('\n') + '\n'
 }
@@ -106,6 +124,15 @@ export function toGPGL(job: Job, preset: MaterialPreset): string {
       }
       cmds.push(`M${pt(0)}`)
       for (let i = 1; i <= n; i++) cmds.push(`D${pt(i)}`)
+    }
+  }
+  for (let pass = 0; pass < preset.passes; pass++) {
+    for (const c of job.paths ?? []) {
+      if (c.length < 2) continue
+      const P = (p: Pt) => `${Math.round(p.x * U)},${Math.round((job.heightMm - p.y) * U)}`
+      cmds.push(`M${P(c[0])}`)
+      for (let i = 1; i < c.length; i++) cmds.push(`D${P(c[i])}`)
+      cmds.push(`D${P(c[0])}`)
     }
   }
   cmds.push('M0,0')
