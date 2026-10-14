@@ -2173,6 +2173,43 @@ export default function App() {
 
   const alignCount = alignObjs.length
 
+  // ---------- right-click context menu on the canvas ----------
+  // Right-click selects what's under the cursor (like any design app) and
+  // offers the edit actions that make sense for it.
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; kind: 'vec' | 'stones' | 'empty' } | null>(null)
+  const onCanvasContext = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const p = toMm(e)
+    const slop = Math.max(0.5, HIT_SLOP_PX / zoom)
+    const hit = pickStone(p, slop)
+    if (hit !== -1) {
+      if (!selection.has(hit)) { setSelVecs(new Set()); setSelection(new Set([hit])) }
+      setCtxMenu({ x: e.clientX, y: e.clientY, kind: 'stones' })
+      return
+    }
+    let bestV: number | null = null
+    let bestD = slop + 0.3
+    for (const v of vectors) {
+      const d = distToPaths(vecPaths(v), p)
+      if (d < bestD) { bestD = d; bestV = v.id }
+    }
+    if (bestV != null) {
+      if (!selVecs.has(bestV)) { setSelection(new Set()); setSelVecs(new Set([bestV])) }
+      setCtxMenu({ x: e.clientX, y: e.clientY, kind: 'vec' })
+      return
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, kind: 'empty' })
+  }, [toMm, zoom, pickStone, selection, vectors, selVecs])
+  useEffect(() => {
+    if (!ctxMenu) return
+    const close = () => setCtxMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('blur', close)
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', onKey); window.removeEventListener('blur', close) }
+  }, [ctxMenu])
+
   // ---------- menu bar ----------
   const [showShortcuts, setShowShortcuts] = useState(false)
   // Sidebar sections are plain <details>; the Window menu opens one by title
@@ -3268,6 +3305,7 @@ export default function App() {
           width={canvasW * zoom}
           height={canvasH * zoom}
           onMouseDown={onCanvasDown}
+          onContextMenu={onCanvasContext}
           onMouseMove={onCanvasMove}
           onMouseUp={onCanvasUp}
           onDoubleClick={onCanvasDoubleClick}
@@ -3381,6 +3419,55 @@ export default function App() {
           style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}
         />
         </div>
+        {ctxMenu && (() => {
+          const run = (fn: () => void) => { setCtxMenu(null); fn() }
+          type Item = { label: string; disabled?: boolean; onClick: () => void } | 'sep'
+          const items: Item[] =
+            ctxMenu.kind === 'vec'
+              ? [
+                  { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: () => run(ungroup) },
+                  'sep',
+                  { label: 'Unite', disabled: !selVecs.size, onClick: () => run(() => pathfinder('union')) },
+                  { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => run(() => pathfinder('difference')) },
+                  { label: 'Intersect', disabled: selVecs.size < 2, onClick: () => run(() => pathfinder('intersection')) },
+                  { label: 'Exclude', disabled: selVecs.size < 2, onClick: () => run(() => pathfinder('xor')) },
+                  'sep',
+                  { label: 'Delete', onClick: () => run(() => { mutateVectors((prev) => prev.filter((v) => !selVecs.has(v.id))); setSelVecs(new Set()) }) },
+                ]
+              : ctxMenu.kind === 'stones'
+                ? [
+                    { label: 'Select whole design', onClick: () => run(expandToDesigns) },
+                    { label: 'Resize design…', disabled: selectedEl == null, onClick: () => run(() => openSection('Edit', 'input[type=number]')) },
+                    'sep',
+                    { label: `Set selected to ${curSize}`, onClick: () => run(() => mutate((prev) => prev.map((st, i) => (selection.has(i) ? { ...st, size: curSize } : st)))) },
+                    { label: 'Delete selected stones', onClick: () => run(() => { mutate((prev) => prev.filter((_, i) => !selection.has(i))); setSelection(new Set()) }) },
+                  ]
+                : [
+                    { label: 'Select all', disabled: !stones.length && !vectors.length, onClick: () => run(() => { setSelection(new Set(stones.map((_, i) => i))); setSelVecs(new Set(vectors.map((v) => v.id))) }) },
+                    { label: 'Center on board', disabled: !stones.length && !vectors.length, onClick: () => run(centerOnBoard) },
+                    { label: 'Move to origin corner', disabled: !stones.length && !vectors.length, onClick: () => run(() => placeFromOrigin(0.5, 0.5)) },
+                    'sep',
+                    { label: 'Clear all', disabled: !stones.length && !vectors.length, onClick: () => run(clearAll) },
+                  ]
+          return (
+            <div
+              className="menu-list"
+              style={{ position: 'fixed', left: Math.min(ctxMenu.x, window.innerWidth - 260), top: Math.min(ctxMenu.y, window.innerHeight - items.length * 30 - 20), zIndex: 80 }}
+              onMouseDown={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              {items.map((it, i) =>
+                it === 'sep' ? (
+                  <div key={i} className="menu-sep" />
+                ) : (
+                  <button key={i} className="menu-item" disabled={it.disabled} onClick={it.onClick}>
+                    <span className="menu-label">{it.label}</span>
+                  </button>
+                ),
+              )}
+            </div>
+          )
+        })()}
       </main>
       </div>
     </div>
