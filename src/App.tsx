@@ -16,7 +16,7 @@ import type { ColorLayer } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
-import { drawGem, drawMockup } from './sim'
+import { MOCKUP_W, drawGem, drawMockup, drawMockupPhoto } from './sim'
 import { MenuBar } from './MenuBar'
 import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
@@ -239,6 +239,73 @@ export default function App() {
   const [chestIn, setChestIn] = useState(20)
   const [dropIn, setDropIn] = useState(3)
   const mockupCanvasRef = useRef<HTMLCanvasElement>(null)
+  // real S&S product photos via the TSB API (same droplet; /tsb-api proxied
+  // in dev and on the rhinestones vhost; image-proxy adds the CORS header
+  // that keeps the canvas untainted for the PNG download)
+  interface SsColor { name: string; hex: string | null; swatch: string | null; image: string | null; backImage: string | null }
+  const [mkMode, setMkMode] = useState<'photo' | 'tee'>('photo')
+  const [mkSearch, setMkSearch] = useState('')
+  const [mkResults, setMkResults] = useState<{ ss_id: string; name: string; brand: string }[]>([])
+  const [mkStyle, setMkStyle] = useState<{ ssId: string; name: string; brand: string } | null>(() => {
+    try { return JSON.parse(localStorage.getItem('stonecut.mkstyle') ?? 'null') } catch { return null }
+  })
+  const [mkColors, setMkColors] = useState<SsColor[]>([])
+  const [mkColorIdx, setMkColorIdx] = useState(0)
+  const [mkView, setMkView] = useState<'front' | 'back'>('front')
+  // how much of the photo's width the garment chest spans — S&S flat shots
+  // vary by brand, so it's a visible calibration, not a hidden constant
+  const [mkSpan, setMkSpan] = useState(() => +(localStorage.getItem('stonecut.mkspan') ?? 62))
+  useEffect(() => { localStorage.setItem('stonecut.mkspan', String(mkSpan)) }, [mkSpan])
+  const [mkOff, setMkOff] = useState({ x: 0, y: 0 })
+  const mkDrag = useRef<{ x: number; y: number } | null>(null)
+  const mkImgRef = useRef<HTMLImageElement | null>(null)
+  const [mkImgTick, setMkImgTick] = useState(0)
+  const searchStyles = useCallback(async () => {
+    const q = mkSearch.trim()
+    if (!q) return
+    try {
+      const j = await fetch(`/tsb-api/products?search=${encodeURIComponent(q)}&limit=10`).then((r) => r.json())
+      const rows = (j.products ?? []).filter((p: { ss_id?: string }) => p.ss_id)
+      setMkResults(rows.map((p: { ss_id: string; name: string; brand: string }) => ({ ss_id: p.ss_id, name: p.name, brand: p.brand })))
+      if (!rows.length) setStatus(`No S&S styles match “${q}”`)
+    } catch {
+      setStatus('Could not reach the T-Shirt Brothers product API')
+    }
+  }, [mkSearch])
+  const selectStyle = useCallback(async (s: { ss_id: string; name: string; brand: string }) => {
+    const style = { ssId: s.ss_id, name: s.name, brand: s.brand }
+    setMkStyle(style)
+    localStorage.setItem('stonecut.mkstyle', JSON.stringify(style))
+    setMkResults([])
+    setMkColors([])
+    setMkColorIdx(0)
+    try {
+      const j = await fetch(`/tsb-api/products/colors/${s.ss_id}`).then((r) => r.json())
+      const colors = (j.colors ?? []).filter((c: SsColor) => c.image || c.backImage)
+      setMkColors(colors)
+      if (!colors.length) setStatus(`${s.name}: S&S has no product photos for this style`)
+    } catch {
+      setStatus('Could not load colors for that style')
+    }
+  }, [])
+  // opening the modal with a remembered style: fetch its colors once
+  useEffect(() => {
+    if (mockupOpen && mkMode === 'photo' && mkStyle && !mkColors.length)
+      void selectStyle({ ss_id: mkStyle.ssId, name: mkStyle.name, brand: mkStyle.brand })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mockupOpen])
+  // load the chosen colour's photo through the CORS proxy
+  useEffect(() => {
+    if (!mockupOpen || mkMode !== 'photo') return
+    const c = mkColors[mkColorIdx]
+    const url = c ? (mkView === 'back' ? c.backImage ?? c.image : c.image ?? c.backImage) : null
+    if (!url) { mkImgRef.current = null; setMkImgTick((t) => t + 1); return }
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => { mkImgRef.current = img; setMkImgTick((t) => t + 1) }
+    img.onerror = () => { mkImgRef.current = null; setMkImgTick((t) => t + 1); setStatus('Could not load the garment photo') }
+    img.src = `/tsb-api/products/image-proxy?url=${encodeURIComponent(url)}`
+  }, [mockupOpen, mkMode, mkColors, mkColorIdx, mkView])
   // light material needs dark rules/labels on it, and vice versa
   const boardIsLight = useMemo(() => {
     if (!boardColor) return false
@@ -2575,21 +2642,20 @@ export default function App() {
     if (!mockupOpen) return
     const cv = mockupCanvasRef.current
     if (!cv) return
-    drawMockup(
-      cv,
-      garmentColor,
-      chestIn,
-      dropIn,
-      stones.map((s) => ({
-        x: s.x,
-        y: s.y,
-        // show the STONE, not the template hole — the hole is oversized
-        rMm: ((sizes[s.size]?.stoneMm || (sizes[s.size]?.holeMm ?? 3) * 0.85) / 2),
-        color: colorOfStone(s),
-      })),
-      vectors.flatMap(vecPaths),
-    )
-  }, [mockupOpen, garmentColor, chestIn, dropIn, stones, sizes, colorOfStone, vectors])
+    const mkStones = stones.map((s) => ({
+      x: s.x,
+      y: s.y,
+      // show the STONE, not the template hole — the hole is oversized
+      rMm: ((sizes[s.size]?.stoneMm || (sizes[s.size]?.holeMm ?? 3) * 0.85) / 2),
+      color: colorOfStone(s),
+    }))
+    const mkPaths = vectors.flatMap(vecPaths)
+    if (mkMode === 'photo' && mkImgRef.current) {
+      drawMockupPhoto(cv, mkImgRef.current, mkSpan, chestIn, mkOff, mkStones, mkPaths)
+    } else {
+      drawMockup(cv, garmentColor, chestIn, dropIn, mkStones, mkPaths, mkOff)
+    }
+  }, [mockupOpen, garmentColor, chestIn, dropIn, stones, sizes, colorOfStone, vectors, mkMode, mkSpan, mkOff, mkImgTick])
   const downloadMockup = useCallback(() => {
     mockupCanvasRef.current?.toBlob((b) => {
       if (!b) return
@@ -3594,11 +3660,78 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setMockupOpen(false) }}>
           <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 580 }}>
             <h3>Garment mockup</h3>
-            <canvas ref={mockupCanvasRef} style={{ borderRadius: 8, width: '100%', maxWidth: 520 }} />
+            <div className="chiprow">
+              <button className={`chip ${mkMode === 'photo' ? 'active' : ''}`} onClick={() => setMkMode('photo')}>Product photo (S&amp;S)</button>
+              <button className={`chip ${mkMode === 'tee' ? 'active' : ''}`} onClick={() => setMkMode('tee')}>Illustration</button>
+            </div>
+            {mkMode === 'photo' && (
+              <>
+                <div className="toolrow">
+                  <input
+                    placeholder="Search S&S styles — gildan 64000, hoodie, comfort colors…"
+                    value={mkSearch}
+                    onChange={(e) => setMkSearch(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void searchStyles() }}
+                  />
+                  <button style={{ width: 'auto' }} onClick={() => { void searchStyles() }}>Search</button>
+                </div>
+                {mkResults.length > 0 && (
+                  <div className="fontlist" style={{ maxHeight: 150 }}>
+                    {mkResults.map((r) => (
+                      <button key={r.ss_id} onClick={() => { void selectStyle(r) }}>{r.brand} — {r.name}<span>{r.ss_id}</span></button>
+                    ))}
+                  </div>
+                )}
+                {mkStyle && (
+                  <p className="hint" style={{ margin: '4px 0' }}>
+                    <b>{mkStyle.brand} {mkStyle.name}</b>
+                    {mkColors.length > 0 && mkColors[mkColorIdx] ? ` · ${mkColors[mkColorIdx].name}` : ''}
+                  </p>
+                )}
+                {mkColors.length > 0 && (
+                  <div className="chiprow" style={{ maxHeight: 56, overflow: 'auto' }}>
+                    {mkColors.map((c, i) => (
+                      <button
+                        key={c.name}
+                        title={c.name}
+                        onClick={() => setMkColorIdx(i)}
+                        style={{
+                          width: 20, height: 20, padding: 0, margin: 0, borderRadius: '50%', flex: 'none',
+                          background: c.hex ?? '#888',
+                          border: i === mkColorIdx ? '2px solid #f0b95e' : '1px solid #555',
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+            <canvas
+              ref={mockupCanvasRef}
+              style={{ borderRadius: 8, width: '100%', maxWidth: 520, cursor: 'grab', touchAction: 'none' }}
+              onPointerDown={(e) => { mkDrag.current = { x: e.clientX, y: e.clientY }; e.currentTarget.setPointerCapture(e.pointerId) }}
+              onPointerMove={(e) => {
+                const d = mkDrag.current
+                if (!d) return
+                const k = MOCKUP_W / e.currentTarget.getBoundingClientRect().width
+                setMkOff((o) => ({ x: o.x + (e.clientX - d.x) * k, y: o.y + (e.clientY - d.y) * k }))
+                mkDrag.current = { x: e.clientX, y: e.clientY }
+              }}
+              onPointerUp={() => { mkDrag.current = null }}
+            />
             <div className="grid3" style={{ marginTop: 8 }}>
-              <label>Garment
-                <input type="color" value={garmentColor} onChange={(e) => setGarmentColor(e.target.value)} style={{ width: '100%', height: 30, padding: 0 }} />
-              </label>
+              {mkMode === 'tee' ? (
+                <label>Garment
+                  <input type="color" value={garmentColor} onChange={(e) => setGarmentColor(e.target.value)} style={{ width: '100%', height: 30, padding: 0 }} />
+                </label>
+              ) : (
+                <label>View
+                  <select value={mkView} onChange={(e) => setMkView(e.target.value as typeof mkView)}>
+                    <option value="front">Front</option>
+                    <option value="back">Back</option>
+                  </select>
+                </label>
+              )}
               <label>Chest width
                 <select value={chestIn} onChange={(e) => setChestIn(+e.target.value)}>
                   <option value={18}>S — 18″</option>
@@ -3608,13 +3741,22 @@ export default function App() {
                   <option value={26}>2XL — 26″</option>
                 </select>
               </label>
-              <label>Below collar
-                <select value={dropIn} onChange={(e) => setDropIn(+e.target.value)}>
-                  {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}″</option>)}
-                </select>
-              </label>
+              {mkMode === 'tee' ? (
+                <label>Below collar
+                  <select value={dropIn} onChange={(e) => setDropIn(+e.target.value)}>
+                    {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}″</option>)}
+                  </select>
+                </label>
+              ) : (
+                <label>Photo chest span {mkSpan}%
+                  <input type="range" min={40} max={90} value={mkSpan} onChange={(e) => setMkSpan(+e.target.value)} />
+                </label>
+              )}
             </div>
-            <p className="hint">Design shown at true relative scale for the chosen chest width — what the customer approves is what the template cuts.</p>
+            <p className="hint">
+              Drag the design to position it. Size is true to the chosen chest width
+              {mkMode === 'photo' ? ' — nudge “Photo chest span” until the garment edges match the slider’s claim.' : ' — what the customer approves is what the template cuts.'}
+            </p>
             <div className="modal-actions">
               <button onClick={() => setMockupOpen(false)}>Close</button>
               <button className="primary" onClick={downloadMockup}>Download PNG for the customer</button>

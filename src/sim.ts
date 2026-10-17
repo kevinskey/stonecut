@@ -100,6 +100,73 @@ export function drawGem(ctx: CanvasRenderingContext2D, x: number, y: number, rPx
 
 export interface MockupStone { x: number; y: number; rMm: number; color: string }
 
+// Stamp the design (stones + cut lines) centred at (cx, cy) in canvas px.
+function drawDesign(
+  ctx: CanvasRenderingContext2D,
+  stones: MockupStone[],
+  paths: { x: number; y: number }[][],
+  pxPerMm: number,
+  cx: number,
+  cy: number,
+  lineColor: string,
+) {
+  if (!stones.length && !paths.length) return
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const s of stones) {
+    minX = Math.min(minX, s.x - s.rMm); minY = Math.min(minY, s.y - s.rMm)
+    maxX = Math.max(maxX, s.x + s.rMm); maxY = Math.max(maxY, s.y + s.rMm)
+  }
+  for (const p of paths) for (const q of p) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+  const ox = cx - ((maxX - minX) * pxPerMm) / 2
+  const oy = cy - ((maxY - minY) * pxPerMm) / 2
+  ctx.strokeStyle = lineColor
+  ctx.lineWidth = 0.8
+  for (const p of paths) {
+    ctx.beginPath()
+    p.forEach((q, i) => {
+      const x = ox + (q.x - minX) * pxPerMm, y = oy + (q.y - minY) * pxPerMm
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+    })
+    ctx.stroke()
+  }
+  for (const s of stones)
+    drawGem(ctx, ox + (s.x - minX) * pxPerMm, oy + (s.y - minY) * pxPerMm, Math.max(1.2, s.rMm * pxPerMm), s.color)
+}
+
+export const MOCKUP_W = 520
+export const MOCKUP_H = 620
+
+// Real product-photo mockup: the S&S garment shot fitted to the canvas, the
+// design stamped at true relative scale. spanPct calibrates how much of the
+// photo's width the garment chest actually spans (S&S flat shots vary by
+// brand), and off is the user's drag offset from the default chest spot.
+export function drawMockupPhoto(
+  cv: HTMLCanvasElement,
+  photo: HTMLImageElement,
+  spanPct: number,
+  chestIn: number,
+  off: { x: number; y: number },
+  stones: MockupStone[],
+  paths: { x: number; y: number }[][],
+) {
+  const W = MOCKUP_W, H = MOCKUP_H
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  cv.width = W * dpr
+  cv.height = H * dpr
+  cv.style.width = `${W}px`
+  cv.style.height = `${H}px`
+  const ctx = cv.getContext('2d')!
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.fillStyle = '#f2f3f5'
+  ctx.fillRect(0, 0, W, H)
+  const s = Math.min(W / photo.naturalWidth, H / photo.naturalHeight)
+  const dw = photo.naturalWidth * s, dh = photo.naturalHeight * s
+  const dx = (W - dw) / 2, dy = (H - dh) / 2
+  ctx.drawImage(photo, dx, dy, dw, dh)
+  const pxPerMm = (dw * spanPct) / 100 / (chestIn * 25.4)
+  drawDesign(ctx, stones, paths, pxPerMm, W / 2 + off.x, dy + dh * 0.42 + off.y, 'rgba(255,255,255,0.55)')
+}
+
 export function drawMockup(
   cv: HTMLCanvasElement,
   garmentColor: string,
@@ -107,8 +174,9 @@ export function drawMockup(
   dropIn: number, // inches below the collar to the design top
   stones: MockupStone[],
   paths: { x: number; y: number }[][],
+  off: { x: number; y: number } = { x: 0, y: 0 },
 ) {
-  const W = 520, H = 620
+  const W = MOCKUP_W, H = MOCKUP_H
   const dpr = Math.min(2, window.devicePixelRatio || 1)
   cv.width = W * dpr
   cv.height = H * dpr
@@ -161,26 +229,11 @@ export function drawMockup(
 
   // design, centred on the chest at true relative scale
   if (!stones.length && !paths.length) return
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  for (const s of stones) {
-    minX = Math.min(minX, s.x - s.rMm); minY = Math.min(minY, s.y - s.rMm)
-    maxX = Math.max(maxX, s.x + s.rMm); maxY = Math.max(maxY, s.y + s.rMm)
-  }
-  for (const p of paths) for (const q of p) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+  let minY = Infinity, maxY = -Infinity
+  for (const s of stones) { minY = Math.min(minY, s.y - s.rMm); maxY = Math.max(maxY, s.y + s.rMm) }
+  for (const p of paths) for (const q of p) { minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y) }
   const pxPerMm = (bodyR - bodyL) / (chestIn * 25.4)
-  const dw = (maxX - minX) * pxPerMm
-  const ox = (bodyL + bodyR) / 2 - dw / 2
-  const oy = 132 + dropIn * 25.4 * pxPerMm
-  ctx.strokeStyle = lum > 128 ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.5)'
-  ctx.lineWidth = 0.8
-  for (const p of paths) {
-    ctx.beginPath()
-    p.forEach((q, i) => {
-      const x = ox + (q.x - minX) * pxPerMm, y = oy + (q.y - minY) * pxPerMm
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-    })
-    ctx.stroke()
-  }
-  for (const s of stones)
-    drawGem(ctx, ox + (s.x - minX) * pxPerMm, oy + (s.y - minY) * pxPerMm, Math.max(1.2, s.rMm * pxPerMm), s.color)
+  const cy = 132 + dropIn * 25.4 * pxPerMm + ((maxY - minY) * pxPerMm) / 2
+  drawDesign(ctx, stones, paths, pxPerMm, (bodyL + bodyR) / 2 + off.x, cy + off.y,
+    lum > 128 ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.5)')
 }
