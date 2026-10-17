@@ -4869,8 +4869,6 @@ export default function App() {
             onChange={(e) => setBoardHIn(Math.max(1, +e.target.value || 1))}
             style={{ width: 54 }}
           />
-          <span>in</span>
-          <span title="Artboard colour — preview stones on the material they'll sit on">Color</span>
           <input
             type="color"
             value={boardColor ?? '#1a1f2b'}
