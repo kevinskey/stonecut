@@ -347,7 +347,7 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 .app-body { display: flex; flex: 1; min-height: 0; }
 .menubar {
   display: flex; align-items: center; justify-content: center; gap: 2px;
-  height: 32px; padding: 0 8px; position: relative;
+  padding: 8px; position: relative;
   background: #1d2230; border-bottom: 1px solid #2b3240;
   font-size: 13px; user-select: none; z-index: 20; flex-shrink: 0;
 }
