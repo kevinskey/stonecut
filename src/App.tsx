@@ -361,6 +361,13 @@ export default function App() {
   const boardWmm = boardWIn * 25.4
   const boardHmm = boardHIn * 25.4
   const [status, setStatus] = useState('Ready')
+  // resizable sidebar: drag the strip between the panel and the canvas
+  const [panelW, setPanelW] = useState(() => {
+    const v = +(localStorage.getItem('stonecut.panelw') ?? 300)
+    return isFinite(v) ? Math.min(560, Math.max(240, v)) : 300
+  })
+  useEffect(() => { localStorage.setItem('stonecut.panelw', String(panelW)) }, [panelW])
+  const panelDrag = useRef(false)
 
   // text panel
   const [font, setFont] = useState<opentype.Font | null>(null)
@@ -3789,7 +3796,7 @@ export default function App() {
         </div>
       )}
       <div className="app-body">
-      <aside className="panel">
+      <aside className="panel" style={{ width: panelW, minWidth: panelW }}>
         <div className="statusbar">
           {pending > 0 && (
             <div><b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b></div>
@@ -4801,6 +4808,13 @@ export default function App() {
           </div>
         </div>
       </aside>
+      <div
+        className="panel-resizer"
+        title="Drag to resize the sidebar"
+        onPointerDown={(e) => { panelDrag.current = true; e.currentTarget.setPointerCapture(e.pointerId) }}
+        onPointerMove={(e) => { if (panelDrag.current) setPanelW(Math.min(560, Math.max(240, e.clientX))) }}
+        onPointerUp={() => { panelDrag.current = false }}
+      />
 
       <main
         className={`canvas-wrap${dragOver ? ' dragover' : ''}`}

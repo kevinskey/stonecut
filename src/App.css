@@ -326,8 +326,12 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   font-size: 11px;
   color: #8b96ab;
 }
-.zoombar { flex-wrap: wrap; row-gap: 6px; }
-.zoombar input[type="range"] { width: 140px; margin: 0; }
+/* ONE line, always (Kevin, 2026-10-17): the slider gives up width first,
+   and if the window is truly too narrow the bar pans instead of wrapping. */
+.zoombar { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; gap: 8px; scrollbar-width: none; }
+.zoombar::-webkit-scrollbar { display: none; }
+.zoombar > * { flex-shrink: 0; }
+.zoombar input[type="range"] { width: 140px; min-width: 50px; margin: 0; flex-shrink: 1; }
 .zoombar select { width: auto; margin: 0; padding: 3px 6px; font-size: 11px; }
 .zoombar .zbtn {
   width: auto;
@@ -455,3 +459,13 @@ textarea {
   font: 13px/1.5 ui-monospace, Menlo, monospace;
   resize: vertical;
 }
+
+/* sidebar resize strip */
+.panel-resizer {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: #262c3a;
+  touch-action: none;
+}
+.panel-resizer:hover { background: #3b5bd9; }
