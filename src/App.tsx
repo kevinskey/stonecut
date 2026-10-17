@@ -1218,6 +1218,7 @@ export default function App() {
   // ---------- multi-color trace ----------
   const traceColors = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
+    lastImageRef.current = null // new task — stop morphing the last stone commit
     setStatus(`Separating into ${mcColors} colors…`)
     try {
       const px = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
@@ -2978,6 +2979,7 @@ export default function App() {
   // outline instead of holes.
   const textAsCutLines = useCallback(() => {
     if (!textPreview || !textPreview.contours.length) { setStatus('Type some text and pick a font first'); return }
+    lastTextRef.current = null // new task — stop morphing the last text commit
     // script fonts overlap letter to letter; unite them so the blade does
     // not cut across the joins (holes in letters are kept)
     const united = booleanPaths('union', [textPreview.contours])
@@ -3131,6 +3133,10 @@ export default function App() {
   // and resize all work on it.
   const imageAsCutLines = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
+    // the operator has moved on to the CUT-LINE task: break the stone
+    // commit's regenerate-in-place link, or every Threshold tweak made for
+    // the trace silently morphs the finished (unselected) stone design
+    lastImageRef.current = null
     setStatus('Tracing image to cut lines…')
     try {
       const traced = await imageToCutContours(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
