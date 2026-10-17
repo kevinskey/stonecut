@@ -2587,6 +2587,16 @@ export default function App() {
   // — the operator brushes each color into its own template, and every
   // template shares the full design's frame so they register when stacked.
   const [cutLayer, setCutLayer] = useState<string>('all')
+  // Weeding frame: one rectangle cut around the arrangement so the template
+  // peels cleanly off the roll. Export-time only — it wraps whichever layer
+  // is being cut, and cuts LAST so the sheet stays anchored.
+  const [frameOn, setFrameOn] = useState(() => localStorage.getItem('stonecut.frame') === '1')
+  useEffect(() => { localStorage.setItem('stonecut.frame', frameOn ? '1' : '0') }, [frameOn])
+  const [frameMm, setFrameMm] = useState(() => {
+    const v = +(localStorage.getItem('stonecut.framemm') ?? 5)
+    return isFinite(v) && v >= 1 ? v : 5
+  })
+  useEffect(() => { localStorage.setItem('stonecut.framemm', String(frameMm)) }, [frameMm])
   const cutColors = useMemo(() => {
     const m = new Map<string, number>()
     for (const st of stones) { const c = colorOfStone(st); m.set(c, (m.get(c) ?? 0) + 1) }
@@ -2617,7 +2627,37 @@ export default function App() {
   )
   // filenames: 'color:#dc2034' -> 'color-dc2034'
   const cutLayerSlug = cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
-  const cutCount = cutJob.stones.length + (cutJob.paths?.length ?? 0)
+  const framedCutJob = useMemo(() => {
+    if (!frameOn) return cutJob
+    // frame bbox comes from the FULL job, never the filtered layer — a
+    // per-colour bbox would give every template a different frame and the
+    // stack couldn't register by its edges
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const s of job.stones) {
+      const r = (job.sizes[s.size]?.holeMm ?? 3) / 2
+      minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
+      maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
+    }
+    for (const p of job.paths ?? []) for (const q of p) {
+      minX = Math.min(minX, q.x); minY = Math.min(minY, q.y)
+      maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y)
+    }
+    if (!isFinite(minX)) return cutJob
+    const m = Math.max(1, frameMm)
+    const x0 = minX - m, y0 = minY - m, x1 = maxX + m, y1 = maxY + m
+    const frame = [
+      { x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }, { x: x0, y: y0 },
+    ]
+    return {
+      ...cutJob,
+      // the frame may poke past the sheet datum in from-origin mode — grow
+      // the job frame so the exporters' Y-flip datum still covers it
+      widthMm: Math.max(cutJob.widthMm, x1 + m),
+      heightMm: Math.max(cutJob.heightMm, y1 + m),
+      paths: [...(cutJob.paths ?? []), frame],
+    }
+  }, [cutJob, job, frameOn, frameMm])
+  const cutCount = framedCutJob.stones.length + (framedCutJob.paths?.length ?? 0)
   const layerCounts = useMemo(() => {
     let o = 0
     let f = 0
@@ -2627,9 +2667,9 @@ export default function App() {
   const cutData = useCallback(
     () =>
       format === 'gpgl'
-        ? toGPGL(cutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut })
-        : toHPGL(cutJob, preset, originCorner, { overcutMm: overcut }),
-    [format, cutJob, preset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
+        ? toGPGL(framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut })
+        : toHPGL(framedCutJob, preset, originCorner, { overcutMm: overcut }),
+    [format, framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
   )
 
   // Cut goes through an in-app confirmation (styled like the rest of the
@@ -3754,8 +3794,8 @@ export default function App() {
       { label: 'Import vector cut (SVG)…', onClick: importSvg },
       { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
       'sep',
-      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutCount },
-      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(cutJob), 'application/dxf'), disabled: !cutCount },
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount },
+      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount },
       { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayerSlug}.plt`, cutData()), disabled: !cutCount },
       'sep',
       { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
@@ -3871,8 +3911,8 @@ export default function App() {
             <h3>⚡ Cut on Graphtec</h3>
             <table className="modal-facts"><tbody>
               <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Not connected yet — Chrome will ask which cutter to use, this once'}</td></tr>
-              <tr><td>Stones</td><td>{cutJob.stones.length}{cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
-              {(cutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{cutJob.paths!.length} path{cutJob.paths!.length === 1 ? '' : 's'}</td></tr>}
+              <tr><td>Stones</td><td>{framedCutJob.stones.length}{cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
+              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{framedCutJob.paths!.length} path{framedCutJob.paths!.length === 1 ? '' : 's'}{frameOn ? ' (incl. weeding frame)' : ''}</td></tr>}
               <tr><td>Size</td><td>{((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}″ × {((bbox.maxY - bbox.minY) / 25.4).toFixed(2)}″</td></tr>
               {fromOrigin && placement === 'artboard' && (
                 <tr><td>From origin</td><td>{fromOrigin.across.toFixed(2)}″ across, {fromOrigin.feed.toFixed(2)}″ up</td></tr>
@@ -4925,6 +4965,17 @@ export default function App() {
               Layers share one frame — cut each on its own sheet and they line up when stacked.
             </p>
           )}
+          <div className="grid2">
+            <label className="row" style={{ alignSelf: 'end' }}>
+              <input type="checkbox" checked={frameOn} onChange={(e) => setFrameOn(e.target.checked)} />
+              Weeding frame
+            </label>
+            <label>Frame margin (mm)
+              <input type="number" min={1} max={50} step={1} value={frameMm} disabled={!frameOn}
+                onChange={(e) => setFrameMm(Math.min(50, Math.max(1, +e.target.value || 1)))} />
+            </label>
+          </div>
+          <p className="hint">Cuts one rectangle around the arrangement (last, so the sheet stays anchored) — the template peels off the roll cleanly. Applies to every separated layer at the same frame.</p>
           <label>Position on material
             <select value={placement} onChange={(e) => setPlacement(e.target.value as typeof placement)}>
               <option value="artboard">On the board — cut exactly where it sits on the media</option>
@@ -4992,8 +5043,8 @@ export default function App() {
           )}
           <div className="toolrow">
             <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(cutJob), 'application/dxf')}>DXF (laser)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf')}>DXF (laser)</button>
           </div>
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
@@ -5090,7 +5141,7 @@ export default function App() {
         <div className="cutbar">
           <button className="primary" disabled={!cutCount} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="cutbar-meta">
-            {cutCount ? [cutJob.stones.length ? `${cutJob.stones.length} stones` : '', cutJob.paths?.length ? `${cutJob.paths.length} cut line${cutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
+            {cutCount ? [framedCutJob.stones.length ? `${framedCutJob.stones.length} stones` : '', framedCutJob.paths?.length ? `${framedCutJob.paths.length} cut line${framedCutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
           </div>
         </div>
