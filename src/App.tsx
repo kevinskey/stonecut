@@ -12,7 +12,7 @@ import { booleanPaths } from './boolean'
 import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToCutContours, imageToRaster } from './image'
-import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
+import { download, gpglTestShape, stoneBom, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MenuBar } from './MenuBar'
@@ -2215,6 +2215,175 @@ export default function App() {
     setStatus('Fill respaced — crowded fill stones eased apart')
   }, [mutate, sizes, gap, fillSize])
 
+  // ---------- production: stone counts + work order ----------
+  const colorOfStone = useCallback(
+    (st: Stone) => st.color ?? ((st.layer ?? 'outline') === 'fill' ? fillColor : outlineColor),
+    [fillColor, outlineColor],
+  )
+  const bom = useMemo(() => stoneBom(stones, sizes, colorOfStone), [stones, sizes, colorOfStone])
+  const printWorkOrder = useCallback(() => {
+    const html = workOrderHtml(job, bom, colorOfStone, {
+      title: `${stones.length} stones · ${new Date().toLocaleDateString()}`,
+      boardLabel: `${boardWIn}″ × ${boardHIn}″, origin lower-${originCorner === 'br' ? 'right' : 'left'}`,
+      material: `${preset.name} · force ${preset.force} · speed ${preset.speed}${preset.passes > 1 ? ` · ${preset.passes} passes` : ''}`,
+    })
+    const win = window.open('', '_blank')
+    if (!win) { setStatus('Pop-up blocked — allow pop-ups for this site to print'); return }
+    win.document.write(html)
+    win.document.close()
+  }, [job, bom, colorOfStone, stones.length, boardWIn, boardHIn, originCorner, preset])
+
+  // ---------- production: duplicate / copy-paste / step & repeat ----------
+  // Materialise copies of the current selection (or the whole design when
+  // nothing is selected) at each offset. Stone elements get fresh element
+  // ids + recipe copies so every copy moves/resizes independently; vectors
+  // share their base arrays (all edits replace base immutably).
+  const materializeCopies = useCallback(
+    (offsets: Pt[], selectCopies: boolean) => {
+      const stoneIdx = selection.size
+        ? [...selection]
+        : selVecs.size ? [] : stones.map((_, i) => i)
+      const vecIds = selVecs.size ? [...selVecs] : selection.size ? [] : vectors.map((v) => v.id)
+      const srcStones = stoneIdx.map((i) => stones[i]).filter(Boolean)
+      const srcVecs = vectors.filter((v) => vecIds.includes(v.id))
+      if (!srcStones.length && !srcVecs.length) { setStatus('Nothing to copy — add or select a design first'); return }
+      pushUndo(stonesRef.current)
+      const els = [...new Set(srcStones.map((s) => s.el).filter((e): e is number => e != null))]
+      const newStones: Stone[] = []
+      const addElements: Elements = {}
+      for (const off of offsets) {
+        const elMap = new Map<number, number>()
+        for (const e of els) {
+          const ne = elSeq.current++
+          elMap.set(e, ne)
+          const r = elementsRef.current[e]
+          if (r) addElements[ne] = { ...r, contours: r.contours.map((c) => c.map((q) => ({ ...q }))) }
+        }
+        for (const s of srcStones)
+          newStones.push({ ...s, x: s.x + off.x, y: s.y + off.y, el: s.el != null ? elMap.get(s.el) : undefined })
+      }
+      const newVecs: VecItem[] = []
+      for (const off of offsets)
+        for (const v of srcVecs)
+          newVecs.push({ ...v, id: vecSeq.current++, x: v.x + off.x, y: v.y + off.y })
+      const baseLen = stones.length
+      if (newStones.length) {
+        const next = [...stones, ...newStones]
+        stonesRef.current = next
+        setStones(next)
+      }
+      if (Object.keys(addElements).length) setElements((prev) => ({ ...prev, ...addElements }))
+      if (newVecs.length) setVectors((prev) => [...prev, ...newVecs])
+      if (selectCopies) {
+        setSelection(new Set(newStones.map((_, i) => baseLen + i)))
+        setSelVecs(new Set(newVecs.map((v) => v.id)))
+      }
+      return { stones: newStones.length, vecs: newVecs.length, copies: offsets.length }
+    },
+    [selection, selVecs, stones, vectors, pushUndo],
+  )
+  const duplicateSelection = useCallback(() => {
+    const r = materializeCopies([{ x: 5, y: 5 }], true)
+    if (r) setStatus(`Duplicated — ${r.stones ? `${r.stones} stones` : ''}${r.stones && r.vecs ? ' + ' : ''}${r.vecs ? `${r.vecs} cut-line object${r.vecs === 1 ? '' : 's'}` : ''} (5 mm offset)`)
+  }, [materializeCopies])
+  // internal clipboard: absolute-position snapshot; each paste lands 8 mm
+  // further so repeated pastes don't stack invisibly
+  const clipRef = useRef<{ stones: Stone[]; vecs: VecItem[]; elements: Elements; pastes: number } | null>(null)
+  const copySelection = useCallback(() => {
+    const stoneIdx = [...selection]
+    const srcStones = stoneIdx.map((i) => stones[i]).filter(Boolean)
+    const srcVecs = vectors.filter((v) => selVecs.has(v.id))
+    if (!srcStones.length && !srcVecs.length) { setStatus('Select something to copy first'); return }
+    const els = [...new Set(srcStones.map((s) => s.el).filter((e): e is number => e != null))]
+    const elements: Elements = {}
+    for (const e of els) if (elementsRef.current[e]) elements[e] = elementsRef.current[e]
+    clipRef.current = { stones: srcStones.map((s) => ({ ...s })), vecs: srcVecs.map((v) => ({ ...v })), elements, pastes: 0 }
+    setStatus(`Copied ${srcStones.length ? `${srcStones.length} stones` : ''}${srcStones.length && srcVecs.length ? ' + ' : ''}${srcVecs.length ? `${srcVecs.length} cut-line object${srcVecs.length === 1 ? '' : 's'}` : ''}`)
+  }, [selection, selVecs, stones, vectors])
+  const pasteClipboard = useCallback(() => {
+    const clip = clipRef.current
+    if (!clip) { setStatus('Nothing copied yet — select a design and press ⌘C') }
+    if (!clip) return
+    clip.pastes++
+    const off = 8 * clip.pastes
+    pushUndo(stonesRef.current)
+    const els = [...new Set(clip.stones.map((s) => s.el).filter((e): e is number => e != null))]
+    const elMap = new Map<number, number>()
+    const addElements: Elements = {}
+    for (const e of els) {
+      const ne = elSeq.current++
+      elMap.set(e, ne)
+      const r = clip.elements[e]
+      if (r) addElements[ne] = { ...r, contours: r.contours.map((c) => c.map((q) => ({ ...q }))) }
+    }
+    const fresh = clip.stones.map((s) => ({ ...s, x: s.x + off, y: s.y + off, el: s.el != null ? elMap.get(s.el) : undefined }))
+    const freshVecs = clip.vecs.map((v) => ({ ...v, id: vecSeq.current++, x: v.x + off, y: v.y + off }))
+    const baseLen = stonesRef.current.length
+    if (fresh.length) {
+      const next = [...stonesRef.current, ...fresh]
+      stonesRef.current = next
+      setStones(next)
+    }
+    if (Object.keys(addElements).length) setElements((prev) => ({ ...prev, ...addElements }))
+    if (freshVecs.length) setVectors((prev) => [...prev, ...freshVecs])
+    setSelection(new Set(fresh.map((_, i) => baseLen + i)))
+    setSelVecs(new Set(freshVecs.map((v) => v.id)))
+    setStatus('Pasted')
+  }, [pushUndo])
+  // step & repeat: grid of copies pitched at selection size + gap
+  const [repCols, setRepCols] = useState(2)
+  const [repRows, setRepRows] = useState(2)
+  const [repGap, setRepGap] = useState(10)
+  const stepAndRepeat = useCallback(() => {
+    // bbox of what will be copied (same selection rules as materializeCopies)
+    const stoneIdx = selection.size ? [...selection] : selVecs.size ? [] : stones.map((_, i) => i)
+    const vecIds = selVecs.size ? [...selVecs] : selection.size ? [] : vectors.map((v) => v.id)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const i of stoneIdx) {
+      const st = stones[i]
+      if (!st) continue
+      const r = holeOf(st) / 2
+      minX = Math.min(minX, st.x - r); minY = Math.min(minY, st.y - r)
+      maxX = Math.max(maxX, st.x + r); maxY = Math.max(maxY, st.y + r)
+    }
+    for (const v of vectors) {
+      if (!vecIds.includes(v.id)) continue
+      const b = vecBox(v)
+      minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY)
+      maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY)
+    }
+    if (!isFinite(minX)) { setStatus('Nothing to repeat — add or select a design first'); return }
+    const pitchX = maxX - minX + repGap
+    const pitchY = maxY - minY + repGap
+    const offsets: Pt[] = []
+    for (let r = 0; r < Math.max(1, repRows); r++)
+      for (let c = 0; c < Math.max(1, repCols); c++)
+        if (r || c) offsets.push({ x: c * pitchX, y: r * pitchY })
+    if (!offsets.length) { setStatus('Set columns or rows above 1 to repeat'); return }
+    const res = materializeCopies(offsets, false)
+    if (!res) return
+    const fullW = maxX - minX + pitchX * (repCols - 1)
+    const fullH = maxY - minY + pitchY * (repRows - 1)
+    setStatus(
+      `Repeated ${repCols} × ${repRows} — ${res.copies} cop${res.copies === 1 ? 'y' : 'ies'} added, layout ${(fullW / 25.4).toFixed(1)}″ × ${(fullH / 25.4).toFixed(1)}″` +
+      (minX + fullW > boardWmm || minY + fullH > boardHmm ? ' — runs past the board!' : ''),
+    )
+  }, [selection, selVecs, stones, vectors, holeOf, repCols, repRows, repGap, materializeCopies, boardWmm, boardHmm])
+
+  // ⌘D / ⌘C / ⌘V — separate listener so it can sit after the callbacks
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (!(e.metaKey || e.ctrlKey)) return
+      if (e.key === 'd') { e.preventDefault(); duplicateSelection() }
+      else if (e.key === 'c') copySelection()
+      else if (e.key === 'v') pasteClipboard()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [duplicateSelection, copySelection, pasteClipboard])
+
   const sizeKeys = Object.keys(sizes)
   const stoneColor: Record<string, string> = {}
   sizeKeys.forEach((k, i) => { stoneColor[k] = `hsl(${(i * 47) % 360} 70% 60%)` })
@@ -2746,7 +2915,7 @@ export default function App() {
   }, [])
   const hasSel = selection.size > 0
   const hasStones = stones.length > 0
-  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Material', 'Cut']
+  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Production', 'Material', 'Cut']
   const menus: Menu[] = [
     { label: 'File', items: [
       { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending && !vectors.length },
@@ -2761,6 +2930,10 @@ export default function App() {
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
+      'sep',
+      { label: 'Copy', shortcut: '⌘C', disabled: !hasSel && !selVecs.size, onClick: copySelection },
+      { label: 'Paste', shortcut: '⌘V', onClick: pasteClipboard },
+      { label: 'Duplicate', shortcut: '⌘D', disabled: !hasSel && !selVecs.size && !hasStones && !vectors.length, onClick: duplicateSelection },
       'sep',
       { label: 'Select all', shortcut: '⌘A', onClick: () => selectWhere(() => true), disabled: !hasStones },
       { label: 'Deselect', onClick: () => setSelection(new Set()), disabled: !hasSel },
@@ -2791,6 +2964,8 @@ export default function App() {
       { label: 'Distribute vertically', disabled: alignCount < 3, onClick: () => distributeSelected('y', 'centers') },
       'sep',
       { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: ungroup },
+      'sep',
+      { label: 'Step & repeat…', disabled: !hasStones && !vectors.length, onClick: () => openSection('Production') },
       'sep',
       { label: 'Unite', disabled: !selVecs.size, onClick: () => pathfinder('union') },
       { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => pathfinder('difference') },
@@ -2887,6 +3062,8 @@ export default function App() {
             <tr><td>⌘0</td><td>fit sheet</td></tr>
             <tr><td>V / A / N</td><td>Select · Add/erase · Node tool</td></tr>
             <tr><td>Alt-drag</td><td>move without snapping</td></tr>
+            <tr><td>⌘D</td><td>duplicate selection (5 mm offset)</td></tr>
+            <tr><td>⌘C / ⌘V</td><td>copy / paste selection</td></tr>
           </tbody></table>
           <button onClick={() => setShowShortcuts(false)}>Close</button>
         </div>
@@ -3553,6 +3730,55 @@ export default function App() {
           </div>
           <p className="hint">Click = select · shift-click = multi · drag empty space = box select · double-click = select whole design · drag = move · Del = delete · ⌘Z undo · ⌘A select all. In Add mode, clicking a stone erases it.</p>
           <p className="hint">Pinch or ⌘-scroll = zoom at the cursor · F = fit design · ⌘0 = fit sheet · ⌘+ / ⌘− = zoom.</p>
+        </Section>
+
+        <Section title="Production">
+          <p className="hint">Stone counts for this design — what to pull from stock or order.</p>
+          {bom.length === 0 ? (
+            <p className="hint">No stones on the board yet.</p>
+          ) : (
+            <table className="bom">
+              <thead>
+                <tr><th>Color</th><th>Size</th><th style={{ textAlign: 'right' }}>Holes</th><th style={{ textAlign: 'right' }}>Order</th></tr>
+              </thead>
+              <tbody>
+                {bom.map((r) => (
+                  <tr key={`${r.size}|${r.color}`}>
+                    <td><span style={{ display: 'inline-block', width: 11, height: 11, borderRadius: '50%', background: r.color, border: '1px solid #666', marginRight: 6, verticalAlign: -1 }} />{r.color}</td>
+                    <td>{r.size}</td>
+                    <td style={{ textAlign: 'right' }}>{r.n}</td>
+                    <td style={{ textAlign: 'right' }}>{Math.ceil(r.n * 1.1)}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <th colSpan={2}>Total</th>
+                  <th style={{ textAlign: 'right' }}>{stones.length}</th>
+                  <th style={{ textAlign: 'right' }}>{Math.ceil(stones.length * 1.1)}</th>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          <p className="hint">Order adds 10% for spills and culls.</p>
+          <button disabled={!stones.length && !vectors.length} onClick={printWorkOrder}>Print work order…</button>
+          <p className="hint" style={{ marginTop: 14 }}>
+            Step &amp; repeat — tile copies of the selection (or the whole design) across the sheet
+            for batch cutting. Copies are independent designs.
+          </p>
+          <div className="grid3">
+            <label>Columns
+              <input type="number" min={1} max={20} value={repCols} onChange={(e) => setRepCols(Math.max(1, Math.round(+e.target.value || 1)))} />
+            </label>
+            <label>Rows
+              <input type="number" min={1} max={20} value={repRows} onChange={(e) => setRepRows(Math.max(1, Math.round(+e.target.value || 1)))} />
+            </label>
+            <label>Gap (mm)
+              <input type="number" min={0} max={100} step={1} value={repGap} onChange={(e) => setRepGap(Math.max(0, +e.target.value || 0))} />
+            </label>
+          </div>
+          <button disabled={(!stones.length && !vectors.length) || repCols * repRows < 2} onClick={stepAndRepeat}>
+            Repeat {repCols} × {repRows}
+          </button>
+          <p className="hint">Duplicate one copy: ⌘D (5 mm offset) · copy/paste: ⌘C / ⌘V.</p>
         </Section>
 
         <Section title="Material">

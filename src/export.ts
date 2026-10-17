@@ -215,6 +215,108 @@ export function gpglTestShape(unitsPerMm = 20, offsetMm = 2, swapAxes = false): 
     .join('\x03') + '\x03'
 }
 
+// ---------- stone counts (bill of materials) ----------
+export interface BomRow {
+  size: string
+  color: string // display hex
+  holeMm: number
+  stoneMm: number
+  n: number
+}
+
+// Count stones by (size, colour). `colorOf` resolves a stone's display
+// colour the same way the canvas does (layer default when unset), so the
+// counts match what the operator sees.
+export function stoneBom(
+  stones: Stone[],
+  sizes: Record<string, StoneSpec>,
+  colorOf: (s: Stone) => string,
+): BomRow[] {
+  const m = new Map<string, BomRow>()
+  for (const s of stones) {
+    const color = colorOf(s)
+    const key = `${s.size}|${color}`
+    const row = m.get(key)
+    if (row) row.n++
+    else m.set(key, { size: s.size, color, holeMm: sizes[s.size]?.holeMm ?? 3, stoneMm: sizes[s.size]?.stoneMm ?? 0, n: 1 })
+  }
+  return [...m.values()].sort((a, b) => b.stoneMm - a.stoneMm || a.color.localeCompare(b.color))
+}
+
+// Printable work order: counts with order quantities (+10% for spills and
+// culls), the design at a glance, and the cut facts the operator needs.
+export function workOrderHtml(
+  job: Job,
+  bom: BomRow[],
+  colorOf: (s: Stone) => string,
+  meta: { title: string; boardLabel: string; material: string },
+): string {
+  const total = bom.reduce((t, r) => t + r.n, 0)
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const s of job.stones) {
+    const r = holeOf(job, s)
+    minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
+    maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
+  }
+  for (const p of job.paths ?? []) for (const q of p) {
+    minX = Math.min(minX, q.x); minY = Math.min(minY, q.y)
+    maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y)
+  }
+  if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 1; maxY = 1 }
+  const w = maxX - minX, h = maxY - minY
+  const circles = job.stones
+    .map((s) => `<circle cx="${(s.x - minX).toFixed(2)}" cy="${(s.y - minY).toFixed(2)}" r="${holeOf(job, s).toFixed(2)}" fill="${colorOf(s)}"/>`)
+    .join('')
+  const lines = (job.paths ?? [])
+    .map((p) => `<path d="M${p.map((q) => `${(q.x - minX).toFixed(2)},${(q.y - minY).toFixed(2)}`).join('L')}" fill="none" stroke="#333" stroke-width="0.3"/>`)
+    .join('')
+  const rows = bom
+    .map(
+      (r) => `<tr>
+  <td><span class="sw" style="background:${r.color}"></span>${r.color}</td>
+  <td>${r.size}</td>
+  <td>${r.stoneMm ? r.stoneMm.toFixed(1) : '—'} mm</td>
+  <td>${r.holeMm.toFixed(1)} mm</td>
+  <td class="n">${r.n}</td>
+  <td class="n">${Math.ceil(r.n * 1.1)}</td>
+</tr>`,
+    )
+    .join('\n')
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${meta.title}</title>
+<style>
+  body { font: 13px/1.45 -apple-system, Segoe UI, sans-serif; color: #111; margin: 28px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: #555; margin: 0 0 16px; }
+  table { border-collapse: collapse; width: 100%; max-width: 640px; margin: 10px 0 18px; }
+  th, td { border: 1px solid #bbb; padding: 5px 9px; text-align: left; }
+  th { background: #f0f0f0; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 1px solid #888; margin-right: 7px; vertical-align: -1px; }
+  .preview { max-width: 640px; border: 1px solid #ccc; padding: 8px; background: #fff; }
+  .preview svg { width: 100%; height: auto; display: block; }
+  .facts td { border: none; padding: 1px 18px 1px 0; color: #333; }
+  @media print { body { margin: 10mm; } }
+</style></head><body>
+<h1>StoneCut work order</h1>
+<p class="sub">${meta.title} · ${new Date().toLocaleString()}</p>
+<table class="facts"><tbody>
+<tr><td>Design size</td><td><b>${(w / 25.4).toFixed(2)}″ × ${(h / 25.4).toFixed(2)}″</b> (${w.toFixed(0)} × ${h.toFixed(0)} mm)</td></tr>
+<tr><td>Media</td><td>${meta.boardLabel}</td></tr>
+<tr><td>Material</td><td>${meta.material}</td></tr>
+<tr><td>Holes</td><td><b>${total}</b>${(job.paths?.length ?? 0) ? ` + ${job.paths!.length} cut line${job.paths!.length === 1 ? '' : 's'}` : ''}</td></tr>
+</tbody></table>
+<table>
+<thead><tr><th>Color</th><th>Size</th><th>Stone ⌀</th><th>Hole ⌀</th><th class="n">Holes</th><th class="n">Order (+10%)</th></tr></thead>
+<tbody>
+${rows}
+<tr><th colspan="4">Total</th><th class="n">${total}</th><th class="n">${Math.ceil(total * 1.1)}</th></tr>
+</tbody>
+</table>
+<div class="preview"><svg viewBox="0 0 ${w.toFixed(1)} ${h.toFixed(1)}" xmlns="http://www.w3.org/2000/svg">${circles}${lines}</svg></div>
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 150))</script>
+</body></html>`
+}
+
 export function download(filename: string, content: string, mime = 'text/plain') {
   const blob = new Blob([content], { type: mime })
   const url = URL.createObjectURL(blob)

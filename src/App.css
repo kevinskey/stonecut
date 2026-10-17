@@ -424,3 +424,18 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 .iconbtn:disabled { color: #596179; }
 .iconlabels { display: flex; gap: 6px; margin-top: 2px; font-size: 10px; color: #8b96ab; }
 .iconlabels span { flex: 1; text-align: center; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Production: stone-count table */
+.bom {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 4px 0 6px;
+}
+.bom th, .bom td {
+  border: 1px solid #333a4a;
+  padding: 3px 7px;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.bom thead th { background: #1a1f2b; color: #8b97b5; font-weight: 600; }
