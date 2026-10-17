@@ -344,6 +344,70 @@ ${rows}
 </body></html>`
 }
 
+// ---------- 1:1 placement guide ----------
+// The job printed at TRUE SIZE, tiled across pages: lay the sheets under a
+// cut template to verify it before cutting flock, or hand-place stones
+// straight onto the print. Every page carries its tile label and tape
+// marks; page 1 carries a 100 mm calibration bar — if that bar doesn't
+// measure 100 mm, the print dialog scaled the job ("Fit to page" is the
+// usual culprit).
+export function placementGuideHtml(job: Job, colorOf: (s: Stone) => string, title: string): string {
+  const TILE_W = 190, TILE_H = 245 // mm of design per page, inside margins
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const s of job.stones) {
+    const r = holeOf(job, s)
+    minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
+    maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
+  }
+  for (const p of job.paths ?? []) for (const q of p) {
+    minX = Math.min(minX, q.x); minY = Math.min(minY, q.y)
+    maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y)
+  }
+  if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 10; maxY = 10 }
+  // 3 mm of breathing room so edge stones don't kiss the tile border
+  minX -= 3; minY -= 3; maxX += 3; maxY += 3
+  const w = maxX - minX, h = maxY - minY
+  const cols = Math.max(1, Math.ceil(w / TILE_W))
+  const rows = Math.max(1, Math.ceil(h / TILE_H))
+  const circles = job.stones
+    .map((s) => `<circle cx="${s.x.toFixed(2)}" cy="${s.y.toFixed(2)}" r="${holeOf(job, s).toFixed(2)}" fill="${colorOf(s)}" fill-opacity="0.85" stroke="#333" stroke-width="0.12"/>`)
+    .join('')
+  const lines = (job.paths ?? [])
+    .map((p) => `<path d="M${p.map((q) => `${q.x.toFixed(2)},${q.y.toFixed(2)}`).join('L')}" fill="none" stroke="#333" stroke-width="0.25"/>`)
+    .join('')
+  const pages: string[] = []
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const vx = minX + c * TILE_W, vy = minY + r * TILE_H
+      const label = `${String.fromCharCode(65 + r)}${c + 1}`
+      const cross = (x: number, y: number) =>
+        `<path d="M${x - 3},${y} L${x + 3},${y} M${x},${y - 3} L${x},${y + 3}" stroke="#c33" stroke-width="0.2" fill="none"/>`
+      pages.push(`<div class="page">
+<div class="head"><b>${label}</b> — row ${r + 1} of ${rows}, column ${c + 1} of ${cols} · ${title} · print at 100% (no "fit to page")${r === 0 && c === 0 ? '<span class="cal">calibration — must measure exactly 100&nbsp;mm</span>' : ''}</div>
+${r === 0 && c === 0 ? '<div class="calbar"></div>' : ''}
+<svg width="${TILE_W}mm" height="${TILE_H}mm" viewBox="${vx.toFixed(2)} ${vy.toFixed(2)} ${TILE_W} ${TILE_H}" xmlns="http://www.w3.org/2000/svg">
+<rect x="${vx.toFixed(2)}" y="${vy.toFixed(2)}" width="${TILE_W}" height="${TILE_H}" fill="none" stroke="#bbb" stroke-width="0.15" stroke-dasharray="2 2"/>
+${cross(vx, vy)}${cross(vx + TILE_W, vy)}${cross(vx, vy + TILE_H)}${cross(vx + TILE_W, vy + TILE_H)}
+${circles}${lines}
+</svg>
+</div>`)
+    }
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} — 1:1 guide</title>
+<style>
+  @page { margin: 8mm; }
+  body { margin: 0; font: 10px/1.4 -apple-system, Segoe UI, sans-serif; color: #333; }
+  .page { page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+  .head { height: 5mm; }
+  .head .cal { margin-left: 10px; color: #c33; }
+  .calbar { width: 100mm; height: 2.5mm; border: 0.3mm solid #c33; margin: 0 0 1mm; }
+  svg { display: block; }
+</style></head><body>
+${pages.join('\n')}
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 150))</script>
+</body></html>`
+}
+
 export function download(filename: string, content: string, mime = 'text/plain') {
   const blob = new Blob([content], { type: mime })
   const url = URL.createObjectURL(blob)

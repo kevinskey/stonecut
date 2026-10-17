@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
-import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
 import { splitContoursIntoLetters } from './contours'
 import { offsetPaths } from './offset'
@@ -13,7 +13,7 @@ import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer } from './image'
-import { download, gpglTestShape, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
+import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MenuBar } from './MenuBar'
@@ -22,7 +22,7 @@ import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import './App.css'
 
-type Tool = 'select' | 'add' | 'node'
+type Tool = 'select' | 'add' | 'node' | 'pen'
 type StoneMode = 'outline' | 'fill' | 'both'
 // What a committed design was generated FROM, kept so it can be re-stoned
 // at another size. Contours are normalised to a (0,0) top-left corner at
@@ -1568,6 +1568,65 @@ export default function App() {
     setStatus('Select something to flip first')
   }, [selVecs, vecSelBox, selection, stones, pushUndo, mutate])
 
+  // ---------- scatter spray ----------
+  // Random stones fading outward from the selected design's edges — the
+  // Silhouette-style "bling spray". Density falls off with distance across
+  // the band; every candidate passes the radius-aware spacing index seeded
+  // with the WHOLE board, so the spray never collides with anything.
+  const [scatterBand, setScatterBand] = useState(15)
+  const [scatterDensity, setScatterDensity] = useState(50)
+  const [scatterMix, setScatterMix] = useState(true)
+  const scatterSpray = useCallback(() => {
+    const srcStones = [...selection].map((i) => stones[i]).filter(Boolean)
+    const srcPaths = vectors.filter((v) => selVecs.has(v.id)).flatMap(vecPaths)
+    if (!srcStones.length && !srcPaths.length) { setStatus('Select a design or cut-line object to scatter around first'); return }
+    const band = Math.max(2, scatterBand)
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const st of srcStones) {
+      const r = holeOf(st) / 2
+      minX = Math.min(minX, st.x - r); minY = Math.min(minY, st.y - r)
+      maxX = Math.max(maxX, st.x + r); maxY = Math.max(maxY, st.y + r)
+    }
+    for (const pl of srcPaths) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+    minX -= band; minY -= band; maxX += band; maxY += band
+    const w = maxX - minX, h = maxY - minY
+    const closedPolys = srcPaths.filter((pl) => pl.length > 3 && Math.hypot(pl[0].x - pl[pl.length - 1].x, pl[0].y - pl[pl.length - 1].y) < 0.01)
+    // distance from the design's edge; null = inside a closed shape
+    const dEdge = (p: Pt): number | null => {
+      let d = Infinity
+      for (const st of srcStones) d = Math.min(d, Math.hypot(p.x - st.x, p.y - st.y) - holeOf(st) / 2)
+      if (srcPaths.length) {
+        let inside = 0
+        for (const poly of closedPolys) if (pointInPoly(poly, p)) inside++
+        if (inside % 2 === 1) return null
+        d = Math.min(d, distToPaths(srcPaths, p))
+      }
+      return d
+    }
+    const hardGap = hardGapOf(gap)
+    const maxHole = Math.max(sizes[curSize]?.holeMm ?? 3, sizes[fillSize]?.holeMm ?? 2.5)
+    const idx = new SpacingIndex(maxHole + hardGap, hardGap, maxHole / 2)
+    for (const st of stones) idx.add(st, holeOf(st) / 2)
+    const attempts = Math.min(20000, Math.round(w * h * (scatterDensity / 100) * 0.25))
+    const el = elSeq.current++
+    const fresh: Stone[] = []
+    for (let i = 0; i < attempts; i++) {
+      const p = { x: minX + Math.random() * w, y: minY + Math.random() * h }
+      const d = dEdge(p)
+      if (d == null || d < 1 || d > band) continue
+      const fall = 1 - d / band
+      if (Math.random() > fall * fall) continue
+      const size = scatterMix && Math.random() < 0.5 ? fillSize : curSize
+      const r = (sizes[size]?.holeMm ?? 3) / 2
+      if (!idx.canPlace(p, r)) continue
+      idx.add(p, r)
+      fresh.push({ x: p.x, y: p.y, size, layer: 'outline', el })
+    }
+    if (!fresh.length) { setStatus('No room to scatter — raise Density or Band, or lower the stone size'); return }
+    mutate((prev) => [...prev, ...fresh])
+    setStatus(`Scattered ${fresh.length} stones fading ${band} mm off the edge — ⌘Z undoes, double-click grabs the spray`)
+  }, [selection, selVecs, stones, vectors, holeOf, scatterBand, scatterDensity, scatterMix, gap, sizes, curSize, fillSize, mutate])
+
   // drag-to-rotate handle floating above the selection box
   const ROT_OFF_PX = 24
   const rotRef = useRef<{ kind: 'vec' | 'stones'; center: Pt; start: number; origV: VecItem[]; origS: Stone[] } | null>(null)
@@ -1696,11 +1755,103 @@ export default function App() {
     [tool, selVecs, vectors],
   )
 
+  // ---------- pen tool: draw a path, stones bead along it ----------
+  // Click to place anchors; Enter or double-click finishes an open path,
+  // clicking back on the first anchor closes it. Backspace removes the last
+  // anchor, Esc cancels. Output: stones at pitch along the path, a cut
+  // line, or both.
+  const [penPts, setPenPts] = useState<Pt[]>([])
+  const penPtsRef = useRef(penPts)
+  penPtsRef.current = penPts
+  const [penOut, setPenOut] = useState<'stones' | 'line' | 'both'>('stones')
+  useEffect(() => { if (tool !== 'pen') setPenPts([]) }, [tool])
+  // Equal arc-length stepping at the panel's stone pitch; both ends get a
+  // stone on an open path, a closed loop spaces n evenly with no doubled
+  // start stone.
+  const stonesAlongPath = useCallback((pts: Pt[], closed: boolean): Pt[] => {
+    if (pts.length < 2) return pts.map((q) => ({ ...q }))
+    const hole = sizes[curSize]?.holeMm ?? 3
+    const rhythm = hole + Math.max(gap, hardGapOf(gap))
+    const path = closed ? [...pts, pts[0]] : pts
+    const segs: { a: Pt; b: Pt; len: number }[] = []
+    let total = 0
+    for (let i = 1; i < path.length; i++) {
+      const len = Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
+      if (len < 1e-6) continue
+      segs.push({ a: path[i - 1], b: path[i], len })
+      total += len
+    }
+    if (!segs.length || total < rhythm * 0.5) return [{ ...pts[0] }]
+    const n = Math.max(1, Math.round(total / rhythm))
+    const step = total / n
+    const count = closed ? n : n + 1
+    const out: Pt[] = []
+    let si = 0, acc = 0
+    for (let k = 0; k < count; k++) {
+      const target = Math.min(k * step, total - 1e-9)
+      while (si < segs.length - 1 && acc + segs[si].len < target) { acc += segs[si].len; si++ }
+      const t = Math.max(0, Math.min(1, (target - acc) / segs[si].len))
+      out.push({ x: segs[si].a.x + (segs[si].b.x - segs[si].a.x) * t, y: segs[si].a.y + (segs[si].b.y - segs[si].a.y) * t })
+    }
+    return out
+  }, [sizes, curSize, gap])
+  const penPreview = useMemo(
+    () => (tool === 'pen' && penPts.length > 1 ? stonesAlongPath(penPts, false) : []),
+    [tool, penPts, stonesAlongPath],
+  )
+  const finishPen = useCallback((close: boolean) => {
+    const raw = penPtsRef.current
+    const pts: Pt[] = []
+    for (const q of raw) {
+      const l = pts[pts.length - 1]
+      if (!l || Math.hypot(q.x - l.x, q.y - l.y) > 0.3) pts.push(q) // dbl-click dup
+    }
+    setPenPts([])
+    if (!raw.length) return // double-click with nothing drawn: not an error
+    if (pts.length < 2) { setStatus('Pen needs at least two points — click along the line you want, then Enter'); return }
+    pushUndo(stonesRef.current)
+    const parts: string[] = []
+    if (penOut !== 'line') {
+      const placed = stonesAlongPath(pts, close)
+      const el = elSeq.current++
+      const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el }))]
+      stonesRef.current = next
+      setStones(next)
+      parts.push(`${placed.length} stones`)
+    }
+    if (penOut !== 'stones') {
+      const path = close ? [...pts, { ...pts[0] }] : pts
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const q of path) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+      setVectors((prev) => [...prev, {
+        id: vecSeq.current++,
+        name: 'pen path',
+        base: [path.map((q) => ({ x: q.x - minX, y: q.y - minY }))],
+        baseW: maxX - minX,
+        baseH: maxY - minY,
+        x: minX,
+        y: minY,
+        s: 1,
+      }])
+      parts.push('1 cut line')
+    }
+    setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} path — keep clicking for another, V to select`)
+  }, [penOut, stonesAlongPath, curSize, pushUndo])
+
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button !== 0) return
       e.preventDefault() // no text selection / native drag while moving stones
       const p = toMm(e)
+      if (tool === 'pen') {
+        const first = penPtsRef.current[0]
+        if (first && penPtsRef.current.length > 2 && Math.hypot(p.x - first.x, p.y - first.y) < Math.max(2, 8 / zoom)) {
+          finishPen(true) // clicking back on the start closes the loop
+          return
+        }
+        setPenPts((prev) => [...prev, p])
+        return
+      }
       if (tool === 'node') {
         const slopN = Math.max(0.5, 8 / zoom)
         if (nodeVec) {
@@ -1852,7 +2003,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec],
+    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen],
   )
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
 
@@ -2059,6 +2210,7 @@ export default function App() {
   const onCanvasDoubleClick = useCallback(
     (e: React.MouseEvent) => {
       const p = toMm(e)
+      if (tool === 'pen') { finishPen(false); return }
       if (tool === 'node') {
         // double-click a segment of the edited object: insert a vertex there
         const v = nodeVec
@@ -2121,13 +2273,21 @@ export default function App() {
       setSelection(inSet)
       setStatus(`Selected design: ${inSet.size} stones — Del removes it`)
     },
-    [toMm, stones, holeOf, gap, pickStone, zoom, tool, nodeVec, pushUndo],
+    [toMm, stones, holeOf, gap, pickStone, zoom, tool, nodeVec, pushUndo, finishPen],
   )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if (tool === 'pen') {
+        if (e.key === 'Enter') { finishPen(false); return }
+        if (e.key === 'Escape') { setPenPts([]); setStatus('Pen cancelled'); return }
+        if ((e.key === 'Backspace' || e.key === 'Delete') && penPtsRef.current.length) {
+          setPenPts((prev) => prev.slice(0, -1))
+          return
+        }
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && nodeSel.size && nodeVec) {
         // remove the selected nodes, not the whole object — the node tool's
         // Delete must win over the object-level delete below
@@ -2184,10 +2344,11 @@ export default function App() {
       if (!e.metaKey && !e.ctrlKey && (e.key === 'v' || e.key === 'V')) setTool('select')
       if (!e.metaKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N')) setTool('node')
       if (!e.metaKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) setTool('add')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'p' || e.key === 'P')) setTool('pen')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -2389,6 +2550,14 @@ export default function App() {
     win.document.write(html)
     win.document.close()
   }, [job, bom, colorOfStone, stones.length, boardWIn, boardHIn, originCorner, preset])
+
+  const printPlacementGuide = useCallback(() => {
+    const html = placementGuideHtml(job, colorOfStone, `${stones.length} stones · ${new Date().toLocaleDateString()}`)
+    const win = window.open('', '_blank')
+    if (!win) { setStatus('Pop-up blocked — allow pop-ups for this site to print'); return }
+    win.document.write(html)
+    win.document.close()
+  }, [job, colorOfStone, stones.length])
 
   // ---------- production: duplicate / copy-paste / step & repeat ----------
   // Materialise copies of the current selection (or the whole design when
@@ -3109,6 +3278,10 @@ export default function App() {
     const d = secs.find((el) => el.querySelector('summary')?.textContent?.trim() === title)
     if (!d) return
     d.open = true
+    // sub-sections (Team names, Multi-color, Scatter…) live inside a parent
+    // section — opening the child of a closed parent showed nothing
+    for (let p = d.parentElement; p; p = p.parentElement)
+      if (p instanceof HTMLDetailsElement) p.open = true
     d.scrollIntoView({ block: 'start', behavior: 'smooth' })
     if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
   }, [])
@@ -3231,6 +3404,9 @@ export default function App() {
       { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayer}.dxf`, toDXF(cutJob), 'application/dxf'), disabled: !cutCount },
       { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutCount },
       'sep',
+      { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
+      { label: 'Print 1:1 placement guide…', onClick: printPlacementGuide, disabled: !hasStones && !vectors.length },
+      'sep',
       { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount },
     ] },
     { label: 'Edit', items: [
@@ -3274,6 +3450,7 @@ export default function App() {
       { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: ungroup },
       'sep',
       { label: 'Step & repeat…', disabled: !hasStones && !vectors.length, onClick: () => openSection('Production') },
+      { label: 'Scatter spray around selection…', disabled: !selection.size && !selVecs.size, onClick: () => openSection('Scatter spray') },
       'sep',
       { label: 'Unite', disabled: !selVecs.size, onClick: () => pathfinder('union') },
       { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => pathfinder('difference') },
@@ -3286,10 +3463,12 @@ export default function App() {
     { label: 'Type', items: [
       { label: 'Add text…', onClick: () => openSection('Text', 'input') },
       { label: 'Add text as cut lines', onClick: textAsCutLines, disabled: !textPreview },
+      { label: 'Team names — roster batch…', onClick: () => openSection('Team names', 'textarea') },
       { label: 'Fonts…', onClick: () => { openSection('Text'); setFontOpen(true) } },
       'sep',
       { label: 'Add a shape…', onClick: () => openSection('Shapes') },
       { label: 'Trace an image…', onClick: () => openSection('Image') },
+      { label: 'Multi-color trace…', onClick: () => openSection('Multi-color') },
       { label: 'Trace image to cut lines', disabled: !imageFile, onClick: () => { void imageAsCutLines() } },
     ] },
     { label: 'Select', items: [
@@ -3316,6 +3495,7 @@ export default function App() {
       { label: 'Select / move tool', shortcut: 'V', checked: tool === 'select', onClick: () => setTool('select') },
       { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => setTool('add') },
       { label: 'Node tool — edit path points', shortcut: 'N', checked: tool === 'node', onClick: () => setTool('node') },
+      { label: 'Pen tool — stones along a drawn path', shortcut: 'P', checked: tool === 'pen', onClick: () => setTool('pen') },
     ] },
     { label: 'Window', items: sectionItems.map((t) => ({ label: t, onClick: () => openSection(t) })) },
     { label: 'Help', items: [
@@ -3721,6 +3901,30 @@ export default function App() {
           </p>
           <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
           <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
+          <details className="sec sub">
+            <summary>Scatter spray</summary>
+            <div className="sec-body">
+              <p className="hint">
+                Random stones fading off the edge of the selected design — the bling-spray look.
+                Select a design (double-click it) or a cut-line object first.
+              </p>
+              <div className="grid2">
+                <label>Band (mm)
+                  <input type="number" min={2} max={100} value={scatterBand} onChange={(e) => setScatterBand(Math.max(2, +e.target.value || 2))} />
+                </label>
+                <label>Density {scatterDensity}%
+                  <input type="range" min={10} max={100} step={5} value={scatterDensity} onChange={(e) => setScatterDensity(+e.target.value)} />
+                </label>
+              </div>
+              <label className="row">
+                <input type="checkbox" checked={scatterMix} onChange={(e) => setScatterMix(e.target.checked)} />
+                Mix sizes — blend the outline and fill stones
+              </label>
+              <button className="primary" disabled={!selection.size && !selVecs.size} onClick={scatterSpray}>
+                Scatter around selection
+              </button>
+            </div>
+          </details>
         </Section>
 
         <Section title="Templates" defaultOpen={false}>
@@ -4001,14 +4205,26 @@ export default function App() {
             <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
             <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')}>Add / erase</button>
             <button className={tool === 'node' ? 'active' : ''} onClick={() => setTool('node')}>Nodes</button>
+            <button className={tool === 'pen' ? 'active' : ''} onClick={() => setTool('pen')}>Pen</button>
           </div>
           <p className="hint">
             {tool === 'select'
               ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group. Double-click a design to grab all of it: drag its handles to resize (holes stay the same size, the count changes). Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
               : tool === 'add'
                 ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
-                : 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'}
+                : tool === 'node'
+                  ? 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'
+                  : 'Click along the line you want — stones bead along it at the panel’s stone size and spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels.'}
           </p>
+          {tool === 'pen' && (
+            <label>Pen output
+              <select value={penOut} onChange={(e) => setPenOut(e.target.value as typeof penOut)}>
+                <option value="stones">Stones along the path</option>
+                <option value="line">Cut line</option>
+                <option value="both">Both</option>
+              </select>
+            </label>
+          )}
           {selectedEl != null && selBox && (
             <div className="grid2" key={`sz-${selectedEl}-${selBox.minX.toFixed(1)}-${(selBox.maxX - selBox.minX).toFixed(1)}`}>
               <label>Design width (mm)
@@ -4117,6 +4333,12 @@ export default function App() {
           )}
           <p className="hint">Order adds 10% for spills and culls.</p>
           <button disabled={!stones.length && !vectors.length} onClick={printWorkOrder}>Print work order…</button>
+          <button disabled={!stones.length && !vectors.length} onClick={printPlacementGuide}>Print 1:1 placement guide…</button>
+          <p className="hint">
+            True-size print, tiled across pages with tape marks — lay it under a cut template to
+            verify, or hand-place stones on it. Print at 100%, never "fit to page"; page A1 has a
+            100 mm calibration bar to check.
+          </p>
           <p className="hint" style={{ marginTop: 14 }}>
             Step &amp; repeat — tile copies of the selection (or the whole design) across the sheet
             for batch cutting. Copies are independent designs.
@@ -4515,6 +4737,21 @@ export default function App() {
               pointerEvents="none"
             />
           ))}
+          {tool === 'pen' && penPts.length > 0 && (() => {
+            const d = 'M' + penPts.map((q) => `${(q.x * zoom).toFixed(1)},${(q.y * zoom).toFixed(1)}`).join('L')
+            const r = ((sizes[curSize]?.holeMm ?? 3) / 2) * zoom
+            return (
+              <g pointerEvents="none">
+                <path d={d} fill="none" stroke="#f0b95e" strokeWidth={1.5} strokeDasharray="5 3" />
+                {penOut !== 'line' && penPreview.map((q, i) => (
+                  <circle key={`g${i}`} cx={q.x * zoom} cy={q.y * zoom} r={r} fill="#f0b95e" fillOpacity={0.35} />
+                ))}
+                {penPts.map((q, i) => (
+                  <rect key={i} x={q.x * zoom - 3} y={q.y * zoom - 3} width={6} height={6} fill={i === 0 ? '#f0b95e' : '#12151c'} stroke="#f0b95e" strokeWidth={1.2} />
+                ))}
+              </g>
+            )
+          })()}
           {nodeVec && (() => {
             const v = nodeVec
             const r = 3.5
