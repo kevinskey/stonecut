@@ -591,6 +591,9 @@ export default function App() {
   const [imgLinework, setImgLinework] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
   const [imgMode, setImgMode] = useState<StoneMode>('both')
+  // Detail smoothing: welds art detail finer than the stone rhythm into its
+  // parent shape (fur hatching -> solid mane). Radius is pitch-relative.
+  const [imgDetail, setImgDetail] = useState<'fine' | 'smooth' | 'bold'>('fine')
   // multi-color trace: k-means colour layers of the working image
   const [mcColors, setMcColors] = useState(3)
   const [mcLayers, setMcLayers] = useState<ColorLayer[] | null>(null)
@@ -981,8 +984,10 @@ export default function App() {
         // resolution for fluid slider drags. Commits always re-run at 6.
         const previewPx = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
         // despeckle floor: features too small to hold a stone run are noise
-        const minFeat = ((sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)) ** 2 * 0.6
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat)
+        const pitch = (sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)
+        const minFeat = pitch ** 2 * 0.6
+        const closeMm = imgDetail === 'fine' ? 0 : pitch * (imgDetail === 'smooth' ? 0.2 : 0.45)
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat, closeMm)
         // PHOTO GUARD: a photograph thresholds into thousands of speckle
         // regions and the outline engine walks every one — the tab froze
         // for minutes. Refuse pathological masks with advice instead.
@@ -1038,7 +1043,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [imageFile, mcLayers, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
+  }, [imageFile, mcLayers, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, sizes, curSize, gap,
       outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
 
   // ---------- generation ----------
@@ -1132,8 +1137,10 @@ export default function App() {
     if (!imageFile) { setStatus('Choose an image first'); return }
     setStatus('Tracing image…')
     try {
-      const minFeat = ((sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)) ** 2 * 0.6
-      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 6, minFeat)
+      const pitch = (sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)
+      const minFeat = pitch ** 2 * 0.6
+      const closeMm = imgDetail === 'fine' ? 0 : pitch * (imgDetail === 'smooth' ? 0.2 : 0.45)
+      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 6, minFeat, closeMm)
       if (raster.contours.length > 250) {
         setStatus(`This traces to ${raster.contours.length} separate regions — it reads as a photo, not line art. Use Multi-color trace, or move Threshold until the subject is one solid shape.`)
         return
@@ -1197,7 +1204,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   // Live regeneration: while the last image commit is untouched, any
   // generation-setting change re-runs it in place (debounced like a preview).
@@ -1213,7 +1220,7 @@ export default function App() {
     }, 650)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
+  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
 
   // ---------- multi-color trace ----------
   const traceColors = useCallback(async () => {
@@ -4331,6 +4338,14 @@ export default function App() {
                 <option value="both">Outline + fill</option>
               </select>
             </label>
+          </div>
+          <label>Detail</label>
+          <div className="chiprow">
+            {([['fine', 'Fine — trace as drawn'], ['smooth', 'Smooth'], ['bold', 'Bold — weld fur/hatching']] as const).map(([v, lbl]) => (
+              <button key={v} className={`chip ${imgDetail === v ? 'active' : ''}`} title={lbl} onClick={() => setImgDetail(v)}>
+                {lbl.split(' — ')[0]}
+              </button>
+            ))}
           </div>
           <label>Threshold {imgThreshold}
             <input type="range" min={10} max={245} value={imgThreshold} onChange={(e) => setImgThreshold(+e.target.value)} />

@@ -52,6 +52,7 @@ export async function imageToRaster(
   lineworkOpen = false, // cartoon mode: near-black linework stays stone-free
   pxPerMm = 6, // previews pass a coarser grid — analysis passes scale with area
   minFeatureMm2 = 0, // despeckle floor: features smaller than this (mm²) are erased/filled
+  closeMm = 0, // detail smoothing: closing radius in mm welds finer detail into its parent shape
 ): Promise<RasterResult> {
   const img = await loadImage(file)
   const w = Math.max(8, Math.round(widthMm * pxPerMm))
@@ -108,6 +109,40 @@ export async function imageToRaster(
         if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w]) bin[i] = 1
       }
   }
+  // DETAIL SMOOTHING (morphological closing): fur hatching and whisker
+  // wedges are dozens of sub-rhythm islands — dropping them loses the mane,
+  // stoning them scatters fragments. Closing (dilate then erode) WELDS
+  // detail finer than the radius into its parent shape, so the mane
+  // becomes one solid region whose wavy edge the rows can follow. The
+  // radius is pitch-relative and small enough to leave letter counters
+  // open.
+  if (closeMm > 0) {
+    const k = Math.max(1, Math.round(closeMm * pxPerMm))
+    const pass = (src: Uint8Array, horiz: boolean, dilate: boolean) => {
+      const out = new Uint8Array(n2)
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x
+          let v = dilate ? 0 : 1
+          for (let d = -k; d <= k; d++) {
+            const xx = horiz ? x + d : x
+            const yy = horiz ? y : y + d
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h) { if (!dilate) { v = 0; break } continue }
+            const s = src[yy * w + xx]
+            if (dilate ? s : !s) { v = dilate ? 1 : 0; break }
+          }
+          out[i] = v
+        }
+      return out
+    }
+    const n2 = w * h
+    let b = pass(bin, true, true)
+    b = pass(b, false, true)
+    b = pass(b, true, false)
+    b = pass(b, false, false)
+    bin.set(b)
+  }
+
   // DESPECKLE: detailed mascot art (fur spikes, whisker hatching) is full
   // of features far smaller than a stone — tracing them scatters orphan
   // stones across the design (the coherence law: refuse rather than fake).
