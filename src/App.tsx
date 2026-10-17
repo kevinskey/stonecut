@@ -977,7 +977,9 @@ export default function App() {
         // heads fall apart on a coarse grid); only large designs trade
         // resolution for fluid slider drags. Commits always re-run at 6.
         const previewPx = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx)
+        // despeckle floor: features too small to hold a stone run are noise
+        const minFeat = ((sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)) ** 2 * 0.6
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat)
         // PHOTO GUARD: a photograph thresholds into thousands of speckle
         // regions and the outline engine walks every one — the tab froze
         // for minutes. Refuse pathological masks with advice instead.
@@ -1127,7 +1129,8 @@ export default function App() {
     if (!imageFile) { setStatus('Choose an image first'); return }
     setStatus('Tracing image…')
     try {
-      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
+      const minFeat = ((sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)) ** 2 * 0.6
+      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 6, minFeat)
       if (raster.contours.length > 250) {
         setStatus(`This traces to ${raster.contours.length} separate regions — it reads as a photo, not line art. Use Multi-color trace, or move Threshold until the subject is one solid shape.`)
         return

@@ -20,6 +20,7 @@ export async function imageToRaster(
   alphaKey = false, // key on transparency instead of brightness
   lineworkOpen = false, // cartoon mode: near-black linework stays stone-free
   pxPerMm = 6, // previews pass a coarser grid — analysis passes scale with area
+  minFeatureMm2 = 0, // despeckle floor: features smaller than this (mm²) are erased/filled
 ): Promise<RasterResult> {
   const img = await loadImage(file)
   const w = Math.max(8, Math.round(widthMm * pxPerMm))
@@ -76,6 +77,39 @@ export async function imageToRaster(
         if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w]) bin[i] = 1
       }
   }
+  // DESPECKLE: detailed mascot art (fur spikes, whisker hatching) is full
+  // of features far smaller than a stone — tracing them scatters orphan
+  // stones across the design (the coherence law: refuse rather than fake).
+  // Islands below the floor are erased; pinhole gaps inside strokes are
+  // filled (except true background touching the border).
+  if (minFeatureMm2 > 0) {
+    const minPx = Math.max(2, Math.round(minFeatureMm2 * pxPerMm * pxPerMm))
+    const seen = new Uint8Array(w * h)
+    const stack: number[] = []
+    const comp: number[] = []
+    for (let start = 0; start < w * h; start++) {
+      if (seen[start]) continue
+      const v = bin[start]
+      seen[start] = 1
+      stack.length = 0
+      comp.length = 0
+      stack.push(start)
+      comp.push(start)
+      let touchesBorder = false
+      while (stack.length) {
+        const i = stack.pop()!
+        const x = i % w, y = (i - x) / w
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touchesBorder = true
+        if (x > 0 && !seen[i - 1] && bin[i - 1] === v) { seen[i - 1] = 1; stack.push(i - 1); comp.push(i - 1) }
+        if (x < w - 1 && !seen[i + 1] && bin[i + 1] === v) { seen[i + 1] = 1; stack.push(i + 1); comp.push(i + 1) }
+        if (y > 0 && !seen[i - w] && bin[i - w] === v) { seen[i - w] = 1; stack.push(i - w); comp.push(i - w) }
+        if (y < h - 1 && !seen[i + w] && bin[i + w] === v) { seen[i + w] = 1; stack.push(i + w); comp.push(i + w) }
+      }
+      if (comp.length < minPx && !(v === 0 && touchesBorder))
+        for (const i of comp) bin[i] = v ? 0 : 1
+    }
+  }
+
   // PHOTO GUARD, before any contour tracing: a thresholded photograph is
   // speckle — binary transition density ~0.3/px vs ~0.01/px for line art —
   // and marching squares + the outline engine on speckle froze the tab for
@@ -321,7 +355,8 @@ export async function imageToCutContours(
   minAreaMm2 = 0.8,
 ): Promise<Pt[][]> {
   // trace finer than the stone pipeline needs: cut lines show every step
-  const raster = await imageToRaster(file, widthMm, threshold, invert, alphaKey, lineworkOpen, 8)
+  // cut lines can hold finer detail than stones — only kill AA specks
+  const raster = await imageToRaster(file, widthMm, threshold, invert, alphaKey, lineworkOpen, 8, 1)
   if (raster.contours.length > 600)
     throw new Error(`traces to ${raster.contours.length} regions — this reads as a photo; adjust Threshold until the subject is solid`)
   return raster.contours
