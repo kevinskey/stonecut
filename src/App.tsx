@@ -737,7 +737,7 @@ export default function App() {
   // An empty board releases the pin. Clear all / delete / undo used to leave
   // the old pin behind, so the next preview sat wherever the LAST design
   // ended — often below the bottom edge of the media.
-  useEffect(() => { if (!stones.length) { setPreviewBaseY(null); setElements({}) } }, [stones.length])
+  useEffect(() => { if (!stones.length) { setPreviewBaseY(null); setPreviewOffX(10); setElements({}) } }, [stones.length])
   // designHmm: height of the thing being previewed. A new preview stacks
   // below the existing stones, but never past the bottom of the media —
   // if it won't fit underneath it is pulled up onto the sheet (it may
@@ -752,6 +752,9 @@ export default function App() {
     })
   }, [])
   const previewOffsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+  // horizontal twin of previewBaseY — the preview is draggable before Add
+  const [previewOffX, setPreviewOffX] = useState(10)
+  const previewDragRef = useRef<{ x: number; y: number } | null>(null)
 
   // Line art wants ONE row of stones down each stroke, not a wall row on both
   // edges. When the analyzed artwork's typical stroke is too narrow to hold
@@ -1044,12 +1047,12 @@ export default function App() {
       // each commit is its own ELEMENT: a free-moving layer that may overlap
       // other elements — nothing culls across elements anymore
       const el = elSeq.current++
-      const fresh: Stone[] = pts.map((p) => ({ x: p.x + 10, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
+      const fresh: Stone[] = pts.map((p) => ({ x: p.x + previewOffX, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
       mutate((prev) => [...prev, ...fresh])
       if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
       return el
     },
-    [curSize, gap, mutate, sizes],
+    [curSize, gap, mutate, sizes, previewOffX],
   )
 
   // The contours -> stones stage, shared by text and shapes. Both feed the
@@ -1108,7 +1111,7 @@ export default function App() {
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
     const el = addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
     lastTextRef.current = { el, font, text, height: textHeight, spacing: letterSpacing, bend: textBend }
-    setPreviewBaseY(null)
+    setPreviewBaseY(null); setPreviewOffX(10)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
   }, [font, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
@@ -1171,7 +1174,7 @@ export default function App() {
         : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
       const el = replacing && last.el != null ? last.el : elSeq.current++
       const fresh: Stone[] = pts.map((p) => ({
-        x: p.x + 10,
+        x: p.x + previewOffX,
         y: p.y + offsetY,
         size: p.size ?? curSize,
         color: p.color,
@@ -1184,7 +1187,7 @@ export default function App() {
       setStones(kept)
       setElements((prev) => ({ ...prev, [el]: { contours: normaliseContours(raster.contours), mode: imgMode, wholeWord: false, sx: 1, sy: 1 } }))
       lastImageRef.current = { file: imageFile, offsetY, before: base, after: kept, el }
-      setPreviewBaseY(null)
+      setPreviewBaseY(null); setPreviewOffX(10)
       setImagePreview(null)
       setStatus(
         pts.length
@@ -1285,7 +1288,7 @@ export default function App() {
     addGenerated(pts, offsetY) // no recipe: multi-color designs rescale via Scale %, not the handles
     const byColor = new Map<string, number>()
     for (const p of pts) byColor.set(p.color ?? '', (byColor.get(p.color ?? '') ?? 0) + 1)
-    setPreviewBaseY(null)
+    setPreviewBaseY(null); setPreviewOffX(10)
     setImagePreview(null)
     setMcLayers(null)
     // release the image slot, or the single-colour preview of the same
@@ -2090,6 +2093,24 @@ export default function App() {
           if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
           return
         }
+        // a live preview under the cursor drags to reposition before Add —
+        // it isn't a selectable object yet (it regenerates on every settings
+        // change), but WHERE it lands is the user's call
+        const pvPts: { x: number; y: number }[] | null =
+          (previewLive && previewStones?.length ? previewStones : null)
+          ?? imagePreview
+          ?? (previewLive && textPreview ? textPreview.contours.flat() : null)
+        if (pvPts?.length) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const q of pvPts) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+          const px = p.x - previewOffX, py = p.y - previewOffsetY
+          if (px >= minX - 3 && px <= maxX + 3 && py >= minY - 3 && py <= maxY + 3) {
+            if (previewBaseY == null) setPreviewBaseY(previewOffsetY) // pin: drag is absolute
+            previewDragRef.current = { x: p.x, y: p.y }
+            if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
+            return
+          }
+        }
         if (!e.shiftKey) { setSelVecs(new Set()); setSelection(new Set()) }
         marqueeRef.current = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, additive: e.shiftKey }
         return
@@ -2103,7 +2124,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen],
+    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen, previewLive, previewStones, imagePreview, textPreview, previewOffX, previewOffsetY, previewBaseY],
   )
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
 
@@ -2111,6 +2132,14 @@ export default function App() {
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
       ;(window as unknown as Record<string, unknown>).__mvDbg = ((window as unknown as Record<string, number>).__mvDbg ?? 0) + 1
+      const pd = previewDragRef.current
+      if (pd) {
+        const p = toMm(e)
+        setPreviewOffX((v) => v + (p.x - pd.x))
+        setPreviewBaseY((v) => (v ?? 10) + (p.y - pd.y))
+        previewDragRef.current = { x: p.x, y: p.y }
+        return
+      }
       const nd = nodeDrag.current
       if (nd) {
         const p = toMm(e)
@@ -2250,6 +2279,7 @@ export default function App() {
   )
 
   const onCanvasUp = useCallback(() => {
+    previewDragRef.current = null
     const nd = nodeDrag.current
     nodeDrag.current = null
     if (nd?.moved) setVectors((prev) => prev.map((v) => (v.id === nd.vecId ? renormalizeVec(v) : v)))
@@ -2883,10 +2913,10 @@ export default function App() {
       }
     }
     for (const p of imagePreview ?? [])
-      dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
+      dot((p.x + previewOffX) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
     if (previewLive)
       for (const p of previewStones ?? [])
-        dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
+        dot((p.x + previewOffX) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
     stones.forEach((s, i) => {
       const color = s.color ?? ((s.layer ?? 'outline') === 'fill' ? fillColor : outlineColor)
       const x = s.x * zoom, y = s.y * zoom, r = (holeOf(s) / 2) * zoom
@@ -2904,7 +2934,7 @@ export default function App() {
       }
     })
     ctx.globalAlpha = 1
-  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor, simView])
+  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, previewOffX, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor, simView])
 
   const previewPath = useMemo(() => {
     if (!textPreview) return ''
@@ -2912,11 +2942,11 @@ export default function App() {
       .map(
         (c) =>
           'M' +
-          c.map((p) => `${((p.x + 10) * zoom).toFixed(1)},${((p.y + previewOffsetY) * zoom).toFixed(1)}`).join('L') +
+          c.map((p) => `${((p.x + previewOffX) * zoom).toFixed(1)},${((p.y + previewOffsetY) * zoom).toFixed(1)}`).join('L') +
           'Z',
       )
       .join('')
-  }, [textPreview, zoom, previewOffsetY])
+  }, [textPreview, zoom, previewOffsetY, previewOffX])
 
   // ---------- vector cuts ----------
   // Put a set of mm polylines on the board as a cut-line item. Closed shapes
@@ -2951,12 +2981,12 @@ export default function App() {
     // script fonts overlap letter to letter; unite them so the blade does
     // not cut across the joins (holes in letters are kept)
     const united = booleanPaths('union', [textPreview.contours])
-    const r = addVector(united.length ? united : textPreview.contours, text.trim() || 'text', { x: 10, y: previewOffsetY })
+    const r = addVector(united.length ? united : textPreview.contours, text.trim() || 'text', { x: previewOffX, y: previewOffsetY })
     if (!r) return
-    setPreviewBaseY(null)
+    setPreviewBaseY(null); setPreviewOffX(10)
     setPreviewLive(false)
     setStatus(`Added "${text.trim()}" as ${r.lines} cut line${r.lines === 1 ? '' : 's'} · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm`)
-  }, [textPreview, text, previewOffsetY, addVector])
+  }, [textPreview, text, previewOffsetY, previewOffX, addVector])
   // One Add button, driven by the Output choice up top.
   // ---------- team names ----------
   // One roster in, one template per player out: each name generates with the
