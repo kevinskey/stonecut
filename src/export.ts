@@ -13,6 +13,21 @@ export interface Job {
 
 const holeOf = (job: Job, s: Stone) => (job.sizes[s.size]?.holeMm ?? 3) / 2
 
+export interface CutOpts {
+  // Cut holes with the firmware's W (CIRCLE) arc command — one command per
+  // hole, interpolated by the machine (truly round, ~20x less data) —
+  // instead of a 12-24 segment polygon. GP-GL only.
+  firmwareCircles?: boolean
+  // Continue each hole this far past its closing point. A drag knife's
+  // swivel leaves a tiny uncut tag where a closed path ends; the overcut
+  // recuts the first bit of the circle so small holes weed cleanly.
+  overcutMm?: number
+}
+
+// Extra polygon segments to recut `over` mm past closure (capped at one lap).
+const overcutSegs = (over: number, r: number, n: number) =>
+  over > 0 ? Math.min(n, Math.ceil(over / ((2 * Math.PI * r) / n))) : 0
+
 // Which corner of the material the machine's (0,0) sits at. Graphtec carriages
 // home to the RIGHT, so a CE6000 with ORIGIN set at the right edge needs X
 // mirrored — otherwise distance from the page's LEFT edge becomes feed
@@ -47,8 +62,9 @@ ${lines}
 // ---------- HP-GL (.plt) for the CE6000 ----------
 // CE6000 must have COMMAND set to HP-GL in the menu (default is GP-GL).
 // HP-GL plotter units: 40 per mm. Circles cut as polygons, nearest-neighbor order.
-export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 'bl'): string {
+export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 'bl', opts: CutOpts = {}): string {
   const U = 40
+  const over = Math.max(0, opts.overcutMm ?? 0)
   // start from whichever model corner maps to the machine's (0,0)
   const ordered = orderNearestNeighbor(job.stones, {
     x: origin === 'br' ? job.widthMm : 0,
@@ -64,7 +80,8 @@ export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 
       // a mirrored circle is still a circle, so only the centre needs mapping
       const cx = mapX(job, origin, s.x)
       const pts: string[] = []
-      for (let i = 0; i <= n; i++) {
+      // i past n laps into the overcut: cos/sin wrap, recutting the start
+      for (let i = 0; i <= n + overcutSegs(over, r, n); i++) {
         const a = (i / n) * Math.PI * 2
         const x = Math.round((cx + r * Math.cos(a)) * U)
         const y = Math.round((cy + r * Math.sin(a)) * U)
@@ -98,8 +115,10 @@ export function toGPGL(
   unitsPerMm = 20,
   sendConditions = false,
   swapAxes = false,
+  opts: CutOpts = {},
 ): string {
   const U = unitsPerMm
+  const over = Math.max(0, opts.overcutMm ?? 0)
   // start from whichever model corner maps to the machine's (0,0)
   const ordered = orderNearestNeighbor(job.stones, {
     x: origin === 'br' ? job.widthMm : 0,
@@ -131,6 +150,25 @@ export function toGPGL(
       const n = r < 1.6 ? 12 : r < 3 ? 16 : 24
       const cy = job.heightMm - s.y
       const cx = mapX(job, origin, s.x)
+      if (opts.firmwareCircles) {
+        // W (CIRCLE): Wx0,y0,r1,r2,θ1,θ2 — the machine interpolates the arc
+        // itself: one command per hole instead of 13-25, truly round cut.
+        // Explicit M to the arc's 0° start first: the plotter has a menu
+        // setting for whether W travels to the arc start pen-up or pen-down,
+        // and starting from the arc start makes either setting safe.
+        const c1 = Math.round((swapAxes ? cy : cx) * U)
+        const c2 = Math.round((swapAxes ? cx : cy) * U)
+        const ru = Math.max(1, Math.round(r * U))
+        cmds.push(`M${c1 + ru},${c2}`)
+        cmds.push(`W${c1},${c2},${ru},${ru},0,360`)
+        if (over > 0) {
+          // overcut as a second short arc retracing the circle's first
+          // degrees — safer than relying on the firmware accepting θ2 > 360
+          const deg = Math.min(90, Math.ceil((over / r) * (180 / Math.PI)))
+          cmds.push(`W${c1},${c2},${ru},${ru},0,${deg}`)
+        }
+        continue
+      }
       // Graphtec's first coordinate is the media-feed axis, which is not
       // necessarily the model's X. swapAxes emits (feed, carriage) instead.
       const pt = (i: number) => {
@@ -140,7 +178,8 @@ export function toGPGL(
         return swapAxes ? `${py},${px}` : `${px},${py}`
       }
       cmds.push(`M${pt(0)}`)
-      for (let i = 1; i <= n; i++) cmds.push(`D${pt(i)}`)
+      // i past n laps into the overcut, recutting the start of the circle
+      for (let i = 1; i <= n + overcutSegs(over, r, n); i++) cmds.push(`D${pt(i)}`)
     }
   }
   for (const p of job.paths ?? []) {

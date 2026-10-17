@@ -251,6 +251,18 @@ export default function App() {
   // default; the toggle stays for a machine whose axes have been rotated.
   const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') !== '0')
   useEffect(() => { localStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
+  // Firmware circles: holes as GP-GL W arc commands (one per hole, machine-
+  // interpolated) instead of 12-24 segment polygons. OFF until live-tested
+  // on the CE6000 — flip it in Cutter setup after a good test cut.
+  const [wCircles, setWCircles] = useState(() => localStorage.getItem('stonecut.wcircles') === '1')
+  useEffect(() => { localStorage.setItem('stonecut.wcircles', wCircles ? '1' : '0') }, [wCircles])
+  // Overcut: recut this far past each hole's closing point so the blade's
+  // swivel tag doesn't hold the chad in. 0 = old behaviour.
+  const [overcut, setOvercut] = useState(() => {
+    const v = +(localStorage.getItem('stonecut.overcut') ?? 0.5)
+    return isFinite(v) && v >= 0 ? v : 0.5
+  })
+  useEffect(() => { localStorage.setItem('stonecut.overcut', String(overcut)) }, [overcut])
   useEffect(() => { localStorage.setItem('stonecut.sendcond2', sendConditions ? '1' : '0') }, [sendConditions])
   const boardWmm = boardWIn * 25.4
   const boardHmm = boardHIn * 25.4
@@ -2066,9 +2078,9 @@ export default function App() {
   const cutData = useCallback(
     () =>
       format === 'gpgl'
-        ? toGPGL(cutJob, preset, originCorner, gpStep, sendConditions, swapAxes)
-        : toHPGL(cutJob, preset, originCorner),
-    [format, cutJob, preset, originCorner, gpStep, sendConditions, swapAxes],
+        ? toGPGL(cutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut })
+        : toHPGL(cutJob, preset, originCorner, { overcutMm: overcut }),
+    [format, cutJob, preset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
   )
 
   // Cut goes through an in-app confirmation (styled like the rest of the
@@ -3634,8 +3646,27 @@ export default function App() {
               <option value="hpgl">HP-GL (if COMMAND menu set to HP-GL)</option>
             </select>
           </label>
+          <label>Overcut (mm)
+            <input type="number" min={0} max={3} step={0.1} value={overcut}
+              onChange={(e) => setOvercut(Math.min(3, Math.max(0, +e.target.value || 0)))} />
+          </label>
+          <p className="hint">
+            Each hole is recut {overcut > 0 ? `${overcut} mm` : 'nothing'} past its closing point, so the
+            blade's swivel doesn't leave a tag holding the chad in. 0.5 mm suits sticky flock; 0 = off.
+          </p>
           {format === 'gpgl' && (
             <>
+              <label className="row">
+                <input type="checkbox" checked={wCircles}
+                  onChange={(e) => setWCircles(e.target.checked)} />
+                {' '}Firmware circles (GP-GL W command)
+              </label>
+              <p className="hint">
+                Holes cut as one arc command each — the machine interpolates a truly round circle and the
+                job streams ~20× less data than the segment polygons. <b>Test-cut a few holes first</b>:
+                if circles land in the wrong place or come with a stray line, turn this back off (the
+                plotter's own W-command pen setting varies by firmware).
+              </p>
               <label className="row">
                 <input type="checkbox" checked={swapAxes}
                   onChange={(e) => setSwapAxes(e.target.checked)} />
