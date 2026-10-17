@@ -16,6 +16,7 @@ import type { ColorLayer } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
+import { drawGem, drawMockup } from './sim'
 import { MenuBar } from './MenuBar'
 import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
@@ -228,6 +229,16 @@ export default function App() {
     if (boardColor) localStorage.setItem('stonecut.boardColor', boardColor)
     else localStorage.removeItem('stonecut.boardColor')
   }, [boardColor])
+  // sparkle simulation: stones render as faceted gems instead of flat dots
+  const [simView, setSimView] = useState(() => localStorage.getItem('stonecut.sim') === '1')
+  useEffect(() => { localStorage.setItem('stonecut.sim', simView ? '1' : '0') }, [simView])
+  // garment mockup modal
+  const [mockupOpen, setMockupOpen] = useState(false)
+  const [garmentColor, setGarmentColor] = useState(() => localStorage.getItem('stonecut.garment') || '#1a1a2e')
+  useEffect(() => { localStorage.setItem('stonecut.garment', garmentColor) }, [garmentColor])
+  const [chestIn, setChestIn] = useState(20)
+  const [dropIn, setDropIn] = useState(3)
+  const mockupCanvasRef = useRef<HTMLCanvasElement>(null)
   // light material needs dark rules/labels on it, and vice versa
   const boardIsLight = useMemo(() => {
     if (!boardColor) return false
@@ -2559,6 +2570,38 @@ export default function App() {
     win.document.close()
   }, [job, colorOfStone, stones.length])
 
+  // garment mockup: redraw whenever it's open and anything it shows changes
+  useEffect(() => {
+    if (!mockupOpen) return
+    const cv = mockupCanvasRef.current
+    if (!cv) return
+    drawMockup(
+      cv,
+      garmentColor,
+      chestIn,
+      dropIn,
+      stones.map((s) => ({
+        x: s.x,
+        y: s.y,
+        // show the STONE, not the template hole — the hole is oversized
+        rMm: ((sizes[s.size]?.stoneMm || (sizes[s.size]?.holeMm ?? 3) * 0.85) / 2),
+        color: colorOfStone(s),
+      })),
+      vectors.flatMap(vecPaths),
+    )
+  }, [mockupOpen, garmentColor, chestIn, dropIn, stones, sizes, colorOfStone, vectors])
+  const downloadMockup = useCallback(() => {
+    mockupCanvasRef.current?.toBlob((b) => {
+      if (!b) return
+      const url = URL.createObjectURL(b)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'stonecut-mockup.png'
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+  }, [])
+
   // ---------- production: duplicate / copy-paste / step & repeat ----------
   // Materialise copies of the current selection (or the whole design when
   // nothing is selected) at each offset. Stone elements get fresh element
@@ -2756,11 +2799,24 @@ export default function App() {
     if (previewLive)
       for (const p of previewStones ?? [])
         dot((p.x + 10) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
-    stones.forEach((s, i) =>
-      dot(s.x * zoom, s.y * zoom, (holeOf(s) / 2) * zoom, s.color ?? ((s.layer ?? 'outline') === 'fill' ? fillColor : outlineColor), 0.85, selection.has(i) ? '#fff' : undefined),
-    )
+    stones.forEach((s, i) => {
+      const color = s.color ?? ((s.layer ?? 'outline') === 'fill' ? fillColor : outlineColor)
+      const x = s.x * zoom, y = s.y * zoom, r = (holeOf(s) / 2) * zoom
+      if (simView) {
+        drawGem(ctx, x, y, r, color)
+        if (selection.has(i)) {
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 2
+          ctx.beginPath()
+          ctx.arc(x, y, r, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+      } else {
+        dot(x, y, r, color, 0.85, selection.has(i) ? '#fff' : undefined)
+      }
+    })
     ctx.globalAlpha = 1
-  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor])
+  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor, simView])
 
   const previewPath = useMemo(() => {
     if (!textPreview) return ''
@@ -3491,6 +3547,8 @@ export default function App() {
       { label: 'Actual size', shortcut: '1:1', onClick: () => zoomAbout(PX_PER_MM_100) },
       'sep',
       { label: 'Snap to objects & board (Alt drags free)', checked: snapOn, onClick: () => setSnapOn((o) => !o) },
+      { label: 'Sparkle simulation — stones as gems', checked: simView, onClick: () => setSimView((o) => !o) },
+      { label: 'Garment mockup…', disabled: !hasStones && !vectors.length, onClick: () => setMockupOpen(true) },
       'sep',
       { label: 'Select / move tool', shortcut: 'V', checked: tool === 'select', onClick: () => setTool('select') },
       { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => setTool('add') },
@@ -3528,6 +3586,38 @@ export default function App() {
             <div className="modal-actions">
               <button onClick={() => setCutConfirm(null)}>Cancel</button>
               <button className="primary" autoFocus onClick={() => { void doSendNow() }}>⚡ Cut now</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {mockupOpen && (
+        <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setMockupOpen(false) }}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 580 }}>
+            <h3>Garment mockup</h3>
+            <canvas ref={mockupCanvasRef} style={{ borderRadius: 8, width: '100%', maxWidth: 520 }} />
+            <div className="grid3" style={{ marginTop: 8 }}>
+              <label>Garment
+                <input type="color" value={garmentColor} onChange={(e) => setGarmentColor(e.target.value)} style={{ width: '100%', height: 30, padding: 0 }} />
+              </label>
+              <label>Chest width
+                <select value={chestIn} onChange={(e) => setChestIn(+e.target.value)}>
+                  <option value={18}>S — 18″</option>
+                  <option value={20}>M — 20″</option>
+                  <option value={22}>L — 22″</option>
+                  <option value={24}>XL — 24″</option>
+                  <option value={26}>2XL — 26″</option>
+                </select>
+              </label>
+              <label>Below collar
+                <select value={dropIn} onChange={(e) => setDropIn(+e.target.value)}>
+                  {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}″</option>)}
+                </select>
+              </label>
+            </div>
+            <p className="hint">Design shown at true relative scale for the chosen chest width — what the customer approves is what the template cuts.</p>
+            <div className="modal-actions">
+              <button onClick={() => setMockupOpen(false)}>Close</button>
+              <button className="primary" onClick={downloadMockup}>Download PNG for the customer</button>
             </div>
           </div>
         </div>
@@ -4592,6 +4682,8 @@ export default function App() {
           <button className="zbtn" disabled={!stones.length} title="Zoom to the design (F)" onClick={fitDesign}>Fit design</button>
           <button className="zbtn" title="Show the whole sheet (⌘0)" onClick={fitSheet}>Fit sheet</button>
           <button className="zbtn" title="Actual size" onClick={() => zoomAbout(PX_PER_MM_100)}>1:1</button>
+          <button className={`zbtn${simView ? ' active' : ''}`} title="Sparkle simulation — stones render as gems" onClick={() => setSimView((o) => !o)}>✨</button>
+          <button className="zbtn" disabled={!stones.length && !vectors.length} title="Garment mockup" onClick={() => setMockupOpen(true)}>👕</button>
           <span style={{ marginLeft: 12 }}>Plotter</span>
           <select
             value={PLOTTERS.find((p) => p.cutIn === boardWIn)?.id ?? 'custom'}
