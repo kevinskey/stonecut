@@ -439,3 +439,6 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   font-variant-numeric: tabular-nums;
 }
 .bom thead th { background: #1a1f2b; color: #8b97b5; font-weight: 600; }
+
+/* canvas drag-over highlight for file drops */
+.canvas-wrap.dragover { outline: 2px dashed #5b7bd9; outline-offset: -3px; }

@@ -2605,6 +2605,24 @@ export default function App() {
       ? (pendingText ? `Add ${pendingText} stones + cut lines` : 'Add stones + cut lines')
       : (pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones')
 
+  // Load a raster file into the image pipeline: auto-pick settings that
+  // make the artwork the design, so a light logo or transparent background
+  // doesn't silently yield nothing. Shared by the file input and canvas drop.
+  const loadImageFile = useCallback(async (f: File) => {
+    setImageFile(f)
+    try {
+      const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
+      setImgThreshold(a.threshold)
+      setImgInvert(a.invert)
+      setImgAlphaKey(a.alphaKey)
+      setImgLinework(a.linework)
+      applyStrokeStyle(a)
+      setStatus(`${f.name} — ${a.note}`)
+    } catch (e) {
+      setStatus(`Could not read ${f.name}${e instanceof Error && e.message ? ` — ${e.message}` : ''}`)
+    }
+  }, [imgWidth, sizes, curSize, gap, applyStrokeStyle])
+
   // Trace Bitmap: the working image becomes a cut-line object — same
   // threshold/invert/transparency settings the stone trace uses, but the
   // contours themselves are the cut (vinyl, a stencil, a template border).
@@ -2962,6 +2980,23 @@ export default function App() {
   const saveDesignFile = useCallback(() => {
     download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements, vectors }), 'application/json')
   }, [stones, sizes, elements, vectors])
+  // Replace the whole board with a saved .json design — shared by
+  // File -> Open and dropping a design file on the board.
+  const applyDesignData = useCallback((d: unknown, name: string) => {
+    const dd = d as { stones?: Stone[]; vectors?: VecItem[]; sizes?: Record<string, StoneSpec>; elements?: Elements }
+    if (!Array.isArray(dd?.stones) && !Array.isArray(dd?.vectors)) throw new Error('not a StoneCut design file')
+    pushUndo(stonesRef.current)
+    const loaded = (dd.stones ?? []) as Stone[]
+    setStones(loaded)
+    if (dd.sizes && typeof dd.sizes === 'object') setSizes({ ...DEFAULT_SIZES, ...dd.sizes })
+    setElements(dd.elements && typeof dd.elements === 'object' ? dd.elements : {})
+    const vecs: VecItem[] = Array.isArray(dd.vectors) ? dd.vectors : []
+    setVectors(vecs)
+    vecSeq.current = vecs.reduce((m, v) => Math.max(m, v.id), 0) + 1
+    elSeq.current = loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1
+    setSelection(new Set())
+    setStatus(`Opened ${name}: ${loaded.length} stones`)
+  }, [pushUndo])
   const openDesignFile = useCallback(() => {
     const inp = document.createElement('input')
     inp.type = 'file'
@@ -2970,25 +3005,57 @@ export default function App() {
       const f = inp.files?.[0]
       if (!f) return
       try {
-        const d = JSON.parse(await f.text())
-        if (!Array.isArray(d?.stones) && !Array.isArray(d?.vectors)) throw new Error('not a StoneCut design file')
-        pushUndo(stonesRef.current)
-        const loaded = (d.stones ?? []) as Stone[]
-        setStones(loaded)
-        if (d.sizes && typeof d.sizes === 'object') setSizes({ ...DEFAULT_SIZES, ...d.sizes })
-        setElements(d.elements && typeof d.elements === 'object' ? d.elements : {})
-        const vecs: VecItem[] = Array.isArray(d.vectors) ? d.vectors : []
-        setVectors(vecs)
-        vecSeq.current = vecs.reduce((m, v) => Math.max(m, v.id), 0) + 1
-        elSeq.current = loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1
-        setSelection(new Set())
-        setStatus(`Opened ${f.name}: ${loaded.length} stones`)
+        applyDesignData(JSON.parse(await f.text()), f.name)
       } catch (e) {
         setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
       }
     }
     inp.click()
-  }, [pushUndo])
+  }, [applyDesignData])
+  // ---------- drag & drop onto the board ----------
+  // Raster image -> image pipeline, previewed near the drop point.
+  // SVG -> cut-line object centered at the drop point.
+  // .json -> open as a StoneCut design.
+  const [dragOver, setDragOver] = useState(false)
+  const onBoardDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    const f = e.dataTransfer.files?.[0]
+    if (!f) return
+    const p = toMm(e)
+    if (/\.svg$/i.test(f.name) || f.type === 'image/svg+xml') {
+      try {
+        const r = parseSvgToPaths(await f.text(), f.name.replace(/\.svg$/i, ''))
+        const s = Math.min(1, (boardWmm - 20) / r.widthMm, (boardHmm - 20) / r.heightMm)
+        const at = {
+          x: Math.max(0, Math.min(p.x - (r.widthMm * s) / 2, boardWmm - r.widthMm * s)),
+          y: Math.max(0, Math.min(p.y - (r.heightMm * s) / 2, boardHmm - r.heightMm * s)),
+        }
+        const res = addVector(r.paths, r.name, at)
+        if (res) setStatus(`Imported ${r.name}: ${res.lines} cut line${res.lines === 1 ? '' : 's'} · ${res.w.toFixed(0)} × ${res.h.toFixed(0)} mm — dropped in place`)
+      } catch (err) {
+        setStatus(`SVG import failed: ${err instanceof Error ? err.message : err}`)
+      }
+      return
+    }
+    if (f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) {
+      // pin the preview near where it was dropped
+      setPreviewBaseY(Math.max(10, Math.min(p.y, boardHmm - 30)))
+      openSection('Image')
+      await loadImageFile(f)
+      return
+    }
+    if (/\.json$/i.test(f.name)) {
+      try {
+        applyDesignData(JSON.parse(await f.text()), f.name)
+      } catch (err) {
+        setStatus(`Could not open: ${err instanceof Error ? err.message : err}`)
+      }
+      return
+    }
+    setStatus(`Can't use ${f.name} — drop an image, an SVG, or a StoneCut .json design`)
+  }, [toMm, addVector, loadImageFile, applyDesignData, openSection, boardWmm, boardHmm])
+
   const clearAll = useCallback(() => {
     if (stones.length) mutate(() => [])
     if (vectors.length) setVectors([])
@@ -3628,24 +3695,11 @@ export default function App() {
               </div>
             </div>
           )}
-          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG)'}
+          <label className="filebtn">{imageFile?.name || 'Choose image (PNG/JPG/SVG) — or drop one on the board'}
             <input type="file" accept="image/*" onChange={async (e) => {
               const f = e.target.files?.[0] ?? null
-              setImageFile(f)
-              if (!f) return
-              try {
-                // pick settings that make the artwork the design, so a light
-                // logo or transparent background doesn't silently yield nothing
-                const a = await analyzeImage(f, imgWidth, (sizes[curSize]?.holeMm ?? 3.4) + gap)
-                setImgThreshold(a.threshold)
-                setImgInvert(a.invert)
-                setImgAlphaKey(a.alphaKey)
-                setImgLinework(a.linework)
-                applyStrokeStyle(a)
-                setStatus(`${f.name} — ${a.note}`)
-              } catch {
-                setStatus(`Could not read ${f.name}`)
-              }
+              if (f) await loadImageFile(f)
+              else setImageFile(null)
             }} />
           </label>
           <button className={pendingImage ? 'primary urgent' : ''} onClick={generateImage}>
@@ -4137,7 +4191,13 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="canvas-wrap" ref={wrapRef}>
+      <main
+        className={`canvas-wrap${dragOver ? ' dragover' : ''}`}
+        ref={wrapRef}
+        onDragOver={(e) => { e.preventDefault(); if (!dragOver) setDragOver(true) }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => { void onBoardDrop(e) }}
+      >
         <div className="zoombar" ref={barRef}>
           <button className="zbtn" title="Zoom out (⌘−)" onClick={() => zoomAbout(zoom / 1.25)}>−</button>
           <input
