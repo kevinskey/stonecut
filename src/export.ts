@@ -215,6 +215,33 @@ export function gpglTestShape(unitsPerMm = 20, offsetMm = 2, swapAxes = false): 
     .join('\x03') + '\x03'
 }
 
+// ---------- DXF (R12) for laser cutters and other machine software ----------
+// Holes as true CIRCLE entities on layer HOLES, cut lines as POLYLINE on
+// layer LINES. R12 ASCII with an ENTITIES-only body — the most widely
+// accepted dialect (LWPOLYLINE is R13+ and some laser tools choke on it).
+// DXF is Y-up; the model is Y-down, so Y flips against the job height.
+// Units are implicitly mm — tell the receiving software "millimetres" if
+// it asks, exactly like the SVG export.
+export function toDXF(job: Job): string {
+  const H = job.heightMm
+  const f = (v: number) => v.toFixed(3)
+  const L: string[] = ['0', 'SECTION', '2', 'ENTITIES']
+  for (const s of job.stones) {
+    L.push('0', 'CIRCLE', '8', 'HOLES', '10', f(s.x), '20', f(H - s.y), '30', '0', '40', f(holeOf(job, s)))
+  }
+  for (const p of job.paths ?? []) {
+    if (p.length < 2) continue
+    const a = p[0], b = p[p.length - 1]
+    const closed = p.length > 2 && Math.hypot(a.x - b.x, a.y - b.y) < 0.01
+    const pts = closed ? p.slice(0, -1) : p
+    L.push('0', 'POLYLINE', '8', 'LINES', '66', '1', '70', closed ? '1' : '0')
+    for (const q of pts) L.push('0', 'VERTEX', '8', 'LINES', '10', f(q.x), '20', f(H - q.y), '30', '0')
+    L.push('0', 'SEQEND')
+  }
+  L.push('0', 'ENDSEC', '0', 'EOF')
+  return L.join('\r\n') + '\r\n'
+}
+
 // ---------- stone counts (bill of materials) ----------
 export interface BomRow {
   size: string

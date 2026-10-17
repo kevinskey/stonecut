@@ -13,7 +13,7 @@ import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer } from './image'
-import { download, gpglTestShape, stoneBom, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
+import { download, gpglTestShape, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MenuBar } from './MenuBar'
@@ -516,11 +516,34 @@ export default function App() {
   const [presetIdx, setPresetIdx] = useState(0)
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
-  const undoStack = useRef<{ stones: Stone[]; elements: Elements; vectors: VecItem[] }[]>([])
+  type Snapshot = { stones: Stone[]; elements: Elements; vectors: VecItem[] }
+  const undoStack = useRef<Snapshot[]>([])
+  const redoStack = useRef<Snapshot[]>([])
   const pushUndo = useCallback((prev: Stone[]) => {
     undoStack.current.push({ stones: prev, elements: elementsRef.current, vectors: vectorsRef.current })
     if (undoStack.current.length > 50) undoStack.current.shift()
+    redoStack.current = [] // a new edit forks history; the redo branch dies
   }, [])
+  const applySnapshot = useCallback((s: Snapshot) => {
+    stonesRef.current = s.stones
+    setStones(s.stones)
+    setElements(s.elements)
+    setVectors(s.vectors)
+    setSelection(new Set())
+    setSelVecs(new Set())
+  }, [])
+  const undo = useCallback(() => {
+    const prev = undoStack.current.pop()
+    if (!prev) return
+    redoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current })
+    applySnapshot(prev)
+  }, [applySnapshot])
+  const redo = useCallback(() => {
+    const next = redoStack.current.pop()
+    if (!next) return
+    undoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current })
+    applySnapshot(next)
+  }, [applySnapshot])
   const mutateVectors = useCallback(
     (fn: (prev: VecItem[]) => VecItem[]) => {
       pushUndo(stonesRef.current)
@@ -1516,6 +1539,35 @@ export default function App() {
     setStatus('Select something to rotate first')
   }, [selVecs, vecSelBox, selection, stones, pushUndo, mutate])
 
+  // Mirror the selection about its own bounding-box centre. Stones are
+  // circles so position mirroring is exact; cut-line objects bake the flip
+  // into their base, same as rotation does.
+  const flipSelection = useCallback((axis: 'h' | 'v') => {
+    if (selVecs.size && vecSelBox) {
+      const cx = (vecSelBox.minX + vecSelBox.maxX) / 2
+      const cy = (vecSelBox.minY + vecSelBox.maxY) / 2
+      pushUndo(stonesRef.current)
+      setVectors((prev) => prev.map((v) => {
+        if (!selVecs.has(v.id)) return v
+        const flipped = vecPaths(v).map((pl) => pl.map((q) => (axis === 'h' ? { x: cx * 2 - q.x, y: q.y } : { x: q.x, y: cy * 2 - q.y })))
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        for (const pl of flipped) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+        return { ...v, base: flipped.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))), baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
+      }))
+      setStatus(`Flipped ${axis === 'h' ? 'horizontally' : 'vertically'}`)
+      return
+    }
+    if (selection.size) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const i of selection) { const st = stones[i]; if (!st) continue; minX = Math.min(minX, st.x); minY = Math.min(minY, st.y); maxX = Math.max(maxX, st.x); maxY = Math.max(maxY, st.y) }
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
+      mutate((prev) => prev.map((st, i) => (selection.has(i) ? (axis === 'h' ? { ...st, x: cx * 2 - st.x } : { ...st, y: cy * 2 - st.y }) : st)))
+      setStatus(`Flipped ${axis === 'h' ? 'horizontally' : 'vertically'} — holes are round, the cut is exact`)
+      return
+    }
+    setStatus('Select something to flip first')
+  }, [selVecs, vecSelBox, selection, stones, pushUndo, mutate])
+
   // drag-to-rotate handle floating above the selection box
   const ROT_OFF_PX = 24
   const rotRef = useRef<{ kind: 'vec' | 'stones'; center: Pt; start: number; origV: VecItem[]; origS: Stone[] } | null>(null)
@@ -2116,11 +2168,10 @@ export default function App() {
         const [nx, ny] = nudge
         mutateVectors((prev) => prev.map((v) => (selVecs.has(v.id) ? { ...v, x: v.x + nx * step, y: v.y + ny * step } : v)))
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
-        const prev = undoStack.current.pop()
-        if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
-        setSelection(new Set())
-        setSelVecs(new Set())
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
         e.preventDefault()
@@ -2136,7 +2187,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -3165,12 +3216,7 @@ export default function App() {
     const dy = boardHmm / 2 - (bbox.minY + bbox.maxY) / 2
     mutate((prev) => prev.map((st) => ({ ...st, x: st.x + dx, y: st.y + dy })))
   }, [stones.length, bbox, boardWmm, boardHmm, mutate])
-  const undo = useCallback(() => {
-    const prev = undoStack.current.pop()
-    if (prev) { setStones(prev.stones); setElements(prev.elements); setVectors(prev.vectors) }
-    setSelection(new Set())
-    setSelVecs(new Set())
-  }, [])
+  // undo/redo live up next to pushUndo now
   const hasSel = selection.size > 0
   const hasStones = stones.length > 0
   const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Production', 'Material', 'Cut']
@@ -3182,12 +3228,14 @@ export default function App() {
       { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
       'sep',
       { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutCount },
+      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayer}.dxf`, toDXF(cutJob), 'application/dxf'), disabled: !cutCount },
       { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutCount },
       'sep',
       { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount },
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
+      { label: 'Redo', shortcut: '⌘⇧Z', onClick: redo },
       'sep',
       { label: 'Copy', shortcut: '⌘C', disabled: !hasSel && !selVecs.size, onClick: copySelection },
       { label: 'Paste', shortcut: '⌘V', onClick: pasteClipboard },
@@ -3208,6 +3256,8 @@ export default function App() {
       'sep',
       { label: 'Rotate 90° CW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(90) },
       { label: 'Rotate 90° CCW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(-90) },
+      { label: 'Flip horizontal', disabled: !selection.size && !selVecs.size, onClick: () => flipSelection('h') },
+      { label: 'Flip vertical', disabled: !selection.size && !selVecs.size, onClick: () => flipSelection('v') },
       'sep',
       { label: 'Move to origin corner', disabled: !hasStones, onClick: () => placeFromOrigin(0.5, 0.5) },
       { label: 'Center on board', disabled: !hasStones, onClick: centerOnBoard },
@@ -3312,7 +3362,7 @@ export default function App() {
             <tr><td>Double-click</td><td>select the whole design (shows resize handles)</td></tr>
             <tr><td>Arrows</td><td>nudge 0.5 mm · Shift: 5 mm</td></tr>
             <tr><td>Delete</td><td>remove selected holes</td></tr>
-            <tr><td>⌘Z</td><td>undo</td></tr>
+            <tr><td>⌘Z / ⌘⇧Z</td><td>undo / redo</td></tr>
             <tr><td>⌘A</td><td>select all</td></tr>
             <tr><td>⌘+ / ⌘−</td><td>zoom in / out</td></tr>
             <tr><td>⌘-wheel / pinch</td><td>zoom at the cursor · plain wheel pans</td></tr>
@@ -4195,6 +4245,7 @@ export default function App() {
           <div className="toolrow">
             <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
             <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.dxf`, toDXF(cutJob), 'application/dxf')}>DXF (laser)</button>
           </div>
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
@@ -4553,6 +4604,8 @@ export default function App() {
                   { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: () => run(ungroup) },
                   { label: 'Rotate 90° CW', onClick: () => run(() => rotateSelection(90)) },
                   { label: 'Rotate 90° CCW', onClick: () => run(() => rotateSelection(-90)) },
+                  { label: 'Flip horizontal', onClick: () => run(() => flipSelection('h')) },
+                  { label: 'Flip vertical', onClick: () => run(() => flipSelection('v')) },
                   'sep',
                   { label: 'Unite', disabled: !selVecs.size, onClick: () => run(() => pathfinder('union')) },
                   { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => run(() => pathfinder('difference')) },
@@ -4568,6 +4621,8 @@ export default function App() {
                     { label: 'Ungroup element — split into letters', disabled: selectedEl == null, onClick: () => run(ungroupElement) },
                     { label: 'Rotate 90° CW', onClick: () => run(() => rotateSelection(90)) },
                     { label: 'Rotate 90° CCW', onClick: () => run(() => rotateSelection(-90)) },
+                    { label: 'Flip horizontal', onClick: () => run(() => flipSelection('h')) },
+                    { label: 'Flip vertical', onClick: () => run(() => flipSelection('v')) },
                     'sep',
                     { label: `Set selected to ${curSize}`, onClick: () => run(() => mutate((prev) => prev.map((st, i) => (selection.has(i) ? { ...st, size: curSize } : st)))) },
                     { label: 'Delete selected stones', onClick: () => run(() => { mutate((prev) => prev.filter((_, i) => !selection.has(i))); setSelection(new Set()) }) },
