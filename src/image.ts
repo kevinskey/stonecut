@@ -86,6 +86,174 @@ export async function imageToRaster(
 }
 
 // ---------------------------------------------------------------------------
+// Image -> COLOR LAYERS (multi-color trace). K-means over the artwork's
+// non-background pixels reduces it to k colour regions; each region comes
+// back as its own contours + grid so the stone engine can run per colour.
+// ---------------------------------------------------------------------------
+
+export interface ColorLayer {
+  color: string // '#rrggbb' centroid of the region
+  contours: Pt[][] // mm
+  grid: Grid
+  share: number // fraction of design pixels in this layer
+}
+
+const toHex = (r: number, g: number, b: number) =>
+  '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('')
+
+export async function imageToColorLayers(
+  file: File,
+  widthMm: number,
+  k: number,
+  pxPerMm = 6,
+): Promise<{ layers: ColorLayer[]; widthMm: number; heightMm: number }> {
+  const img = await loadImage(file)
+  const w = Math.max(8, Math.round(widthMm * pxPerMm))
+  const h = Math.max(8, Math.round((img.height / img.width) * w))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(img, 0, 0, w, h)
+  const data = ctx.getImageData(0, 0, w, h).data
+  const n = w * h
+
+  // Background: transparency when the file has it, else whatever colour the
+  // border ring is — the design is everything meaningfully different.
+  let transparent = 0
+  for (let i = 0; i < n; i++) if (data[i * 4 + 3] < 64) transparent++
+  const alphaBg = transparent / n > 0.05
+  let bgR = 255, bgG = 255, bgB = 255
+  if (!alphaBg) {
+    let sr = 0, sg = 0, sb = 0, c = 0
+    const take = (i: number) => { sr += data[i * 4]; sg += data[i * 4 + 1]; sb += data[i * 4 + 2]; c++ }
+    for (let x = 0; x < w; x++) { take(x); take((h - 1) * w + x) }
+    for (let y = 0; y < h; y++) { take(y * w); take(y * w + w - 1) }
+    bgR = sr / c; bgG = sg / c; bgB = sb / c
+  }
+  const isBg = (i: number): boolean => {
+    if (data[i * 4 + 3] < 64) return true
+    if (alphaBg) return false
+    const dr = data[i * 4] - bgR, dg = data[i * 4 + 1] - bgG, db = data[i * 4 + 2] - bgB
+    return dr * dr + dg * dg + db * db < 40 * 40
+  }
+  const design: number[] = []
+  for (let i = 0; i < n; i++) if (!isBg(i)) design.push(i)
+  if (!design.length) throw new Error('No artwork found — the whole image reads as background')
+
+  // k-means in RGB, seeded from a coarse colour HISTOGRAM. Plain farthest-
+  // point seeding handed a seed to the rare anti-aliased halo pixels between
+  // the artwork and the background (outliers always win max-min-distance),
+  // which stole a cluster from a real colour. Weighting candidate bins by
+  // population x distance^2 makes a big genuine colour beat a rare halo.
+  const px = (i: number): [number, number, number] => [data[i * 4], data[i * 4 + 1], data[i * 4 + 2]]
+  const d2 = (a: [number, number, number], b: [number, number, number]) =>
+    (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+  const bins = new Map<number, { n: number; r: number; g: number; b: number }>()
+  for (const i of design) {
+    const key = ((data[i * 4] >> 4) << 8) | ((data[i * 4 + 1] >> 4) << 4) | (data[i * 4 + 2] >> 4)
+    const bn = bins.get(key)
+    if (bn) { bn.n++; bn.r += data[i * 4]; bn.g += data[i * 4 + 1]; bn.b += data[i * 4 + 2] }
+    else bins.set(key, { n: 1, r: data[i * 4], g: data[i * 4 + 1], b: data[i * 4 + 2] })
+  }
+  const binC = [...bins.values()].map((b) => ({ n: b.n, c: [b.r / b.n, b.g / b.n, b.b / b.n] as [number, number, number] }))
+  const seeds: [number, number, number][] = []
+  {
+    const bg: [number, number, number] = [bgR, bgG, bgB]
+    while (seeds.length < k) {
+      let best: [number, number, number] | null = null
+      let bestScore = 0
+      for (const b of binC) {
+        let md = seeds.length ? Infinity : d2(b.c, bg)
+        for (const s of seeds) md = Math.min(md, d2(b.c, s))
+        if (md < 24 * 24) continue // too close to an existing seed / the bg
+        const score = b.n * md
+        if (score > bestScore) { bestScore = score; best = b.c }
+      }
+      if (!best) break // image has fewer distinct colours than k
+      seeds.push(best)
+    }
+    if (!seeds.length) seeds.push(px(design[0]))
+  }
+  const kk = seeds.length
+  const cent = seeds.map((s) => [...s] as [number, number, number])
+  const label = new Int16Array(n).fill(-1)
+  for (let iter = 0; iter < 12; iter++) {
+    const sum = cent.map(() => [0, 0, 0, 0])
+    for (const i of design) {
+      const p = px(i)
+      let bi = 0, bd = Infinity
+      for (let c = 0; c < kk; c++) { const dd = d2(p, cent[c]); if (dd < bd) { bd = dd; bi = c } }
+      label[i] = bi
+      const s = sum[bi]
+      s[0] += p[0]; s[1] += p[1]; s[2] += p[2]; s[3]++
+    }
+    let moved = false
+    for (let c = 0; c < kk; c++) {
+      if (!sum[c][3]) continue
+      const nx: [number, number, number] = [sum[c][0] / sum[c][3], sum[c][1] / sum[c][3], sum[c][2] / sum[c][3]]
+      if (d2(nx, cent[c]) > 1) moved = true
+      cent[c] = nx
+    }
+    if (!moved) break
+  }
+  // merge centroids that converged to near-identical colours
+  const remap = new Int16Array(kk)
+  const kept: number[] = []
+  for (let c = 0; c < kk; c++) {
+    let hit = -1
+    for (const o of kept) if (d2(cent[c], cent[o]) < 30 * 30) { hit = o; break }
+    remap[c] = hit >= 0 ? remap[hit] : kept.length
+    if (hit < 0) kept.push(c)
+  }
+  for (const i of design) label[i] = remap[label[i]]
+  const m = kept.length
+
+  // one 3x3 majority pass: anti-aliased boundary pixels stop speckling
+  // between neighbouring colour regions
+  const smoothed = new Int16Array(label)
+  const votes = new Int16Array(m + 1)
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x
+      if (label[i] < 0) continue
+      votes.fill(0)
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const l = label[i + dy * w + dx]
+          if (l >= 0) votes[l]++
+        }
+      let bi = label[i], bv = -1
+      for (let c = 0; c < m; c++) if (votes[c] > bv) { bv = votes[c]; bi = c }
+      smoothed[i] = bi
+    }
+
+  const s = 1 / pxPerMm
+  const layers: ColorLayer[] = []
+  for (let c = 0; c < m; c++) {
+    const bin = new Uint8Array(n)
+    let count = 0
+    for (let i = 0; i < n; i++) if (smoothed[i] === c) { bin[i] = 1; count++ }
+    if (count < design.length * 0.005) continue // specks, not a colour region
+    const src = cent[kept[c]]
+    // drop halo-speck rings: boundary anti-aliasing shows up as dozens of
+    // sub-mm contours that would scatter stray stones along every edge
+    const contours = marchingSquares(bin, w, h)
+      .map((pl) => pl.map((p) => ({ x: p.x * s, y: p.y * s })))
+      .filter((pl) => ringArea(pl) >= 1)
+    if (!contours.length) continue
+    layers.push({
+      color: toHex(src[0], src[1], src[2]),
+      contours,
+      grid: { bin, w, h, pxPerMm, padPx: 0 },
+      share: count / design.length,
+    })
+  }
+  layers.sort((a, b) => b.share - a.share)
+  return { layers, widthMm: w * s, heightMm: h * s }
+}
+
+// ---------------------------------------------------------------------------
 // Image -> CUT LINES (Inkscape's Trace Bitmap). The marching-squares contours
 // follow pixel edges, so raw they cut as a staircase. Chaikin corner-cutting
 // rounds the steps into the curve the artwork meant, then RDP thins the

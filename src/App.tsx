@@ -11,7 +11,8 @@ import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
 import { booleanPaths } from './boolean'
 import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
-import { analyzeImage, imageToCutContours, imageToRaster } from './image'
+import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
+import type { ColorLayer } from './image'
 import { download, gpglTestShape, stoneBom, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
@@ -505,6 +506,10 @@ export default function App() {
   const [imgLinework, setImgLinework] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
   const [imgMode, setImgMode] = useState<StoneMode>('both')
+  // multi-color trace: k-means colour layers of the working image
+  const [mcColors, setMcColors] = useState(3)
+  const [mcLayers, setMcLayers] = useState<ColorLayer[] | null>(null)
+  useEffect(() => { setMcLayers(null) }, [imageFile])
 
   // material
   const [presets, setPresets] = useState<MaterialPreset[]>(loadPresets)
@@ -847,7 +852,7 @@ export default function App() {
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
   useEffect(() => {
-    if (!imageFile) return
+    if (!imageFile || mcLayers) return // multi-color preview owns the canvas
     // while the committed design is still regenerable in place, settings
     // changes morph IT (effect below) — a second preview stacked underneath
     // only confused things
@@ -912,7 +917,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
+  }, [imageFile, mcLayers, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, sizes, curSize, gap,
       outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
 
   // ---------- generation ----------
@@ -1083,6 +1088,92 @@ export default function App() {
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
+
+  // ---------- multi-color trace ----------
+  const traceColors = useCallback(async () => {
+    if (!imageFile) { setStatus('Choose an image first'); return }
+    setStatus(`Separating into ${mcColors} colors…`)
+    try {
+      const px = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
+      const r = await imageToColorLayers(imageFile, imgWidth, mcColors, px)
+      setMcLayers(r.layers)
+      setStatus(`Found ${r.layers.length} color region${r.layers.length === 1 ? '' : 's'} — tune the swatches, then add stones`)
+    } catch (e) {
+      setStatus(`Color trace failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }, [imageFile, mcColors, imgWidth])
+  // Stones for every colour layer, sharing ONE spacing index pair so stones
+  // from touching colour regions keep legal clearance across the boundary.
+  // Outline + fill sizes come from the panels; only the colour varies.
+  const multiColorPts = useCallback(
+    (layers: ColorLayer[]) => {
+      const hole = sizes[curSize]?.holeMm ?? 3
+      const hardGap = hardGapOf(gap)
+      const rhythm = hole + gap
+      const idx = new SpacingIndex(hole + hardGap)
+      const fHole = sizes[fillSize]?.holeMm ?? 2.5
+      const fGap = hardGapOf(gap)
+      const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
+      const pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[] = []
+      const allOutline: { x: number; y: number }[] = []
+      for (const L of layers) {
+        let outline: { x: number; y: number }[] = []
+        if (imgMode !== 'fill') {
+          if (outlineDesign === 'ghost') {
+            outline = offsetRows(L.grid, hole, hardGap, idx, rhythm, rhythm * 0.55, true, uniformRhythm)
+          } else {
+            outline = outlineOrSpine(L.contours, L.grid, hole, hardGap, idx, outlineStyle, false, rhythm, uniformRhythm)
+            if (outlineDesign === 'double')
+              outline = outline.concat(offsetRows(L.grid, hole, hardGap, idx, rhythm, rhythm, true, uniformRhythm))
+          }
+        }
+        allOutline.push(...outline)
+        pts.push(...outline.map((p) => ({ ...p, size: curSize, color: L.color, layer: 'outline' as const })))
+        if (imgMode !== 'outline') {
+          const f = fillStones(L.grid, fHole, fGap, fHole / 2 + 0.1, fIdx, allOutline, fHole + fGap, fillStyle === 'brick', hole)
+          pts.push(...f.map((p) => ({ ...p, size: fillSize, color: L.color, layer: 'fill' as const })))
+        }
+      }
+      return pts
+    },
+    [sizes, curSize, gap, fillSize, imgMode, outlineDesign, outlineStyle, uniformRhythm, fillStyle],
+  )
+  // live preview whenever the layers or stone settings change
+  useEffect(() => {
+    if (!mcLayers) return
+    const t = window.setTimeout(() => {
+      try {
+        const pts = multiColorPts(mcLayers)
+        pinPreviewBase(pts.reduce((m, p) => Math.max(m, p.y), 0))
+        setImagePreview(pts)
+      } catch (e) {
+        console.error('[stonecut] multi-color preview failed', e)
+        setImagePreview(null)
+        setStatus(`Preview failed: ${e instanceof Error ? e.message : e}`)
+      }
+    }, 350)
+    return () => window.clearTimeout(t)
+  }, [mcLayers, multiColorPts, pinPreviewBase])
+  const commitMultiColor = useCallback(() => {
+    if (!mcLayers) return
+    const pts = multiColorPts(mcLayers)
+    if (!pts.length) { setStatus('No stones — regions may be too small at this stone size'); return }
+    const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
+    addGenerated(pts, offsetY) // no recipe: multi-color designs rescale via Scale %, not the handles
+    const byColor = new Map<string, number>()
+    for (const p of pts) byColor.set(p.color ?? '', (byColor.get(p.color ?? '') ?? 0) + 1)
+    setPreviewBaseY(null)
+    setImagePreview(null)
+    setMcLayers(null)
+    // release the image slot, or the single-colour preview of the same
+    // artwork pops back up underneath the committed multi-colour design
+    setImageFile(null)
+    setStatus(
+      `Added ${pts.length} stones in ${byColor.size} colors — ` +
+      [...byColor.entries()].map(([c, n]) => `${n} ${c}`).join(', ') +
+      ' · counts are in Production',
+    )
+  }, [mcLayers, multiColorPts, previewBaseY, stones.length, bbox.maxY, addGenerated])
 
   // ---------- canvas interactions ----------
   const svgRef = useRef<SVGSVGElement>(null)
@@ -2574,6 +2665,7 @@ export default function App() {
     }))
   }, [mutateVectors])
   ;(window as unknown as { __scParseSvg?: unknown }).__scParseSvg = parseSvgToPaths
+  ;(window as unknown as { __scColorLayers?: unknown }).__scColorLayers = imageToColorLayers
 
   // ---------- align / distribute / pathfinder ----------
   // Objects = selected cut-line items + each selected stone element (stones
@@ -3559,6 +3651,46 @@ export default function App() {
           <button className={pendingImage ? 'primary urgent' : ''} onClick={generateImage}>
             {pendingImage ? `Add ${pendingImage} image stones to design` : 'Add image stones'}
           </button>
+          <details className="sec sub">
+            <summary>Multi-color</summary>
+            <div className="sec-body">
+              <p className="hint">
+                Split the image into color regions — each becomes stones in its own color, one
+                design, one template. Stone sizes come from the Stones and Fill panels.
+              </p>
+              <div className="grid2">
+                <label>Colors
+                  <select value={mcColors} onChange={(e) => setMcColors(+e.target.value)}>
+                    {[2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+                <button style={{ alignSelf: 'end' }} disabled={!imageFile} onClick={() => { void traceColors() }}>
+                  Trace colors
+                </button>
+              </div>
+              {mcLayers && mcLayers.map((L, i) => (
+                <div key={i} className="toolrow" style={{ alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="color"
+                    value={L.color}
+                    style={{ width: 34, padding: 0, height: 24, flex: 'none' }}
+                    onChange={(e) => setMcLayers((ls) => ls!.map((x, j) => (j === i ? { ...x, color: e.target.value } : x)))}
+                  />
+                  <span style={{ flex: 1, fontSize: 12, color: '#8b97b5' }}>{Math.round(L.share * 100)}% of the artwork</span>
+                  <button
+                    style={{ width: 'auto', flex: 'none' }}
+                    title="Drop this region — it gets no stones"
+                    onClick={() => setMcLayers((ls) => (ls!.length > 1 ? ls!.filter((_, j) => j !== i) : ls))}
+                  >×</button>
+                </div>
+              ))}
+              {mcLayers && (
+                <button className="primary" onClick={commitMultiColor}>
+                  Add multi-color stones
+                </button>
+              )}
+            </div>
+          </details>
           <button disabled={!imageFile} onClick={() => { void imageAsCutLines() }}>
             Trace to cut lines (vinyl / stencil)
           </button>
