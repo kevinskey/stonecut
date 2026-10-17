@@ -53,6 +53,7 @@ export async function imageToRaster(
   pxPerMm = 6, // previews pass a coarser grid — analysis passes scale with area
   minFeatureMm2 = 0, // despeckle floor: features smaller than this (mm²) are erased/filled
   closeMm = 0, // detail smoothing: closing radius in mm welds finer detail into its parent shape
+  excludeRects?: { x0: number; y0: number; x1: number; y1: number }[], // fractions; zeroed before tracing (detected text handled by the Text tool)
 ): Promise<RasterResult> {
   const img = await loadImage(file)
   const w = Math.max(8, Math.round(widthMm * pxPerMm))
@@ -90,6 +91,12 @@ export async function imageToRaster(
     }
     bin[i] = final ? 1 : 0
   }
+  if (excludeRects?.length)
+    for (const r of excludeRects) {
+      const x0 = Math.max(0, Math.floor(r.x0 * w)), x1 = Math.min(w, Math.ceil(r.x1 * w))
+      const y0 = Math.max(0, Math.floor(r.y0 * h)), y1 = Math.min(h, Math.ceil(r.y1 * h))
+      for (let y = y0; y < y1; y++) bin.fill(0, y * w + x0, y * w + x1)
+    }
   // Excluding the linework exposes its ANTI-ALIASED halo: the 1-2px blend
   // between a black contour and the background reads as midtone "design"
   // and outline stones scatter along the ghost ring. A one-pixel opening

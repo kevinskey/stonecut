@@ -17,6 +17,8 @@ import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, t
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MOCKUP_W, drawGem, drawMockup, drawMockupPhoto } from './sim'
+import { detectText } from './ocr'
+import type { DetectedText } from './ocr'
 import { MenuBar } from './MenuBar'
 import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
@@ -594,6 +596,11 @@ export default function App() {
   // Detail smoothing: welds art detail finer than the stone rhythm into its
   // parent shape (fur hatching -> solid mane). Radius is pitch-relative.
   const [imgDetail, setImgDetail] = useState<'fine' | 'smooth' | 'bold'>('fine')
+  // detected lettering in the image: offer to replace with typed stone text
+  const [imgOcr, setImgOcr] = useState<DetectedText | null>(null)
+  const [imgOcrText, setImgOcrText] = useState('')
+  const [imgTextMasked, setImgTextMasked] = useState(false)
+  useEffect(() => { setImgOcr(null); setImgOcrText(''); setImgTextMasked(false) }, [imageFile])
   // multi-color trace: k-means colour layers of the working image
   const [mcColors, setMcColors] = useState(3)
   const [mcLayers, setMcLayers] = useState<ColorLayer[] | null>(null)
@@ -987,7 +994,7 @@ export default function App() {
         const pitch = (sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)
         const minFeat = pitch ** 2 * 0.6
         const closeMm = imgDetail === 'fine' ? 0 : pitch * (imgDetail === 'smooth' ? 0.2 : 0.45)
-        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat, closeMm)
+        const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat, closeMm, imgTextMasked && imgOcr ? imgOcr.rects : undefined)
         // PHOTO GUARD: a photograph thresholds into thousands of speckle
         // regions and the outline engine walks every one — the tab froze
         // for minutes. Refuse pathological masks with advice instead.
@@ -1043,7 +1050,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [imageFile, mcLayers, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, sizes, curSize, gap,
+  }, [imageFile, mcLayers, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, gap,
       outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, pinPreviewBase])
 
   // ---------- generation ----------
@@ -1140,7 +1147,7 @@ export default function App() {
       const pitch = (sizes[curSize]?.holeMm ?? 3) + hardGapOf(gap)
       const minFeat = pitch ** 2 * 0.6
       const closeMm = imgDetail === 'fine' ? 0 : pitch * (imgDetail === 'smooth' ? 0.2 : 0.45)
-      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 6, minFeat, closeMm)
+      const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, 6, minFeat, closeMm, imgTextMasked && imgOcr ? imgOcr.rects : undefined)
       if (raster.contours.length > 250) {
         setStatus(`This traces to ${raster.contours.length} separate regions — it reads as a photo, not line art. Use Multi-color trace, or move Threshold until the subject is one solid shape.`)
         return
@@ -1204,7 +1211,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
 
   // Live regeneration: while the last image commit is untouched, any
   // generation-setting change re-runs it in place (debounced like a preview).
@@ -1220,7 +1227,7 @@ export default function App() {
     }, 650)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
+  }, [imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, fillStyle, fillSize, curSize, gap, sizes, outlineDesign, strokePolicy, uniformRhythm, imageFile])
 
   // ---------- multi-color trace ----------
   const traceColors = useCallback(async () => {
@@ -3175,6 +3182,10 @@ export default function App() {
       } else {
         setStatus(`${f.name} — ${a.note}${detailNote}`)
       }
+      // quiet text detection — an offer when it finds lettering, never a gate
+      void detectText(f, a.threshold).then((r) => {
+        if (r) { setImgOcr(r); setImgOcrText(r.text) }
+      }).catch(() => {})
     } catch (e) {
       setStatus(`Could not read ${f.name}${e instanceof Error && e.message ? ` — ${e.message}` : ''}`)
     }
@@ -4363,6 +4374,39 @@ export default function App() {
               </button>
             ))}
           </div>
+          {imgOcr && !imgTextMasked && (
+            <div className="sizeinfo warn">
+              Lettering detected in this image — traced letters come out smeary. Type the real
+              words and they'll render from font geometry instead{imgOcr.bendDeg ? `, arc matched (${imgOcr.bendDeg}°)` : ''}:
+              <input
+                value={imgOcrText}
+                onChange={(e) => setImgOcrText(e.target.value)}
+                placeholder="correct the detected text…"
+                style={{ marginTop: 6 }}
+              />
+              <div className="toolrow">
+                <button
+                  className="primary"
+                  disabled={!imgOcrText.trim()}
+                  onClick={() => {
+                    setImgTextMasked(true) // re-traces without the lettering region
+                    setText(imgOcrText.trim())
+                    setTextBend(imgOcr.bendDeg)
+                    setTextOutput('stones')
+                    openSection('Text', 'input')
+                    setStatus('Lettering masked from the trace — pick a font, then Add; drag the text preview onto the artwork')
+                  }}
+                >Use typed text</button>
+                <button onClick={() => setImgOcr(null)}>Keep traced</button>
+              </div>
+            </div>
+          )}
+          {imgTextMasked && (
+            <p className="hint">
+              Lettering is masked out of this trace — the Text panel is handling it.{' '}
+              <button style={{ width: 'auto', padding: '2px 8px', fontSize: 11 }} onClick={() => setImgTextMasked(false)}>Unmask</button>
+            </p>
+          )}
           <label>Threshold {imgThreshold}
             <input type="range" min={10} max={245} value={imgThreshold} onChange={(e) => setImgThreshold(+e.target.value)} />
           </label>
