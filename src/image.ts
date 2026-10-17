@@ -12,6 +12,37 @@ export interface RasterResult {
 
 // Rasterize an image at working resolution, threshold to binary,
 // trace outlines with marching squares. All output in mm.
+// Erase connected components smaller than minPx: islands below the floor
+// vanish, pinhole gaps inside strokes fill (except true background touching
+// the border). Shared by the tracer and the analyzer's stroke statistics.
+export function despeckleBin(bin: Uint8Array, w: number, h: number, minPx: number) {
+  if (minPx <= 1) return
+  const seen = new Uint8Array(w * h)
+  const stack: number[] = []
+  const comp: number[] = []
+  for (let start = 0; start < w * h; start++) {
+    if (seen[start]) continue
+    const v = bin[start]
+    seen[start] = 1
+    stack.length = 0
+    comp.length = 0
+    stack.push(start)
+    comp.push(start)
+    let touchesBorder = false
+    while (stack.length) {
+      const i = stack.pop()!
+      const x = i % w, y = (i - x) / w
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touchesBorder = true
+      if (x > 0 && !seen[i - 1] && bin[i - 1] === v) { seen[i - 1] = 1; stack.push(i - 1); comp.push(i - 1) }
+      if (x < w - 1 && !seen[i + 1] && bin[i + 1] === v) { seen[i + 1] = 1; stack.push(i + 1); comp.push(i + 1) }
+      if (y > 0 && !seen[i - w] && bin[i - w] === v) { seen[i - w] = 1; stack.push(i - w); comp.push(i - w) }
+      if (y < h - 1 && !seen[i + w] && bin[i + w] === v) { seen[i + w] = 1; stack.push(i + w); comp.push(i + w) }
+    }
+    if (comp.length < minPx && !(v === 0 && touchesBorder))
+      for (const i of comp) bin[i] = v ? 0 : 1
+  }
+}
+
 export async function imageToRaster(
   file: File,
   widthMm: number,
@@ -80,35 +111,8 @@ export async function imageToRaster(
   // DESPECKLE: detailed mascot art (fur spikes, whisker hatching) is full
   // of features far smaller than a stone — tracing them scatters orphan
   // stones across the design (the coherence law: refuse rather than fake).
-  // Islands below the floor are erased; pinhole gaps inside strokes are
-  // filled (except true background touching the border).
-  if (minFeatureMm2 > 0) {
-    const minPx = Math.max(2, Math.round(minFeatureMm2 * pxPerMm * pxPerMm))
-    const seen = new Uint8Array(w * h)
-    const stack: number[] = []
-    const comp: number[] = []
-    for (let start = 0; start < w * h; start++) {
-      if (seen[start]) continue
-      const v = bin[start]
-      seen[start] = 1
-      stack.length = 0
-      comp.length = 0
-      stack.push(start)
-      comp.push(start)
-      let touchesBorder = false
-      while (stack.length) {
-        const i = stack.pop()!
-        const x = i % w, y = (i - x) / w
-        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touchesBorder = true
-        if (x > 0 && !seen[i - 1] && bin[i - 1] === v) { seen[i - 1] = 1; stack.push(i - 1); comp.push(i - 1) }
-        if (x < w - 1 && !seen[i + 1] && bin[i + 1] === v) { seen[i + 1] = 1; stack.push(i + 1); comp.push(i + 1) }
-        if (y > 0 && !seen[i - w] && bin[i - w] === v) { seen[i - w] = 1; stack.push(i - w); comp.push(i - w) }
-        if (y < h - 1 && !seen[i + w] && bin[i + w] === v) { seen[i + w] = 1; stack.push(i + w); comp.push(i + w) }
-      }
-      if (comp.length < minPx && !(v === 0 && touchesBorder))
-        for (const i of comp) bin[i] = v ? 0 : 1
-    }
-  }
+  if (minFeatureMm2 > 0)
+    despeckleBin(bin, w, h, Math.max(2, Math.round(minFeatureMm2 * pxPerMm * pxPerMm)))
 
   // PHOTO GUARD, before any contour tracing: a thresholded photograph is
   // speckle — binary transition density ~0.3/px vs ~0.01/px for line art —
@@ -412,6 +416,10 @@ function strokeStats(
 ): { strokePx: number; strokeDeciles: number[]; strokeMax: number; bin: Uint8Array; dt: Float32Array } {
   const bin = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) bin[i] = isDesign(i) ? 1 : 0
+  // kill checkerboard/anti-aliasing speckle before measuring: fake-
+  // transparency art shredded the mask and the speckle's 1-2px "strokes"
+  // dominated every decile (median stroke read as noise width)
+  despeckleBin(bin, w, h, 9)
   // two-pass 3-4 chamfer distance transform (Euclidean to ~5%) — city block
   // over-read diagonal strokes by up to 1.4x and misclassified round art
   const INF = 1e9

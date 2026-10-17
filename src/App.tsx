@@ -12,7 +12,7 @@ import { booleanPaths } from './boolean'
 import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
-import type { ColorLayer } from './image'
+import type { ColorLayer, ImageAnalysis } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
@@ -3053,6 +3053,23 @@ export default function App() {
       ? (pendingText ? `Add ${pendingText} stones + cut lines` : 'Add stones + cut lines')
       : (pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones')
 
+  // Starting width so the artwork's MEDIAN stroke holds two wall rows at
+  // the current stone size — the analyzer already measured stroke deciles.
+  // The thin tail (whisker hairlines) is ignored: despeckle drops what
+  // can't hold stones anyway. Bold logos clamp to the 100mm floor.
+  const suggestWidth = useCallback((a: ImageAnalysis): number | null => {
+    if (!a.sampleW || !a.strokeDeciles?.length) return null
+    const p50 = a.strokeDeciles[4] ?? a.strokePx
+    if (!p50) return null
+    const hole = sizes[curSize]?.holeMm ?? 3.4
+    // 0.55 x pitch: the median stroke carries a clean CENTERLINE row —
+    // detailed art reads right with spines, demanding two wall rows
+    // oversized everything. Calibrated on the WASHED DADS wildcat, where
+    // 220mm at SS10 was the empirically good size.
+    const w = (((hole + hardGapOf(gap)) * 0.55) / p50) * a.sampleW
+    if (!isFinite(w) || w <= 0) return null
+    return Math.min(400, Math.max(100, Math.round(w / 10) * 10))
+  }, [sizes, curSize, gap])
   // Load a raster file into the image pipeline: auto-pick settings that
   // make the artwork the design, so a light logo or transparent background
   // doesn't silently yield nothing. Shared by the file input and canvas drop.
@@ -3065,11 +3082,17 @@ export default function App() {
       setImgAlphaKey(a.alphaKey)
       setImgLinework(a.linework)
       applyStrokeStyle(a)
-      setStatus(`${f.name} — ${a.note}`)
+      const sw = suggestWidth(a)
+      if (sw && Math.abs(sw - imgWidth) > 10) {
+        setImgWidth(sw)
+        setStatus(`${f.name} — ${a.note} · sized to ${sw} mm (${(sw / 25.4).toFixed(1)}″) so the detail holds ${curSize} stones`)
+      } else {
+        setStatus(`${f.name} — ${a.note}`)
+      }
     } catch (e) {
       setStatus(`Could not read ${f.name}${e instanceof Error && e.message ? ` — ${e.message}` : ''}`)
     }
-  }, [imgWidth, sizes, curSize, gap, applyStrokeStyle])
+  }, [imgWidth, sizes, curSize, gap, applyStrokeStyle, suggestWidth])
 
   // Trace Bitmap: the working image becomes a cut-line object — same
   // threshold/invert/transparency settings the stone trace uses, but the
