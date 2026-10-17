@@ -5300,11 +5300,23 @@ export default function App() {
                     { label: 'Delete selected stones', onClick: () => run(() => { mutate((prev) => prev.filter((_, i) => !selection.has(i))); setSelection(new Set()) }) },
                   ]
                 : [
+                    // a board full of PREVIEWS has zero committed objects —
+                    // every item below is rightly disabled, which read as
+                    // "the menu doesn't work". Offer the commit instead.
+                    ...(pending > 0
+                      ? [
+                          {
+                            label: `Add ${pending} previewed stones to the design`,
+                            onClick: () => run(() => { if (pendingText) addTextOutput(); if (pendingImage) void generateImage() }),
+                          },
+                          'sep' as const,
+                        ]
+                      : []),
                     { label: 'Select all', disabled: !stones.length && !vectors.length, onClick: () => run(() => { setSelection(new Set(stones.map((_, i) => i))); setSelVecs(new Set(vectors.map((v) => v.id))) }) },
                     { label: 'Center on board', disabled: !stones.length && !vectors.length, onClick: () => run(centerOnBoard) },
                     { label: 'Move to origin corner', disabled: !stones.length && !vectors.length, onClick: () => run(() => placeFromOrigin(0.5, 0.5)) },
                     'sep',
-                    { label: 'Clear all', disabled: !stones.length && !vectors.length, onClick: () => run(clearAll) },
+                    { label: 'Clear all', disabled: !stones.length && !vectors.length && !pending, onClick: () => run(clearAll) },
                   ]
           return (
             <div
