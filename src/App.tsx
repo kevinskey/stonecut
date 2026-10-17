@@ -4,6 +4,7 @@ import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
+import { findOverlaps } from './geometry'
 import { splitContoursIntoLetters } from './contours'
 import { offsetPaths } from './offset'
 import { grantedCutter } from './usb'
@@ -2550,19 +2551,72 @@ export default function App() {
     })
   }, [preset])
 
+  // ---------- spacing audit ----------
+  // Generation can't place an illegal stone, but manual drags can. Audit on
+  // demand (and in the cut confirmation) so a crowded pair never reaches
+  // the flock.
+  const spacingAudit = useMemo(() => {
+    if (!stones.length) return { involved: [], removal: [] }
+    return findOverlaps(stones, (s) => holeOf(s), hardGapOf(gap))
+  }, [stones, holeOf, gap])
+  const showOverlaps = useCallback(() => {
+    if (!spacingAudit.involved.length) { setStatus('Spacing is clean — every gap is at or above the floor'); return }
+    setSelVecs(new Set())
+    setSelection(new Set(spacingAudit.involved))
+    setStatus(`${spacingAudit.involved.length} stones sit closer than the ${hardGapOf(gap).toFixed(1)} mm floor — selected. Fix removes ${spacingAudit.removal.length}.`)
+  }, [spacingAudit, gap])
+  const fixOverlaps = useCallback(() => {
+    if (!spacingAudit.removal.length) return
+    const kill = new Set(spacingAudit.removal)
+    mutate((prev) => prev.filter((_, i) => !kill.has(i)))
+    setSelection(new Set())
+    setStatus(`Removed ${kill.size} crowding stones — spacing is legal again (⌘Z restores)`) 
+  }, [spacingAudit, mutate])
+
+  // display colour of a stone, exactly as the canvas paints it
+  const colorOfStone = useCallback(
+    (st: Stone) => st.color ?? ((st.layer ?? 'outline') === 'fill' ? fillColor : outlineColor),
+    [fillColor, outlineColor],
+  )
+
   // ---------- cut / export ----------
   // Cut layers: outline and fill are separate physical cuts, but BOTH use the
   // full design's frame so the two templates register when stacked.
-  const [cutLayer, setCutLayer] = useState<'all' | 'outline' | 'fill' | 'lines'>('all')
+  // Beyond outline/fill/lines, a multi-color or multi-size design can be
+  // cut as one template PER COLOR or PER SIZE ('color:<hex>' / 'size:<key>')
+  // — the operator brushes each color into its own template, and every
+  // template shares the full design's frame so they register when stacked.
+  const [cutLayer, setCutLayer] = useState<string>('all')
+  const cutColors = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const st of stones) { const c = colorOfStone(st); m.set(c, (m.get(c) ?? 0) + 1) }
+    return [...m.entries()]
+  }, [stones, colorOfStone])
+  const cutSizes = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const st of stones) m.set(st.size, (m.get(st.size) ?? 0) + 1)
+    return [...m.entries()]
+  }, [stones])
+  // a vanished option (colour edited away, size regenerated out) falls back
+  useEffect(() => {
+    if (cutLayer.startsWith('color:') && !cutColors.some(([c]) => `color:${c}` === cutLayer)) setCutLayer('all')
+    if (cutLayer.startsWith('size:') && !cutSizes.some(([s]) => `size:${s}` === cutLayer)) setCutLayer('all')
+  }, [cutLayer, cutColors, cutSizes])
   const cutJob = useMemo(
     () =>
       cutLayer === 'all'
         ? job
         : cutLayer === 'lines'
           ? { ...job, stones: [] }
-          : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] },
-    [job, cutLayer],
+          : cutLayer.startsWith('color:')
+            ? { ...job, stones: job.stones.filter((st) => colorOfStone(st) === cutLayer.slice(6)), paths: [] }
+            : cutLayer.startsWith('size:')
+              ? { ...job, stones: job.stones.filter((st) => st.size === cutLayer.slice(5)), paths: [] }
+              : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] },
+    [job, cutLayer, colorOfStone],
   )
+  // filenames: 'color:#dc2034' -> 'color-dc2034'
+  const cutLayerSlug = cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
   const cutCount = cutJob.stones.length + (cutJob.paths?.length ?? 0)
   const layerCounts = useMemo(() => {
     let o = 0
@@ -2711,10 +2765,6 @@ export default function App() {
   }, [mutate, sizes, gap, fillSize])
 
   // ---------- production: stone counts + work order ----------
-  const colorOfStone = useCallback(
-    (st: Stone) => st.color ?? ((st.layer ?? 'outline') === 'fill' ? fillColor : outlineColor),
-    [fillColor, outlineColor],
-  )
   const bom = useMemo(() => stoneBom(stones, sizes, colorOfStone), [stones, sizes, colorOfStone])
   const printWorkOrder = useCallback(() => {
     const html = workOrderHtml(job, bom, colorOfStone, {
@@ -2836,8 +2886,7 @@ export default function App() {
   }, [selection, selVecs, stones, vectors])
   const pasteClipboard = useCallback(() => {
     const clip = clipRef.current
-    if (!clip) { setStatus('Nothing copied yet — select a design and press ⌘C') }
-    if (!clip) return
+    if (!clip) return // silent: a system-image paste is handled by the paste listener
     clip.pastes++
     const off = 8 * clip.pastes
     pushUndo(stonesRef.current)
@@ -3209,6 +3258,37 @@ export default function App() {
     }
   }, [imgWidth, sizes, curSize, gap, applyStrokeStyle, suggestWidth])
 
+  const openSection = useCallback((title: string, focusSel?: string) => {
+    const secs = Array.from(document.querySelectorAll<HTMLDetailsElement>('details.sec'))
+    const d = secs.find((el) => el.querySelector('summary')?.textContent?.trim() === title)
+    if (!d) return
+    d.open = true
+    // sub-sections (Team names, Multi-color, Scatter…) live inside a parent
+    // section — opening the child of a closed parent showed nothing
+    for (let p = d.parentElement; p; p = p.parentElement)
+      if (p instanceof HTMLDetailsElement) p.open = true
+    d.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
+  }, [])
+
+  // ⌘V with an image on the system clipboard (screenshot, copied web image)
+  // loads it straight into the image pipeline.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+      const item = [...(e.clipboardData?.items ?? [])].find((it) => it.type.startsWith('image/'))
+      if (!item) return
+      const f = item.getAsFile()
+      if (!f) return
+      e.preventDefault()
+      openSection('Image')
+      void loadImageFile(new File([f], f.name || 'pasted-image.png', { type: f.type }))
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [loadImageFile, openSection])
+
   // Trace Bitmap: the working image becomes a cut-line object — same
   // threshold/invert/transparency settings the stone trace uses, but the
   // contours themselves are the cut (vinyl, a stencil, a template border).
@@ -3559,18 +3639,6 @@ export default function App() {
   // Sidebar sections are plain <details>; the Window menu opens one by title
   // and scrolls it into view (Kevin works at a big browser zoom, so finding
   // a folded section by scrolling is the slow part).
-  const openSection = useCallback((title: string, focusSel?: string) => {
-    const secs = Array.from(document.querySelectorAll<HTMLDetailsElement>('details.sec'))
-    const d = secs.find((el) => el.querySelector('summary')?.textContent?.trim() === title)
-    if (!d) return
-    d.open = true
-    // sub-sections (Team names, Multi-color, Scatter…) live inside a parent
-    // section — opening the child of a closed parent showed nothing
-    for (let p = d.parentElement; p; p = p.parentElement)
-      if (p instanceof HTMLDetailsElement) p.open = true
-    d.scrollIntoView({ block: 'start', behavior: 'smooth' })
-    if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
-  }, [])
   const saveDesignFile = useCallback(() => {
     download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements, vectors }), 'application/json')
   }, [stones, sizes, elements, vectors])
@@ -3686,9 +3754,9 @@ export default function App() {
       { label: 'Import vector cut (SVG)…', onClick: importSvg },
       { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
       'sep',
-      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutCount },
-      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayer}.dxf`, toDXF(cutJob), 'application/dxf'), disabled: !cutCount },
-      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayer}.plt`, cutData()), disabled: !cutCount },
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(cutJob), 'image/svg+xml'), disabled: !cutCount },
+      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(cutJob), 'application/dxf'), disabled: !cutCount },
+      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayerSlug}.plt`, cutData()), disabled: !cutCount },
       'sep',
       { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
       { label: 'Print 1:1 placement guide…', onClick: printPlacementGuide, disabled: !hasStones && !vectors.length },
@@ -3812,6 +3880,12 @@ export default function App() {
               <tr><td>Material</td><td>{preset.name} · force {preset.force} · speed {preset.speed}{preset.passes > 1 ? ` · ${preset.passes} passes` : ''}{sendConditions ? '' : ' (panel settings)'}</td></tr>
             </tbody></table>
             {offBoard && <p className="modal-warn">Part of the design is off the board and will be clipped.</p>}
+            {spacingAudit.involved.length > 0 && (
+              <p className="modal-warn">
+                {spacingAudit.involved.length} stones sit closer than the spacing floor — the template may tear between holes.
+                Fix in Production → Check spacing, or cut anyway.
+              </p>
+            )}
             <p className="hint">Blade at the front-right corner of the material, ORIGIN pressed on the cutter.</p>
             <div className="modal-actions">
               <button onClick={() => setCutConfirm(null)}>Cancel</button>
@@ -4769,6 +4843,15 @@ export default function App() {
             </table>
           )}
           <p className="hint">Order adds 10% for spills and culls.</p>
+          <div className="toolrow">
+            <button disabled={!stones.length} onClick={showOverlaps}>
+              Check spacing{spacingAudit.involved.length ? ` — ${spacingAudit.involved.length} tight` : ''}
+            </button>
+            {spacingAudit.removal.length > 0 && (
+              <button onClick={fixOverlaps}>Fix ({spacingAudit.removal.length})</button>
+            )}
+          </div>
+          <p className="hint">Manual edits can push stones below the spacing floor; Check selects the crowded ones, Fix removes the minimum set.</p>
           <button disabled={!stones.length && !vectors.length} onClick={printWorkOrder}>Print work order…</button>
           <button disabled={!stones.length && !vectors.length} onClick={printPlacementGuide}>Print 1:1 placement guide…</button>
           <p className="hint">
@@ -4824,10 +4907,16 @@ export default function App() {
 
         <Section title="Cut">
           <label>Layer
-            <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value as typeof cutLayer)}>
+            <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value)}>
               <option value="all">Everything ({stones.length} stones{vectors.length ? ` + ${job.paths?.length ?? 0} cut lines` : ''})</option>
               <option value="outline">Outline stones only ({layerCounts.o})</option>
               <option value="fill">Fill stones only ({layerCounts.f})</option>
+              {cutColors.length > 1 && cutColors.map(([c, nn]) => (
+                <option key={`c${c}`} value={`color:${c}`}>Color {c} only ({nn})</option>
+              ))}
+              {cutSizes.length > 1 && cutSizes.map(([s, nn]) => (
+                <option key={`s${s}`} value={`size:${s}`}>{s} stones only ({nn})</option>
+              ))}
               {vectors.length > 0 && <option value="lines">Vector cut lines only ({job.paths?.length ?? 0})</option>}
             </select>
           </label>
@@ -4902,9 +4991,9 @@ export default function App() {
             </p>
           )}
           <div className="toolrow">
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayer}.dxf`, toDXF(cutJob), 'application/dxf')}>DXF (laser)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(cutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(cutJob), 'application/dxf')}>DXF (laser)</button>
           </div>
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
