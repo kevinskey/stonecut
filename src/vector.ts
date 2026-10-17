@@ -43,7 +43,8 @@ function insideSkipped(el: Element, root: Element): boolean {
 
 // Ramer–Douglas–Peucker, so a 10 000-point sampled curve becomes a few
 // hundred segments the cutter cannot tell apart from the original.
-function simplify(pts: Pt[], tol: number): Pt[] {
+// Exported for the image tracer, which smooths then thins its contours.
+export function simplify(pts: Pt[], tol: number): Pt[] {
   if (pts.length < 3) return pts
   const keep = new Uint8Array(pts.length)
   keep[0] = keep[pts.length - 1] = 1

@@ -1,6 +1,7 @@
 import type { Pt } from './model'
 import { marchingSquares } from './fill'
 import type { Grid } from './fill'
+import { simplify } from './vector'
 
 export interface RasterResult {
   contours: Pt[][] // outline contours in mm
@@ -82,6 +83,60 @@ export async function imageToRaster(
     widthMm: w * s,
     heightMm: h * s,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Image -> CUT LINES (Inkscape's Trace Bitmap). The marching-squares contours
+// follow pixel edges, so raw they cut as a staircase. Chaikin corner-cutting
+// rounds the steps into the curve the artwork meant, then RDP thins the
+// result to segments the blade can't tell from the original.
+// ---------------------------------------------------------------------------
+
+const ringArea = (c: Pt[]): number => {
+  let a = 0
+  for (let i = 0; i < c.length; i++) {
+    const p = c[i], q = c[(i + 1) % c.length]
+    a += p.x * q.y - q.x * p.y
+  }
+  return Math.abs(a / 2)
+}
+
+// Chaikin corner cutting on a closed ring: each pass replaces every vertex
+// with two points at 1/4 and 3/4 of its edges — staircase corners melt into
+// the circle/curve they were sampling.
+function chaikinClosed(pts: Pt[], iters: number): Pt[] {
+  let p = pts
+  // work on the ring without a duplicated endpoint
+  if (p.length > 2 && Math.hypot(p[0].x - p[p.length - 1].x, p[0].y - p[p.length - 1].y) < 1e-6) p = p.slice(0, -1)
+  for (let k = 0; k < iters; k++) {
+    const out: Pt[] = []
+    for (let i = 0; i < p.length; i++) {
+      const a = p[i], b = p[(i + 1) % p.length]
+      out.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 })
+      out.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 })
+    }
+    p = out
+  }
+  return p
+}
+
+// Trace an image into cuttable vector contours (mm, closed rings).
+// Specks under minAreaMm2 are dropped — threshold noise, not artwork.
+export async function imageToCutContours(
+  file: File,
+  widthMm: number,
+  threshold: number,
+  invert: boolean,
+  alphaKey = false,
+  lineworkOpen = false,
+  minAreaMm2 = 0.8,
+): Promise<Pt[][]> {
+  // trace finer than the stone pipeline needs: cut lines show every step
+  const raster = await imageToRaster(file, widthMm, threshold, invert, alphaKey, lineworkOpen, 8)
+  return raster.contours
+    .filter((c) => c.length >= 3 && ringArea(c) >= minAreaMm2)
+    .map((c) => simplify(chaikinClosed(c, 2), 0.08))
+    .filter((c) => c.length >= 3)
 }
 
 function loadImage(file: File): Promise<HTMLImageElement> {

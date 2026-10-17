@@ -11,7 +11,7 @@ import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
 import { booleanPaths } from './boolean'
 import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
-import { analyzeImage, imageToRaster } from './image'
+import { analyzeImage, imageToCutContours, imageToRaster } from './image'
 import { download, gpglTestShape, toGPGL, toHPGL, toSVG } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
@@ -2330,6 +2330,25 @@ export default function App() {
       ? (pendingText ? `Add ${pendingText} stones + cut lines` : 'Add stones + cut lines')
       : (pendingText ? `Add ${pendingText} text stones to design` : 'Add text stones')
 
+  // Trace Bitmap: the working image becomes a cut-line object — same
+  // threshold/invert/transparency settings the stone trace uses, but the
+  // contours themselves are the cut (vinyl, a stencil, a template border).
+  // The result is a normal cut-line object: node tool, offset, pathfinder
+  // and resize all work on it.
+  const imageAsCutLines = useCallback(async () => {
+    if (!imageFile) { setStatus('Choose an image first'); return }
+    setStatus('Tracing image to cut lines…')
+    try {
+      const traced = await imageToCutContours(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
+      if (!traced.length) { setStatus('Nothing traced — move the Threshold slider or try Invert'); return }
+      const r = addVector(traced, imageFile.name.replace(/\.\w+$/, ''))
+      if (!r) return
+      setStatus(`Traced ${r.lines} cut line${r.lines === 1 ? '' : 's'} · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm — the Nodes tool cleans up any rough spots`)
+    } catch (e) {
+      setStatus(`Trace failed: ${e instanceof Error ? e.message : e}`)
+    }
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, addVector])
+
   const shapeAsCutLines = useCallback(() => {
     const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
     const r = addVector(contours, shapeKind)
@@ -2788,6 +2807,7 @@ export default function App() {
       'sep',
       { label: 'Add a shape…', onClick: () => openSection('Shapes') },
       { label: 'Trace an image…', onClick: () => openSection('Image') },
+      { label: 'Trace image to cut lines', disabled: !imageFile, onClick: () => { void imageAsCutLines() } },
     ] },
     { label: 'Select', items: [
       { label: 'All', shortcut: '⌘A', disabled: !hasStones, onClick: () => selectWhere(() => true) },
@@ -3347,6 +3367,14 @@ export default function App() {
           <button className={pendingImage ? 'primary urgent' : ''} onClick={generateImage}>
             {pendingImage ? `Add ${pendingImage} image stones to design` : 'Add image stones'}
           </button>
+          <button disabled={!imageFile} onClick={() => { void imageAsCutLines() }}>
+            Trace to cut lines (vinyl / stencil)
+          </button>
+          <p className="hint">
+            Trace turns the image's outlines into cut paths instead of stone holes — uses the same
+            Threshold / Invert / transparency settings above. Edit the result with the Nodes tool,
+            offset it, or combine it with Pathfinder.
+          </p>
         </Section>
 
         <Section title="Vector cut">
