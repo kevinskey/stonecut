@@ -219,6 +219,21 @@ export default function App() {
   const [boardHIn, setBoardHIn] = useState(() => +(localStorage.getItem('stonecut.boardH') ?? 12))
   useEffect(() => { localStorage.setItem('stonecut.boardW', String(boardWIn)) }, [boardWIn])
   useEffect(() => { localStorage.setItem('stonecut.boardH', String(boardHIn)) }, [boardHIn])
+  // artboard colour = the loaded material's colour, so stone colours are
+  // judged against the flock/vinyl they'll sit on. null = the default
+  // subtle translucent board.
+  const [boardColor, setBoardColor] = useState<string | null>(() => localStorage.getItem('stonecut.boardColor') || null)
+  useEffect(() => {
+    if (boardColor) localStorage.setItem('stonecut.boardColor', boardColor)
+    else localStorage.removeItem('stonecut.boardColor')
+  }, [boardColor])
+  // light material needs dark rules/labels on it, and vice versa
+  const boardIsLight = useMemo(() => {
+    if (!boardColor) return false
+    const n = parseInt(boardColor.slice(1), 16)
+    const lum = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)
+    return lum > 140
+  }, [boardColor])
   // standoff between the cutter origin and the nearest hole. The CE6000's pinch
   // rollers sit on the material edges and can't be cut under, so 0 only works
   // when ORIGIN is set inboard of them.
@@ -4036,6 +4051,16 @@ export default function App() {
             style={{ width: 54 }}
           />
           <span>in</span>
+          <span title="Artboard colour — preview stones on the material they'll sit on">Color</span>
+          <input
+            type="color"
+            value={boardColor ?? '#1a1f2b'}
+            onChange={(e) => setBoardColor(e.target.value)}
+            style={{ width: 30, padding: 0, height: 22 }}
+          />
+          {boardColor && (
+            <button className="zbtn" title="Back to the default board" onClick={() => setBoardColor(null)}>×</button>
+          )}
           <button
             disabled={!stones.length}
             style={{ marginLeft: 'auto', width: 'auto', marginTop: 0 }}
@@ -4078,19 +4103,21 @@ export default function App() {
               const dir = right ? -1 : 1
               const cols = Math.max(0, Math.ceil(boardWIn) - 1)
               const rows = Math.max(0, Math.ceil(boardHIn) - 1)
+              const ruleCol = boardIsLight ? '#b2b9c9' : '#3d4863'
+              const labelCol = boardIsLight ? '#4a5469' : '#8b97b5'
               return (
                 <>
-                  <rect x={0} y={0} width={W} height={H} fill="#ffffff" fillOpacity={0.035} stroke="#7789ad" strokeWidth={1.5} />
+                  <rect x={0} y={0} width={W} height={H} fill={boardColor ?? '#ffffff'} fillOpacity={boardColor ? 1 : 0.035} stroke="#7789ad" strokeWidth={1.5} />
                   {Array.from({ length: cols }, (_, k) => k + 1).map((i) => (
                     <g key={`v${i}`}>
-                      <line x1={ox + dir * i * inch} y1={0} x2={ox + dir * i * inch} y2={H} stroke="#3d4863" strokeWidth={1} />
-                      <text x={ox + dir * i * inch + (right ? 3 : -3)} y={H - 4} fill="#8b97b5" fontSize={10} textAnchor={right ? 'start' : 'end'}>{i}"</text>
+                      <line x1={ox + dir * i * inch} y1={0} x2={ox + dir * i * inch} y2={H} stroke={ruleCol} strokeWidth={1} />
+                      <text x={ox + dir * i * inch + (right ? 3 : -3)} y={H - 4} fill={labelCol} fontSize={10} textAnchor={right ? 'start' : 'end'}>{i}"</text>
                     </g>
                   ))}
                   {Array.from({ length: rows }, (_, k) => k + 1).map((i) => (
                     <g key={`h${i}`}>
-                      <line x1={0} y1={H - i * inch} x2={W} y2={H - i * inch} stroke="#3d4863" strokeWidth={1} />
-                      <text x={right ? W - 3 : 3} y={H - i * inch + 11} fill="#8b97b5" fontSize={10} textAnchor={right ? 'end' : 'start'}>{i}"</text>
+                      <line x1={0} y1={H - i * inch} x2={W} y2={H - i * inch} stroke={ruleCol} strokeWidth={1} />
+                      <text x={right ? W - 3 : 3} y={H - i * inch + 11} fill={labelCol} fontSize={10} textAnchor={right ? 'end' : 'start'}>{i}"</text>
                     </g>
                   ))}
                   {/* origin corner + axes, drawn the way the operator sees the machine */}
@@ -4101,7 +4128,7 @@ export default function App() {
                   <text x={ox + dir * 34} y={H - 60} fill="#f0b95e" fontSize={10} textAnchor={right ? 'end' : 'start'}>feed ↑ into machine</text>
                   <line x1={ox + dir * 40} y1={H - 28} x2={ox + dir * 100} y2={H - 28} stroke="#f0b95e" strokeWidth={1.5} markerEnd="url(#arrow)" />
                   <text x={ox + dir * 106} y={H - 24} fill="#f0b95e" fontSize={10} textAnchor={right ? 'end' : 'start'}>carriage</text>
-                  <text x={right ? 4 : W - 4} y={12} fill="#7789ad" fontSize={11} textAnchor={right ? 'start' : 'end'}>
+                  <text x={right ? 4 : W - 4} y={12} fill={boardIsLight ? '#4a5469' : '#7789ad'} fontSize={11} textAnchor={right ? 'start' : 'end'}>
                     media {boardWIn}" × {boardHIn}" · origin lower-{right ? 'right' : 'left'}
                   </text>
                 </>
