@@ -978,6 +978,14 @@ export default function App() {
         // resolution for fluid slider drags. Commits always re-run at 6.
         const previewPx = imgWidth <= 150 ? 6 : imgWidth <= 300 ? 4 : 3
         const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx)
+        // PHOTO GUARD: a photograph thresholds into thousands of speckle
+        // regions and the outline engine walks every one — the tab froze
+        // for minutes. Refuse pathological masks with advice instead.
+        if (raster.contours.length > 250) {
+          setImagePreview(null)
+          setStatus(`This traces to ${raster.contours.length} separate regions — it reads as a photo, not line art. Use Multi-color trace, or move Threshold until the subject is one solid shape.`)
+          return
+        }
         const hole = sizes[curSize]?.holeMm ?? 3
         const hardGap = hardGapOf(gap)
         const rhythm = hole + gap
@@ -1120,6 +1128,10 @@ export default function App() {
     setStatus('Tracing image…')
     try {
       const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework)
+      if (raster.contours.length > 250) {
+        setStatus(`This traces to ${raster.contours.length} separate regions — it reads as a photo, not line art. Use Multi-color trace, or move Threshold until the subject is one solid shape.`)
+        return
+      }
       const hole = sizes[curSize]?.holeMm ?? 3
       const hardGap = hardGapOf(gap)
       const rhythm = hole + gap

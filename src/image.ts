@@ -76,6 +76,18 @@ export async function imageToRaster(
         if (er[i] || er[i - 1] || er[i + 1] || er[i - w] || er[i + w]) bin[i] = 1
       }
   }
+  // PHOTO GUARD, before any contour tracing: a thresholded photograph is
+  // speckle — binary transition density ~0.3/px vs ~0.01/px for line art —
+  // and marching squares + the outline engine on speckle froze the tab for
+  // minutes. Refuse with advice instead of tracing.
+  let flips = 0
+  for (let y = 0; y < h; y++)
+    for (let x = 1; x < w; x++) {
+      const i = y * w + x
+      if (bin[i] !== bin[i - 1]) flips++
+    }
+  if (flips > w * h * 0.08)
+    throw new Error('this reads as a photograph (speckle after thresholding) — use Multi-color trace, or adjust Threshold / Invert until the subject is one solid shape')
   const s = 1 / pxPerMm
   return {
     contours: marchingSquares(bin, w, h).map((c) => c.map((p) => ({ x: p.x * s, y: p.y * s }))),
@@ -235,6 +247,15 @@ export async function imageToColorLayers(
     let count = 0
     for (let i = 0; i < n; i++) if (smoothed[i] === c) { bin[i] = 1; count++ }
     if (count < design.length * 0.005) continue // specks, not a colour region
+    // same speckle guard as imageToRaster: an incoherent cluster (pure
+    // noise) would hang marching squares — skip it rather than trace it
+    let flips = 0
+    for (let y = 0; y < h; y++)
+      for (let x = 1; x < w; x++) {
+        const i = y * w + x
+        if (bin[i] !== bin[i - 1]) flips++
+      }
+    if (flips > n * 0.08) continue
     const src = cent[kept[c]]
     // drop halo-speck rings: boundary anti-aliasing shows up as dozens of
     // sub-mm contours that would scatter stray stones along every edge
@@ -301,6 +322,8 @@ export async function imageToCutContours(
 ): Promise<Pt[][]> {
   // trace finer than the stone pipeline needs: cut lines show every step
   const raster = await imageToRaster(file, widthMm, threshold, invert, alphaKey, lineworkOpen, 8)
+  if (raster.contours.length > 600)
+    throw new Error(`traces to ${raster.contours.length} regions — this reads as a photo; adjust Threshold until the subject is solid`)
   return raster.contours
     .filter((c) => c.length >= 3 && ringArea(c) >= minAreaMm2)
     .map((c) => simplify(chaikinClosed(c, 2), 0.08))
