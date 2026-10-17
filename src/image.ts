@@ -738,19 +738,17 @@ export async function analyzeImage(
 
   // Which side is the background? Sample the border ring — the design is
   // whatever the border ISN'T.
-  let borderSum = 0
-  let borderN = 0
-  for (let x = 0; x < w; x++)
-    for (const y of [0, h - 1]) {
-      borderSum += lumOf(y * w + x)
-      borderN++
-    }
-  for (let y = 0; y < h; y++)
-    for (const x of [0, w - 1]) {
-      borderSum += lumOf(y * w + x)
-      borderN++
-    }
-  const borderLum = borderSum / borderN
+  const borderVals: number[] = []
+  for (let x = 0; x < w; x++) { borderVals.push(lumOf(x), lumOf((h - 1) * w + x)) }
+  for (let y = 0; y < h; y++) { borderVals.push(lumOf(y * w), lumOf(y * w + w - 1)) }
+  borderVals.sort((a, b) => a - b)
+  const borderLum = borderVals.reduce((t, v) => t + v, 0) / borderVals.length
+  // The threshold must clear the background's EXTREME, not its mean: a
+  // fake-transparency checkerboard's darkest tiles sit ~30 below its mean,
+  // and a mean-based threshold landed mid-checker — marginal tiles flipped
+  // to design speckle that Detail welding then smeared into sheets.
+  const borderLo = borderVals[Math.floor(borderVals.length * 0.03)]
+  const borderHi = borderVals[Math.floor(borderVals.length * 0.97)]
   const borderIsDark = borderLum < threshold
   // The design is everything meaningfully different from the BACKGROUND,
   // not one side of an Otsu split among the artwork's own tones. On a
@@ -758,8 +756,15 @@ export async function analyzeImage(
   // everything else (threshold 47) and traced a hairline ring instead of
   // the solid numerals. Pull the threshold toward the background so all
   // midtones join the design.
-  if (borderIsDark) threshold = Math.min(threshold, Math.max(10, Math.round(borderLum) + 25))
-  else threshold = Math.max(threshold, Math.min(245, Math.round(borderLum) - 25))
+  if (borderIsDark) {
+    threshold = Math.min(threshold, Math.max(10, Math.round(borderLum) + 25))
+    // ...but never below the background's brightest tile
+    threshold = Math.max(threshold, Math.min(245, Math.round(borderHi) + 25))
+  } else {
+    threshold = Math.max(threshold, Math.min(245, Math.round(borderLum) - 25))
+    // ...but never above the background's darkest tile
+    threshold = Math.min(threshold, Math.max(10, Math.round(borderLo) - 25))
+  }
   const share = borderIsDark
     ? 0 // inverted art: dark is the background, linework logic doesn't apply
     : lineworkShare(data, total, (i) => {
