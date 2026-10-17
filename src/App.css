@@ -442,3 +442,16 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
 
 /* canvas drag-over highlight for file drops */
 .canvas-wrap.dragover { outline: 2px dashed #5b7bd9; outline-offset: -3px; }
+
+/* team-names roster box */
+textarea {
+  width: 100%;
+  margin-top: 3px;
+  padding: 6px 8px;
+  background: #10131a;
+  color: #e8edf7;
+  border: 1px solid #313949;
+  border-radius: 6px;
+  font: 13px/1.5 ui-monospace, Menlo, monospace;
+  resize: vertical;
+}

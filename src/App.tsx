@@ -2594,6 +2594,90 @@ export default function App() {
     setStatus(`Added "${text.trim()}" as ${r.lines} cut line${r.lines === 1 ? '' : 's'} · ${r.w.toFixed(0)} × ${r.h.toFixed(0)} mm`)
   }, [textPreview, text, previewOffsetY, addVector])
   // One Add button, driven by the Output choice up top.
+  // ---------- team names ----------
+  // One roster in, one template per player out: each name generates with the
+  // Text panel's font / height / spacing / bend / output settings, stacked
+  // down the board as its own independent design. ONE undo removes the batch.
+  const [teamNames, setTeamNames] = useState('')
+  const generateTeamNames = useCallback(() => {
+    if (!font) { setStatus('Pick a font first'); return }
+    if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
+    const names = teamNames.split('\n').map((s) => s.trim()).filter(Boolean)
+    if (!names.length) { setStatus('Type one name per line first'); return }
+    pushUndo(stonesRef.current)
+    let cursor = stones.length || vectors.length ? bbox.maxY + 10 : 10
+    const freshStones: Stone[] = []
+    const addElems: Elements = {}
+    const freshVecs: VecItem[] = []
+    const failed: string[] = []
+    let widest = 0
+    for (const name of names) {
+      try {
+        const base = textToContours(font, name, textHeight, letterSpacing)
+        const contours = textBend ? arcContours(base.contours, textBend) : base.contours
+        let rowH = 0
+        if (wantStones) {
+          const pts = contoursToStones(contours, textMode)
+          if (!pts.length) { failed.push(name); continue }
+          const el = elSeq.current++
+          for (const p of pts) rowH = Math.max(rowH, p.y + (sizes[p.size ?? curSize]?.holeMm ?? 3) / 2)
+          freshStones.push(...pts.map((p) => ({ x: p.x + 10, y: p.y + cursor, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el })))
+          addElems[el] = { contours: normaliseContours(contours), mode: textMode, wholeWord: true, sx: 1, sy: 1 }
+        }
+        if (wantLines) {
+          const united = booleanPaths('union', [contours])
+          const raw = united.length ? united : contours
+          const closed = raw.map((pl) => {
+            if (pl.length < 3) return pl
+            const a = pl[0], b = pl[pl.length - 1]
+            return Math.hypot(a.x - b.x, a.y - b.y) > 0.01 ? [...pl, { x: a.x, y: a.y }] : pl
+          })
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const pl of closed) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+          if (isFinite(minX)) {
+            freshVecs.push({
+              id: vecSeq.current++,
+              name,
+              base: closed.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+              baseW: maxX - minX,
+              baseH: maxY - minY,
+              x: 10,
+              y: cursor,
+              s: 1,
+            })
+            rowH = Math.max(rowH, maxY - minY)
+          }
+        }
+        if (!rowH) { failed.push(name); continue }
+        let rowW = 0
+        for (const c of contours) for (const q of c) rowW = Math.max(rowW, q.x)
+        widest = Math.max(widest, rowW + 10)
+        cursor += rowH + 12
+      } catch {
+        failed.push(name)
+      }
+    }
+    const made = names.length - failed.length
+    if (!made) { setStatus('No templates made — check the font and height (every name failed)'); return }
+    if (freshStones.length) {
+      const next = [...stonesRef.current, ...freshStones]
+      stonesRef.current = next
+      setStones(next)
+    }
+    if (Object.keys(addElems).length) setElements((prev) => ({ ...prev, ...addElems }))
+    if (freshVecs.length) setVectors((prev) => [...prev, ...freshVecs])
+    setSelection(new Set())
+    setSelVecs(new Set())
+    setStatus(
+      `Made ${made} name template${made === 1 ? '' : 's'} — layout runs to ${(cursor / 25.4).toFixed(1)}″ down the board` +
+      (cursor > boardHmm ? ` (past the ${boardHIn}″ media — load longer material or cut in batches)` : '') +
+      (widest > boardWmm ? ` · widest name is ${(widest / 25.4).toFixed(1)}″ — WIDER than the ${boardWIn}″ media, lower the Height` : '') +
+      (failed.length ? ` · failed: ${failed.join(', ')}` : '') +
+      ' · counts are in Production',
+    )
+  }, [font, textOutput, teamNames, textHeight, letterSpacing, textBend, textMode, wantStones, wantLines,
+      contoursToStones, sizes, curSize, stones.length, vectors.length, bbox.maxY, boardHmm, boardHIn, boardWmm, boardWIn, pushUndo])
+
   const addTextOutput = useCallback(() => {
     if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
     if (wantStones) generateText()
@@ -3428,6 +3512,28 @@ export default function App() {
           <button className={`primary${pendingText ? ' urgent' : ''}`} disabled={!textOutput || !textPreview} onClick={addTextOutput}>
             {addTextLabel}
           </button>
+          <details className="sec sub">
+            <summary>Team names</summary>
+            <div className="sec-body">
+              <p className="hint">
+                One name per line — each becomes its own template with the font, height, arc and
+                output chosen above, stacked down the board. Spirit-wear rosters in one click.
+              </p>
+              <textarea
+                rows={5}
+                value={teamNames}
+                onChange={(e) => setTeamNames(e.target.value)}
+                placeholder={'ASHLEY\nBRIANNA\nCAMILLE'}
+              />
+              <button
+                className="primary"
+                disabled={!font || !textOutput || !teamNames.trim()}
+                onClick={generateTeamNames}
+              >
+                Make {teamNames.split('\n').filter((s) => s.trim()).length || ''} name template{teamNames.split('\n').filter((s) => s.trim()).length === 1 ? '' : 's'}
+              </button>
+            </div>
+          </details>
         </Section>
         <Section title="Stones">
           <div className="grid2">
