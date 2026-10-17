@@ -765,6 +765,20 @@ export default function App() {
   // horizontal twin of previewBaseY — the preview is draggable before Add
   const [previewOffX, setPreviewOffX] = useState(10)
   const previewDragRef = useRef<{ x: number; y: number } | null>(null)
+  // Previews aren't selectable objects, so Delete had nothing to grab —
+  // this is what "delete" means when only previews are on the board.
+  const discardPreviews = useCallback(() => {
+    setText('')
+    setImageFile(null)
+    setImagePreview(null)
+    setMcLayers(null)
+    setPreviewStones(null)
+    setPreviewLive(false)
+    setPreviewBaseY(null)
+    setPreviewOffX(10)
+    setStatus('Previews discarded')
+  }, [])
+
 
   // Line art wants ONE row of stones down each stroke, not a wall row on both
   // edges. When the analyzed artwork's typical stroke is too narrow to hold
@@ -2473,6 +2487,10 @@ export default function App() {
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selVecs.size) {
         mutateVectors((prev) => prev.filter((v) => !selVecs.has(v.id)))
         setSelVecs(new Set())
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && pending > 0) {
+        // nothing selected but previews pending: Delete means "get rid of
+        // what I'm looking at"
+        discardPreviews()
       }
       // arrow keys nudge the selection: 0.5 mm, Shift = 5 mm
       const nudge = ({ ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] } as Record<string, [number, number]>)[e.key]
@@ -2507,7 +2525,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen, pending, discardPreviews])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -5309,6 +5327,7 @@ export default function App() {
                             label: `Add ${pending} previewed stones to the design`,
                             onClick: () => run(() => { if (pendingText) addTextOutput(); if (pendingImage) void generateImage() }),
                           },
+                          { label: 'Discard previews', onClick: () => run(discardPreviews) },
                           'sep' as const,
                         ]
                       : []),
