@@ -2,8 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
-import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
-import { loadFontFile, parseFontBuffer, textToContours } from './text'
+import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, rasterizeContours } from './fill'
+import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
+import { splitContoursIntoLetters } from './contours'
+import { offsetPaths } from './offset'
 import { grantedCutter } from './usb'
 import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
 import { booleanPaths } from './boolean'
@@ -19,7 +21,7 @@ import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import './App.css'
 
-type Tool = 'select' | 'add'
+type Tool = 'select' | 'add' | 'node'
 type StoneMode = 'outline' | 'fill' | 'both'
 // What a committed design was generated FROM, kept so it can be re-stoned
 // at another size. Contours are normalised to a (0,0) top-left corner at
@@ -39,6 +41,16 @@ const normaliseContours = (contours: Pt[][]): Pt[][] => {
   for (const c of contours) for (const q of c) { if (q.x < minX) minX = q.x; if (q.y < minY) minY = q.y }
   if (!isFinite(minX)) return contours
   return contours.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY })))
+}
+
+// splitContoursIntoLetters moved to contours.ts — shared with arc text.
+
+// Rotate points by `rad` around `center` — used when baking rotation into
+// cut-line objects (holes are circles, so stone rotation is exact too).
+const rotatePt = (q: Pt, center: Pt, rad: number): Pt => {
+  const cos = Math.cos(rad), sin = Math.sin(rad)
+  const dx = q.x - center.x, dy = q.y - center.y
+  return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos }
 }
 
 const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in the Cut panel
@@ -377,6 +389,9 @@ export default function App() {
 
   const [text, setText] = useState('Joy')
   const [textHeight, setTextHeight] = useState(50)
+  // Arc bend in degrees of total sweep: 0 = straight, + arches up (rainbow),
+  // − bends down. Letters stay rigid — rotated into place, never warped.
+  const [textBend, setTextBend] = useState(0)
   const [textMode, setTextMode] = useState<StoneMode>('outline')
   const [letterSpacing, setLetterSpacing] = useState(2)
   // What the text BECOMES: stone holes, vector cut lines, or both. Until the
@@ -557,13 +572,18 @@ export default function App() {
   const textPreview = useMemo(() => {
     if (!font || !text.trim()) return null
     try {
-      return textToContours(font, text, textHeight, letterSpacing)
+      const base = textToContours(font, text, textHeight, letterSpacing)
+      if (!textBend) return base
+      const contours = arcContours(base.contours, textBend)
+      let maxX = 0
+      for (const c of contours) for (const q of c) maxX = Math.max(maxX, q.x)
+      return { contours, widthMm: maxX }
     } catch (e) {
       // Can't setStatus from a memo; the console is the only channel here.
       console.error('[stonecut] font contours failed', e)
       return null
     }
-  }, [font, text, textHeight, letterSpacing])
+  }, [font, text, textHeight, letterSpacing, textBend])
   // The preview's Y offset is PINNED when a preview session starts, not
   // derived live from the bbox. Deriving it live meant every manually added
   // hole grew the bbox and shoved the whole previewed design away from the
@@ -652,7 +672,7 @@ export default function App() {
   }, [textPreview, fontOpen, pinPreviewBase])
   // The last text commit, so stone-setting changes can regenerate it in
   // place while its text is untouched (same idea as the image regen).
-  const lastTextRef = useRef<{ el: number; font: unknown; text: string; height: number; spacing: number } | null>(null)
+  const lastTextRef = useRef<{ el: number; font: unknown; text: string; height: number; spacing: number; bend: number } | null>(null)
   useEffect(() => {
     // No holes until the user says "rhinestones" — cut-lines-only (and
     // not-yet-chosen) previews show the letter outlines only, which also
@@ -929,17 +949,19 @@ export default function App() {
 
   const generateText = useCallback(() => {
     if (!font) { setStatus('Upload a font file first (.ttf/.otf)'); return }
-    const { contours } = textToContours(font, text, textHeight, letterSpacing)
+    if (!textPreview) { setStatus('Type some text first'); return }
+    // the preview's contours already carry the arc bend
+    const { contours } = textPreview
     const pts = contoursToStones(contours, textMode)
     // commit exactly where the preview showed; release the pin so the next
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
     const el = addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
-    lastTextRef.current = { el, font, text, height: textHeight, spacing: letterSpacing }
+    lastTextRef.current = { el, font, text, height: textHeight, spacing: letterSpacing, bend: textBend }
     setPreviewBaseY(null)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
+  }, [font, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
 
   const generateShape = useCallback(() => {
     const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
@@ -1181,6 +1203,65 @@ export default function App() {
   const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number; additive: boolean } | null>(null)
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
+  // ---------- snapping ----------
+  // Inkscape-style object snapping while dragging: the dragged selection's
+  // edges and centre pull to other objects' edges/centres and to the board's
+  // edges and centre. Pink guide lines show what snapped; Alt drags free.
+  const [snapOn, setSnapOn] = useState(() => localStorage.getItem('stonecut.snapobj') !== '0')
+  useEffect(() => { localStorage.setItem('stonecut.snapobj', snapOn ? '1' : '0') }, [snapOn])
+  const [snapLines, setSnapLines] = useState<{ x?: number; y?: number }>({})
+  const snapRef = useRef<{ xs: number[]; ys: number[]; box0: { minX: number; minY: number; maxX: number; maxY: number } } | null>(null)
+  // Collect snap targets ONCE at drag start: board + every object not being
+  // dragged (vectors by id, stones grouped into their elements).
+  const buildSnapTargets = useCallback(
+    (excludeVecs: Set<number>, excludeStones: Set<number>, box0: { minX: number; minY: number; maxX: number; maxY: number }) => {
+      const xs: number[] = [0, boardWmm / 2, boardWmm]
+      const ys: number[] = [0, boardHmm / 2, boardHmm]
+      const addBox = (b: { minX: number; minY: number; maxX: number; maxY: number }) => {
+        xs.push(b.minX, (b.minX + b.maxX) / 2, b.maxX)
+        ys.push(b.minY, (b.minY + b.maxY) / 2, b.maxY)
+      }
+      for (const v of vectors) if (!excludeVecs.has(v.id)) addBox(vecBox(v))
+      const byEl = new Map<number, { minX: number; minY: number; maxX: number; maxY: number }>()
+      stones.forEach((st, i) => {
+        if (excludeStones.has(i)) return
+        const r = holeOf(st) / 2
+        const b = { minX: st.x - r, minY: st.y - r, maxX: st.x + r, maxY: st.y + r }
+        const key = st.el ?? -1 - i // loose stones are their own tiny objects
+        const e = byEl.get(key)
+        byEl.set(key, e ? { minX: Math.min(e.minX, b.minX), minY: Math.min(e.minY, b.minY), maxX: Math.max(e.maxX, b.maxX), maxY: Math.max(e.maxY, b.maxY) } : b)
+      })
+      for (const b of byEl.values()) addBox(b)
+      snapRef.current = { xs, ys, box0 }
+    },
+    [vectors, stones, holeOf, boardWmm, boardHmm],
+  )
+  // Adjust a drag delta so the nearest edge/centre within tolerance locks on.
+  const applySnap = useCallback(
+    (dx: number, dy: number, disable: boolean): { dx: number; dy: number } => {
+      const s = snapRef.current
+      if (!s || !snapOn || disable) { setSnapLines((prev) => (prev.x != null || prev.y != null ? {} : prev)); return { dx, dy } }
+      const tol = 8 / zoom
+      const b = s.box0
+      const cand = (vals: number[], targets: number[], d: number) => {
+        let best: { adj: number; line: number } | null = null
+        for (const v0 of vals) {
+          const v = v0 + d
+          for (const t of targets) {
+            const diff = t - v
+            if (Math.abs(diff) <= tol && (!best || Math.abs(diff) < Math.abs(best.adj))) best = { adj: diff, line: t }
+          }
+        }
+        return best
+      }
+      const bx = cand([b.minX, (b.minX + b.maxX) / 2, b.maxX], s.xs, dx)
+      const by = cand([b.minY, (b.minY + b.maxY) / 2, b.maxY], s.ys, dy)
+      setSnapLines((prev) => (prev.x === bx?.line && prev.y === by?.line ? prev : { x: bx?.line, y: by?.line }))
+      return { dx: dx + (bx?.adj ?? 0), dy: dy + (by?.adj ?? 0) }
+    },
+    [snapOn, zoom],
+  )
+
   const toMm = useCallback(
     (e: { clientX: number; clientY: number }) => {
       const rect = svgRef.current!.getBoundingClientRect()
@@ -1288,6 +1369,47 @@ export default function App() {
     [vecSelBox, tool, zoom],
   )
   const vecResize = useRef<{ handle: Handle; box: Box; orig: VecItem[]; moved: boolean } | null>(null)
+
+  // ---------- rotation ----------
+  // Bake rotation into a cut-line object so the model stays rotation-free.
+  const bakeRotateVec = (v: VecItem, center: Pt, rad: number): VecItem => {
+    const rot = vecPaths(v).map((c) => c.map((q) => rotatePt(q, center, rad)))
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const c of rot) for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+    return { ...v, base: rot.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY }))), baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
+  }
+  const rotateSelection = useCallback((deg: number) => {
+    const rad = (deg * Math.PI) / 180
+    if (selVecs.size && vecSelBox) {
+      const c = { x: (vecSelBox.minX + vecSelBox.maxX) / 2, y: (vecSelBox.minY + vecSelBox.maxY) / 2 }
+      pushUndo(stonesRef.current)
+      setVectors((prev) => prev.map((v) => (selVecs.has(v.id) ? bakeRotateVec(v, c, rad) : v)))
+      setStatus(`Rotated ${deg}°`)
+      return
+    }
+    if (selection.size) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const i of selection) { const st = stones[i]; minX = Math.min(minX, st.x); minY = Math.min(minY, st.y); maxX = Math.max(maxX, st.x); maxY = Math.max(maxY, st.y) }
+      const c = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+      mutate((prev) => prev.map((st, i) => (selection.has(i) ? { ...st, ...rotatePt(st, c, rad) } : st)))
+      setStatus(`Rotated ${deg}° — holes are round, the cut is exact`)
+      return
+    }
+    setStatus('Select something to rotate first')
+  }, [selVecs, vecSelBox, selection, stones, pushUndo, mutate])
+
+  // drag-to-rotate handle floating above the selection box
+  const ROT_OFF_PX = 24
+  const rotRef = useRef<{ kind: 'vec' | 'stones'; center: Pt; start: number; origV: VecItem[]; origS: Stone[] } | null>(null)
+  const rotHandlePos = useCallback((b: Box): Pt => ({ x: (b.minX + b.maxX) / 2, y: b.minY - ROT_OFF_PX / zoom }), [zoom])
+  const hitRotateHandle = useCallback((p: Pt): { kind: 'vec' | 'stones'; box: Box } | null => {
+    ;(window as unknown as Record<string, unknown>).__rotDbg = { p, tool, vecSelBox, zoom, hp: vecSelBox ? rotHandlePos(vecSelBox) : null }
+    if (tool !== 'select') return null
+    const r = (HANDLE_PX / 2 + 5) / zoom
+    if (vecSelBox) { const q = rotHandlePos(vecSelBox); if (Math.hypot(p.x - q.x, p.y - q.y) <= r) return { kind: 'vec', box: vecSelBox } }
+    if (selBox) { const q = rotHandlePos(selBox); if (Math.hypot(p.x - q.x, p.y - q.y) <= r) return { kind: 'stones', box: selBox } }
+    return null
+  }, [tool, zoom, vecSelBox, selBox, rotHandlePos])
   // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
   // side(s) opposite `handle` stay where `box` had them.
   const regenElement = useCallback(
@@ -1328,7 +1450,7 @@ export default function App() {
     const last = lastTextRef.current
     const r = last && elementsRef.current[last.el]
     const alive = !!r && stonesRef.current.some((st) => st.el === last!.el)
-    const sameText = !!last && last.font === font && last.text === text && last.height === textHeight && last.spacing === letterSpacing
+    const sameText = !!last && last.font === font && last.text === text && last.height === textHeight && last.spacing === letterSpacing && last.bend === textBend
     if (!alive || !sameText || !r) { setPreviewLive(true); return }
     const t = window.setTimeout(() => {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -1362,14 +1484,105 @@ export default function App() {
     },
     [selectedEl, selBox, pushUndo, regenElement],
   )
+  // ---------- node tool (moved above onCanvasDown) ----------
+  // Inkscape's N tool on the flattened polyline model: vertices of the one
+  // selected cut-line object become draggable squares; double-click a
+  // segment inserts a vertex, Delete removes the selected ones.
+  const [nodeSel, setNodeSel] = useState<Set<string>>(new Set()) // `${pathIdx}:${ptIdx}`
+  const nodeSelRef = useRef(nodeSel)
+  nodeSelRef.current = nodeSel
+  const nodeDrag = useRef<{ vecId: number; p0: Pt; orig: VecItem; keys: Set<string>; moved: boolean } | null>(null)
+  useEffect(() => { setNodeSel(new Set()) }, [tool, selVecs])
+  // A closed ring stores its first point twice (start + closing point) —
+  // whatever happens to one end must happen to the other, or the loop opens.
+  const expandClosedPairs = (v: VecItem, keys: Set<string>): Set<string> => {
+    const out = new Set(keys)
+    v.base.forEach((pl, pi) => {
+      const n = pl.length
+      if (n > 2 && Math.hypot(pl[0].x - pl[n - 1].x, pl[0].y - pl[n - 1].y) < 1e-6) {
+        if (out.has(`${pi}:0`)) out.add(`${pi}:${n - 1}`)
+        if (out.has(`${pi}:${n - 1}`)) out.add(`${pi}:0`)
+      }
+    })
+    return out
+  }
+  // After node edits the base no longer starts at (0,0) — shift it back and
+  // fold the shift into x/y so boxes, exports and resize stay honest.
+  const renormalizeVec = (v: VecItem): VecItem => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const pl of v.base) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+    if (!isFinite(minX)) return v
+    return {
+      ...v,
+      base: v.base.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+      baseW: maxX - minX,
+      baseH: maxY - minY,
+      x: v.x + minX * v.s,
+      y: v.y + minY * v.s,
+    }
+  }
+  const nodeVec = useMemo(
+    () => (tool === 'node' && selVecs.size === 1 ? vectors.find((v) => selVecs.has(v.id)) ?? null : null),
+    [tool, selVecs, vectors],
+  )
+
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
       if (e.button !== 0) return
       e.preventDefault() // no text selection / native drag while moving stones
       const p = toMm(e)
+      if (tool === 'node') {
+        const slopN = Math.max(0.5, 8 / zoom)
+        if (nodeVec) {
+          const v = nodeVec
+          let hit: { pi: number; qi: number } | null = null
+          let hd = slopN
+          v.base.forEach((pl, pi) => pl.forEach((q, qi) => {
+            const d = Math.hypot(q.x * v.s + v.x - p.x, q.y * v.s + v.y - p.y)
+            if (d < hd) { hd = d; hit = { pi, qi } }
+          }))
+          if (hit) {
+            const { pi, qi } = hit
+            const key = `${pi}:${qi}`
+            if (e.shiftKey) {
+              setNodeSel((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n })
+              return
+            }
+            const keys = nodeSelRef.current.has(key) ? nodeSelRef.current : new Set([key])
+            setNodeSel(keys)
+            nodeDrag.current = {
+              vecId: v.id,
+              p0: p,
+              orig: { ...v, base: v.base.map((pl) => pl.map((q) => ({ ...q }))) },
+              keys: expandClosedPairs(v, keys),
+              moved: false,
+            }
+            if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
+            return
+          }
+        }
+        // no vertex under the cursor: pick which object to node-edit
+        let bestV: number | null = null
+        let bestD = slopN + 0.3
+        for (const vv of vectors) {
+          const d = distToPaths(vecPaths(vv), p)
+          if (d < bestD) { bestD = d; bestV = vv.id }
+        }
+        setSelection(new Set())
+        setSelVecs(bestV != null ? new Set([bestV]) : new Set())
+        return
+      }
       // Add mode gets NO hit slop: dense fills sit closer together than any
       // slop, so with slop every click in a gap "hit" a neighbour and erased
       // it — adding a hole between stones was impossible.
+      const rot = hitRotateHandle(p)
+      if (rot) {
+        pushUndo(stonesRef.current)
+        const center = { x: (rot.box.minX + rot.box.maxX) / 2, y: (rot.box.minY + rot.box.maxY) / 2 }
+        rotRef.current = { kind: rot.kind, center, start: Math.atan2(p.y - center.y, p.x - center.x), origV: vectors.map((v) => ({ ...v })), origS: stonesRef.current }
+        if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
+        return
+      }
       const handle = hitHandle(p)
       if (handle && selectedEl != null && selBox) {
         const r = elementsRef.current[selectedEl]
@@ -1452,7 +1665,7 @@ export default function App() {
             setSelVecs(new Set([bestV]))
             ids = [bestV]
           }
-          vecDrag.current = { ids, startX: p.x, startY: p.y, moved: false }
+          vecDrag.current = { ids, startX: p.x, startY: p.y, moved: false, orig: vectors.map((v) => ({ ...v })) }
           if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
           return
         }
@@ -1469,12 +1682,27 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, vecSelBox, selectedEl, selBox, pushUndo],
+    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec],
   )
-  const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean } | null>(null)
+  const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
+
 
   const onCanvasMove = useCallback(
     (e: React.MouseEvent) => {
+      ;(window as unknown as Record<string, unknown>).__mvDbg = ((window as unknown as Record<string, number>).__mvDbg ?? 0) + 1
+      const nd = nodeDrag.current
+      if (nd) {
+        const p = toMm(e)
+        const dx = p.x - nd.p0.x, dy = p.y - nd.p0.y
+        if (!nd.moved && Math.hypot(dx, dy) * zoom < 3) return
+        if (!nd.moved) { nd.moved = true; pushUndo(stonesRef.current) }
+        const o = nd.orig
+        setVectors((prev) => prev.map((v) =>
+          v.id === nd.vecId
+            ? { ...v, base: o.base.map((pl, pi) => pl.map((q, qi) => (nd.keys.has(`${pi}:${qi}`) ? { x: q.x + dx / o.s, y: q.y + dy / o.s } : q))) }
+            : v))
+        return
+      }
       if (marqueeRef.current && tool === 'select') {
         const p = toMm(e)
         marqueeRef.current.x1 = p.x
@@ -1512,6 +1740,16 @@ export default function App() {
         }, 90)
         return
       }
+      const rt = rotRef.current
+      if (rt) {
+        const p = toMm(e)
+        let delta = Math.atan2(p.y - rt.center.y, p.x - rt.center.x) - rt.start
+        if (e.shiftKey) delta = Math.round(delta / (Math.PI / 12)) * (Math.PI / 12)
+        if (rt.kind === 'vec') setVectors(rt.origV.map((v) => (selVecs.has(v.id) ? bakeRotateVec(v, rt.center, delta) : v)))
+        else setStones(rt.origS.map((st, i) => (selection.has(i) ? { ...st, ...rotatePt(st, rt.center, delta) } : st)))
+        setStatus(`Rotate ${((delta * 180) / Math.PI).toFixed(0)}°${e.shiftKey ? '' : ' — hold Shift to snap to 15°'}`)
+        return
+      }
       const vr = vecResize.current
       if (vr) {
         const p = toMm(e)
@@ -1537,9 +1775,20 @@ export default function App() {
         const p = toMm(e)
         const dx = p.x - vd.startX, dy = p.y - vd.startY
         if (!vd.moved && Math.hypot(dx, dy) * zoom < 3) return
-        if (!vd.moved) { vd.moved = true; pushUndo(stonesRef.current) }
-        vd.startX = p.x; vd.startY = p.y
-        setVectors((prev) => prev.map((v) => (vd.ids.includes(v.id) ? { ...v, x: v.x + dx, y: v.y + dy } : v)))
+        if (!vd.moved) {
+          vd.moved = true
+          pushUndo(stonesRef.current)
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const v of vd.orig) {
+            if (!vd.ids.includes(v.id)) continue
+            const b = vecBox(v)
+            minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY)
+            maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY)
+          }
+          buildSnapTargets(new Set(vd.ids), new Set(), { minX, minY, maxX, maxY })
+        }
+        const { dx: sdx, dy: sdy } = applySnap(dx, dy, e.altKey)
+        setVectors(vd.orig.map((v) => (vd.ids.includes(v.id) ? { ...v, x: v.x + sdx, y: v.y + sdy } : v)))
         return
       }
       if (!drag.current || tool !== 'select' || selection.size === 0) {
@@ -1547,9 +1796,10 @@ export default function App() {
         // resize arrow over a handle says "this will resize"
         if (tool === 'select' && svgRef.current && !drag.current) {
           const p = toMm(e)
-          const h = hitHandle(p) ?? hitVecHandle(p)
-          const over = !h && pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
-          svgRef.current.style.cursor = h ? handleCursor(h) : over ? 'grab' : ''
+          const rotH = hitRotateHandle(p)
+          const h = rotH ? null : hitHandle(p) ?? hitVecHandle(p)
+          const over = !rotH && !h && pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom)) >= 0
+          svgRef.current.style.cursor = rotH ? 'grab' : h ? handleCursor(h) : over ? 'grab' : ''
         }
         return
       }
@@ -1561,17 +1811,33 @@ export default function App() {
       if (!drag.current.moved) {
         drag.current.moved = true
         pushUndo(drag.current.orig)
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        for (const i of selection) {
+          const st = drag.current.orig[i]
+          if (!st) continue
+          const r = holeOf(st) / 2
+          minX = Math.min(minX, st.x - r); minY = Math.min(minY, st.y - r)
+          maxX = Math.max(maxX, st.x + r); maxY = Math.max(maxY, st.y + r)
+        }
+        buildSnapTargets(new Set(), new Set(selection), { minX, minY, maxX, maxY })
       }
       const orig = drag.current.orig
-      setStones(orig.map((s, i) => (selection.has(i) ? { ...s, x: s.x + dx, y: s.y + dy } : s)))
+      const { dx: sdx, dy: sdy } = applySnap(dx, dy, e.altKey)
+      setStones(orig.map((s, i) => (selection.has(i) ? { ...s, x: s.x + sdx, y: s.y + sdy } : s)))
     },
-    [toMm, tool, selection, selVecs, pushUndo, pickStone, zoom, hitHandle, hitVecHandle, regenElement],
+    [toMm, tool, selection, selVecs, pushUndo, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, regenElement, holeOf, buildSnapTargets, applySnap],
   )
 
   const onCanvasUp = useCallback(() => {
+    const nd = nodeDrag.current
+    nodeDrag.current = null
+    if (nd?.moved) setVectors((prev) => prev.map((v) => (v.id === nd.vecId ? renormalizeVec(v) : v)))
+    snapRef.current = null
+    setSnapLines((prev) => (prev.x != null || prev.y != null ? {} : prev))
     drag.current = null
     vecDrag.current = null
     vecResize.current = null
+    rotRef.current = null
     if (svgRef.current) svgRef.current.style.cursor = ''
     const rz = resizeRef.current
     if (rz) {
@@ -1612,7 +1878,7 @@ export default function App() {
   // Leaving the SVG used to cancel it mid-move; now the move continues until
   // the button comes up, wherever that is.
   useEffect(() => {
-    const up = () => { if (drag.current || marqueeRef.current || resizeRef.current || vecDrag.current) onCanvasUp() }
+    const up = () => { if (drag.current || marqueeRef.current || resizeRef.current || vecDrag.current || nodeDrag.current) onCanvasUp() }
     window.addEventListener('mouseup', up)
     return () => window.removeEventListener('mouseup', up)
   }, [onCanvasUp])
@@ -1623,6 +1889,38 @@ export default function App() {
   const onCanvasDoubleClick = useCallback(
     (e: React.MouseEvent) => {
       const p = toMm(e)
+      if (tool === 'node') {
+        // double-click a segment of the edited object: insert a vertex there
+        const v = nodeVec
+        if (!v) return
+        const slopN = Math.max(0.5, 8 / zoom)
+        let best: { pi: number; i: number; q: Pt } | null = null
+        let bestD = slopN
+        v.base.forEach((pl, pi) => {
+          for (let i = 1; i < pl.length; i++) {
+            const A = { x: pl[i - 1].x * v.s + v.x, y: pl[i - 1].y * v.s + v.y }
+            const B = { x: pl[i].x * v.s + v.x, y: pl[i].y * v.s + v.y }
+            const dx = B.x - A.x, dy = B.y - A.y
+            const len2 = dx * dx + dy * dy
+            const t = len2 ? Math.max(0, Math.min(1, ((p.x - A.x) * dx + (p.y - A.y) * dy) / len2)) : 0
+            const d = Math.hypot(p.x - (A.x + t * dx), p.y - (A.y + t * dy))
+            if (d < bestD) {
+              bestD = d
+              best = { pi, i, q: { x: pl[i - 1].x + t * (pl[i].x - pl[i - 1].x), y: pl[i - 1].y + t * (pl[i].y - pl[i - 1].y) } }
+            }
+          }
+        })
+        if (!best) return
+        const { pi, i, q } = best
+        pushUndo(stonesRef.current)
+        setVectors((prev) => prev.map((vv) =>
+          vv.id === v.id
+            ? { ...vv, base: vv.base.map((pl, k) => (k === pi ? [...pl.slice(0, i), q, ...pl.slice(i)] : pl)) }
+            : vv))
+        setNodeSel(new Set([`${pi}:${i}`]))
+        setStatus('Node added — drag it, Delete removes it')
+        return
+      }
       const start = pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom))
       if (start < 0) return
       // element-tagged designs select as a unit — free-moving layers
@@ -1653,13 +1951,33 @@ export default function App() {
       setSelection(inSet)
       setStatus(`Selected design: ${inSet.size} stones — Del removes it`)
     },
-    [toMm, stones, holeOf, gap, pickStone, zoom],
+    [toMm, stones, holeOf, gap, pickStone, zoom, tool, nodeVec, pushUndo],
   )
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && nodeSel.size && nodeVec) {
+        // remove the selected nodes, not the whole object — the node tool's
+        // Delete must win over the object-level delete below
+        const v = nodeVec
+        const keys = expandClosedPairs(v, nodeSel)
+        mutateVectors((prev) => prev.flatMap((vv) => {
+          if (vv.id !== v.id) return [vv]
+          const base: Pt[][] = []
+          vv.base.forEach((pl, pi) => {
+            const n = pl.length
+            const closed = n > 3 && Math.hypot(pl[0].x - pl[n - 1].x, pl[0].y - pl[n - 1].y) < 1e-6
+            let pts = pl.filter((_, qi) => !keys.has(`${pi}:${qi}`))
+            if (closed && keys.has(`${pi}:0`) && pts.length >= 3) pts = [...pts, { ...pts[0] }]
+            if (pts.length >= (closed ? 4 : 2)) base.push(pts)
+          })
+          return base.length ? [renormalizeVec({ ...vv, base })] : []
+        }))
+        setNodeSel(new Set())
+        return
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection.size) {
         mutate((prev) => prev.filter((_, i) => !selection.has(i)))
         setSelection(new Set())
@@ -1694,10 +2012,13 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomAbout(zoomRef.current / 1.25) }
       if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); fitSheet() }
       if (!e.metaKey && !e.ctrlKey && (e.key === 'f' || e.key === 'F')) fitDesign()
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'v' || e.key === 'V')) setTool('select')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N')) setTool('node')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) setTool('add')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors])
+  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -2152,6 +2473,40 @@ export default function App() {
     setSelVecs(new Set([id]))
     setStatus(`${names[op]}: ${result.length} cut line${result.length === 1 ? '' : 's'}`)
   }, [vectors, selVecs, mutateVectors])
+  // Offset / inset selected cut-line objects (Inkscape ⌘( / ⌘)): grow or
+  // shrink each object's boundary by `offsetMm`. Each object offsets
+  // independently and is replaced in place; Undo restores the original.
+  const [offsetMm, setOffsetMm] = useState(2)
+  const applyOffset = useCallback((dir: 1 | -1) => {
+    const ops = vectors.filter((v) => selVecs.has(v.id))
+    if (!ops.length) { setStatus('Select a cut-line object first'); return }
+    const d = Math.abs(offsetMm) * dir
+    if (!d) return
+    const replaced = new Map<number, VecItem>()
+    let gone = 0
+    for (const v of ops) {
+      const result = offsetPaths(vecPaths(v), d)
+      if (!result.length) { gone++; continue }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const pl of result) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+      replaced.set(v.id, {
+        ...v,
+        base: result.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+        baseW: maxX - minX,
+        baseH: maxY - minY,
+        x: minX,
+        y: minY,
+        s: 1,
+      })
+    }
+    if (!replaced.size) { setStatus(`Inset by ${Math.abs(d)} mm swallows the whole shape — use a smaller amount`); return }
+    mutateVectors((prev) => prev.map((v) => replaced.get(v.id) ?? v))
+    setStatus(
+      `${dir > 0 ? 'Grew' : 'Shrank'} ${replaced.size} object${replaced.size === 1 ? '' : 's'} by ${Math.abs(d)} mm` +
+      (gone ? ` · ${gone} skipped (inset swallowed the shape)` : ''),
+    )
+  }, [vectors, selVecs, offsetMm, mutateVectors])
+
   // Ungroup: split selected cut-line object(s) into separate objects — one
   // per letter/shape. A contour nested inside another is a hole and stays
   // with its parent; disjoint outer contours whose x-ranges overlap (the dot
@@ -2168,40 +2523,10 @@ export default function App() {
       {
         const paths = vecPaths(v)
         if (paths.length < 2) continue
-        const bb = paths.map((c) => {
-          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-          for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
-          return { minX, minY, maxX, maxY }
-        })
-        // holes attach to the smallest contour that contains them
-        const parent = paths.map((c, i) => {
-          let best = -1, bestArea = Infinity
-          for (let j = 0; j < paths.length; j++) {
-            if (i === j) continue
-            const inBox = bb[i].minX >= bb[j].minX && bb[i].maxX <= bb[j].maxX && bb[i].minY >= bb[j].minY && bb[i].maxY <= bb[j].maxY
-            if (inBox && pointInPoly(paths[j], c[0])) {
-              const area = (bb[j].maxX - bb[j].minX) * (bb[j].maxY - bb[j].minY)
-              if (area < bestArea) { bestArea = area; best = j }
-            }
-          }
-          return best
-        })
-        const topOf = (i: number): number => (parent[i] === -1 ? i : topOf(parent[i]))
-        const tops = [...new Set(paths.map((_, i) => topOf(i)))]
-        // cluster top-level contours by x-overlap (transitive chain)
-        const sorted = tops.sort((a, b) => bb[a].minX - bb[b].minX)
-        const groups: number[][] = []
-        let cur: number[] = []
-        let curMax = -Infinity
-        for (const t of sorted) {
-          if (!cur.length || bb[t].minX <= curMax + 0.01) { cur.push(t); curMax = Math.max(curMax, bb[t].maxX) }
-          else { groups.push(cur); cur = [t]; curMax = bb[t].maxX }
-        }
-        if (cur.length) groups.push(cur)
+        const groups = splitContoursIntoLetters(paths)
         if (groups.length < 2) continue
         const pieces: VecItem[] = groups.map((g, k) => {
-          const set = new Set(g)
-          const cs = paths.filter((_, i) => set.has(topOf(i)))
+          const cs = g.map((i) => paths[i])
           let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
           for (const c of cs) for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
           const id = vecSeq.current++
@@ -2226,6 +2551,54 @@ export default function App() {
     setSelVecs(new Set(newIds))
     setStatus(`Ungrouped into ${newIds.length} objects`)
   }, [vectors, selVecs, mutateVectors])
+
+  // Ungroup a stone text design into per-letter ELEMENTS: each letter gets
+  // its own element id and its own recipe slice, so it moves and resizes
+  // independently (double-click a letter to grab it).
+  const ungroupElement = useCallback(() => {
+    const el = selectedEl
+    if (el == null) { setStatus('Double-click a stone design first, then ungroup it'); return }
+    const r = elementsRef.current[el]
+    if (!r) { setStatus('This design has no stored outline to split'); return }
+    const groups = splitContoursIntoLetters(r.contours)
+    if (groups.length < 2) { setStatus('Nothing to ungroup — that design is a single letter'); return }
+    const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * r.sx, y: q.y * r.sy })))
+    let sMinX = Infinity, sMinY = Infinity
+    for (const c of scaled) for (const q of c) { sMinX = Math.min(sMinX, q.x); sMinY = Math.min(sMinY, q.y) }
+    let bMinX = Infinity, bMinY = Infinity
+    for (const st of stones) if (st.el === el) { bMinX = Math.min(bMinX, st.x); bMinY = Math.min(bMinY, st.y) }
+    const tx = bMinX - sMinX, ty = bMinY - sMinY // recipe space → board space
+    const boxes = groups.map((g) => {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const i of g) for (const q of scaled[i]) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+      return { minX: minX + tx, maxX: maxX + tx, minY: minY + ty, maxY: maxY + ty }
+    })
+    const newEls = groups.map(() => elSeq.current++)
+    pushUndo(stonesRef.current)
+    const next = stones.map((st) => {
+      if (st.el !== el) return st
+      let best = 0, bestD = Infinity
+      boxes.forEach((b, k) => {
+        const inX = st.x >= b.minX - 2 && st.x <= b.maxX + 2
+        const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2
+        const d = (inX ? 0 : 1e6) + Math.hypot(st.x - cx, st.y - cy)
+        if (d < bestD) { bestD = d; best = k }
+      })
+      return { ...st, el: newEls[best] }
+    })
+    stonesRef.current = next
+    setStones(next)
+    setElements((prev) => {
+      const out = { ...prev }
+      delete out[el]
+      groups.forEach((g, k) => {
+        out[newEls[k]] = { contours: normaliseContours(g.map((i) => r.contours[i])), mode: r.mode, wholeWord: false, sx: r.sx, sy: r.sy }
+      })
+      return out
+    })
+    setSelection(new Set())
+    setStatus(`Ungrouped into ${groups.length} letter elements — double-click a letter to select it`)
+  }, [selectedEl, stones, pushUndo])
 
   const alignCount = alignObjs.length
 
@@ -2369,6 +2742,10 @@ export default function App() {
     { label: 'Object', items: [
       { label: 'Select whole design', disabled: !hasSel, onClick: expandToDesigns },
       { label: 'Resize design…', disabled: selectedEl == null, onClick: () => openSection('Edit', 'input[type=number]') },
+      { label: 'Ungroup element — split into letters', disabled: selectedEl == null, onClick: ungroupElement },
+      'sep',
+      { label: 'Rotate 90° CW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(90) },
+      { label: 'Rotate 90° CCW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(-90) },
       'sep',
       { label: 'Move to origin corner', disabled: !hasStones, onClick: () => placeFromOrigin(0.5, 0.5) },
       { label: 'Center on board', disabled: !hasStones, onClick: centerOnBoard },
@@ -2388,6 +2765,9 @@ export default function App() {
       { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => pathfinder('difference') },
       { label: 'Intersect', disabled: selVecs.size < 2, onClick: () => pathfinder('intersection') },
       { label: 'Exclude', disabled: selVecs.size < 2, onClick: () => pathfinder('xor') },
+      'sep',
+      { label: `Offset path — grow ${offsetMm} mm`, disabled: !selVecs.size, onClick: () => applyOffset(1) },
+      { label: `Inset path — shrink ${offsetMm} mm`, disabled: !selVecs.size, onClick: () => applyOffset(-1) },
     ] },
     { label: 'Type', items: [
       { label: 'Add text…', onClick: () => openSection('Text', 'input') },
@@ -2416,8 +2796,11 @@ export default function App() {
       { label: 'Fit sheet', shortcut: '⌘0', onClick: fitSheet },
       { label: 'Actual size', shortcut: '1:1', onClick: () => zoomAbout(PX_PER_MM_100) },
       'sep',
-      { label: 'Select / move tool', checked: tool === 'select', onClick: () => setTool('select') },
-      { label: 'Add / erase tool', checked: tool === 'add', onClick: () => setTool('add') },
+      { label: 'Snap to objects & board (Alt drags free)', checked: snapOn, onClick: () => setSnapOn((o) => !o) },
+      'sep',
+      { label: 'Select / move tool', shortcut: 'V', checked: tool === 'select', onClick: () => setTool('select') },
+      { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => setTool('add') },
+      { label: 'Node tool — edit path points', shortcut: 'N', checked: tool === 'node', onClick: () => setTool('node') },
     ] },
     { label: 'Window', items: sectionItems.map((t) => ({ label: t, onClick: () => openSection(t) })) },
     { label: 'Help', items: [
@@ -2470,6 +2853,8 @@ export default function App() {
             <tr><td>⌘-wheel / pinch</td><td>zoom at the cursor · plain wheel pans</td></tr>
             <tr><td>F</td><td>fit design</td></tr>
             <tr><td>⌘0</td><td>fit sheet</td></tr>
+            <tr><td>V / A / N</td><td>Select · Add/erase · Node tool</td></tr>
+            <tr><td>Alt-drag</td><td>move without snapping</td></tr>
           </tbody></table>
           <button onClick={() => setShowShortcuts(false)}>Close</button>
         </div>
@@ -2640,6 +3025,15 @@ export default function App() {
               <input type="number" min={0} max={20} value={letterSpacing} onChange={(e) => setLetterSpacing(+e.target.value)} />
             </label>
           </div>
+          <label>Arc bend {textBend ? `${textBend}°` : '— straight'}
+            <input type="range" min={-180} max={180} step={5} value={textBend} onChange={(e) => setTextBend(+e.target.value)} />
+          </label>
+          {textBend !== 0 && (
+            <div className="toolrow">
+              <button onClick={() => setTextBend(0)}>Straighten</button>
+              <span className="hint" style={{ alignSelf: 'center' }}>letters stay rigid — rotated along the arc, never warped</span>
+            </div>
+          )}
           {textPreview && (
             <div className="sizeinfo">
               Size: <b>{(textPreview.widthMm / 25.4).toFixed(2)}″ × {(textHeight / 25.4).toFixed(2)}″</b>
@@ -3014,6 +3408,16 @@ export default function App() {
             <button className="iconbtn" title="Exclude (overlap removed)" disabled={selVecs.size < 2} onClick={() => pathfinder('xor')}><AlignIcon kind="exclude" /></button>
           </div>
           <div className="iconlabels"><span>Unite</span><span>Minus front</span><span>Intersect</span><span>Exclude</span></div>
+          <p className="hint" style={{ marginTop: 10 }}>Offset — grow or shrink the selected cut-line objects' boundaries (an echo outline, a template clearance ring).</p>
+          <div className="grid2">
+            <label>Offset (mm)
+              <input type="number" min={0.1} max={50} step={0.5} value={offsetMm} onChange={(e) => setOffsetMm(Math.max(0.1, +e.target.value || 0.1))} />
+            </label>
+            <div className="toolrow" style={{ alignSelf: 'end' }}>
+              <button disabled={!selVecs.size} onClick={() => applyOffset(1)}>Grow</button>
+              <button disabled={!selVecs.size} onClick={() => applyOffset(-1)}>Shrink</button>
+            </div>
+          </div>
           <button style={{ marginTop: 8 }} disabled={!selVecs.size} onClick={ungroup}>Ungroup — split into letters</button>
           <p className="hint">Splits a text cut-line object into one object per letter (holes stay with their letter), so you can move or restyle letters independently.</p>
         </Section>
@@ -3022,11 +3426,14 @@ export default function App() {
           <div className="toolrow">
             <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
             <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')}>Add / erase</button>
+            <button className={tool === 'node' ? 'active' : ''} onClick={() => setTool('node')}>Nodes</button>
           </div>
           <p className="hint">
             {tool === 'select'
               ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group. Double-click a design to grab all of it: drag its handles to resize (holes stay the same size, the count changes). Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
-              : 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'}
+              : tool === 'add'
+                ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
+                : 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'}
           </p>
           {selectedEl != null && selBox && (
             <div className="grid2" key={`sz-${selectedEl}-${selBox.minX.toFixed(1)}-${(selBox.maxX - selBox.minX).toFixed(1)}`}>
@@ -3429,6 +3836,12 @@ export default function App() {
               pointerEvents="none"
             />
           )}
+          {(snapLines.x != null || snapLines.y != null) && (
+            <g pointerEvents="none">
+              {snapLines.x != null && <line x1={snapLines.x * zoom} y1={0} x2={snapLines.x * zoom} y2={canvasH * zoom} stroke="#ff5f9e" strokeWidth={1} strokeDasharray="5 4" />}
+              {snapLines.y != null && <line x1={0} y1={snapLines.y * zoom} x2={canvasW * zoom} y2={snapLines.y * zoom} stroke="#ff5f9e" strokeWidth={1} strokeDasharray="5 4" />}
+            </g>
+          )}
           {vectors.map((v) => (
             <path
               key={v.id}
@@ -3441,9 +3854,34 @@ export default function App() {
               pointerEvents="none"
             />
           ))}
+          {nodeVec && (() => {
+            const v = nodeVec
+            const r = 3.5
+            return (
+              <g pointerEvents="none">
+                {v.base.map((pl, pi) => pl.map((q, qi) => {
+                  const key = `${pi}:${qi}`
+                  const sel = nodeSel.has(key)
+                  return (
+                    <rect
+                      key={key}
+                      x={(q.x * v.s + v.x) * zoom - r}
+                      y={(q.y * v.s + v.y) * zoom - r}
+                      width={r * 2}
+                      height={r * 2}
+                      fill={sel ? '#f0b95e' : '#12151c'}
+                      stroke={sel ? '#12151c' : '#8fd3ff'}
+                      strokeWidth={1.2}
+                    />
+                  )
+                }))}
+              </g>
+            )
+          })()}
           {tool === 'select' && vecSelBox && (() => {
             const b = vecSelBox
             const w = b.maxX - b.minX, h = b.maxY - b.minY
+            const rq = rotHandlePos(b)
             return (
               <g pointerEvents="none">
                 <rect x={b.minX * zoom} y={b.minY * zoom} width={w * zoom} height={h * zoom} fill="none" stroke="#f0b95e" strokeWidth={1.5} strokeDasharray="6 3" />
@@ -3451,7 +3889,9 @@ export default function App() {
                   const q = handlePos(b, hd)
                   return <rect key={hd} x={q.x * zoom - HANDLE_PX / 2} y={q.y * zoom - HANDLE_PX / 2} width={HANDLE_PX} height={HANDLE_PX} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
                 })}
-                <text x={b.minX * zoom} y={b.minY * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
+                <line x1={((b.minX + b.maxX) / 2) * zoom} y1={b.minY * zoom} x2={rq.x * zoom} y2={rq.y * zoom} stroke="#f0b95e" strokeWidth={1.5} />
+                <circle cx={rq.x * zoom} cy={rq.y * zoom} r={HANDLE_PX / 2 + 1} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
+                <text x={b.minX * zoom} y={rq.y * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
                   {w.toFixed(0)} × {h.toFixed(0)} mm · {(w / 25.4).toFixed(2)}″ × {(h / 25.4).toFixed(2)}″
                 </text>
               </g>
@@ -3460,6 +3900,7 @@ export default function App() {
           {tool === 'select' && selBox && (() => {
             const b = resizeBox ?? selBox
             const w = b.maxX - b.minX, h = b.maxY - b.minY
+            const rq = rotHandlePos(b)
             return (
               <g pointerEvents="none">
                 <rect x={b.minX * zoom} y={b.minY * zoom} width={w * zoom} height={h * zoom} fill="none" stroke="#f0b95e" strokeWidth={1.5} strokeDasharray="6 3" />
@@ -3467,7 +3908,9 @@ export default function App() {
                   const q = handlePos(b, hd)
                   return <rect key={hd} x={q.x * zoom - HANDLE_PX / 2} y={q.y * zoom - HANDLE_PX / 2} width={HANDLE_PX} height={HANDLE_PX} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
                 })}
-                <text x={b.minX * zoom} y={b.minY * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
+                <line x1={((b.minX + b.maxX) / 2) * zoom} y1={b.minY * zoom} x2={rq.x * zoom} y2={rq.y * zoom} stroke="#f0b95e" strokeWidth={1.5} />
+                <circle cx={rq.x * zoom} cy={rq.y * zoom} r={HANDLE_PX / 2 + 1} fill="#f0b95e" stroke="#12151c" strokeWidth={1.5} />
+                <text x={b.minX * zoom} y={rq.y * zoom - 8} fill="#f0b95e" fontSize={12} fontWeight={700}>
                   {w.toFixed(0)} × {h.toFixed(0)} mm · {(w / 25.4).toFixed(2)}″ × {(h / 25.4).toFixed(2)}″
                 </text>
               </g>
@@ -3498,6 +3941,8 @@ export default function App() {
             ctxMenu.kind === 'vec'
               ? [
                   { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: () => run(ungroup) },
+                  { label: 'Rotate 90° CW', onClick: () => run(() => rotateSelection(90)) },
+                  { label: 'Rotate 90° CCW', onClick: () => run(() => rotateSelection(-90)) },
                   'sep',
                   { label: 'Unite', disabled: !selVecs.size, onClick: () => run(() => pathfinder('union')) },
                   { label: 'Minus front', disabled: selVecs.size < 2, onClick: () => run(() => pathfinder('difference')) },
@@ -3510,6 +3955,9 @@ export default function App() {
                 ? [
                     { label: 'Select whole design', onClick: () => run(expandToDesigns) },
                     { label: 'Resize design…', disabled: selectedEl == null, onClick: () => run(() => openSection('Edit', 'input[type=number]')) },
+                    { label: 'Ungroup element — split into letters', disabled: selectedEl == null, onClick: () => run(ungroupElement) },
+                    { label: 'Rotate 90° CW', onClick: () => run(() => rotateSelection(90)) },
+                    { label: 'Rotate 90° CCW', onClick: () => run(() => rotateSelection(-90)) },
                     'sep',
                     { label: `Set selected to ${curSize}`, onClick: () => run(() => mutate((prev) => prev.map((st, i) => (selection.has(i) ? { ...st, size: curSize } : st)))) },
                     { label: 'Delete selected stones', onClick: () => run(() => { mutate((prev) => prev.filter((_, i) => !selection.has(i))); setSelection(new Set()) }) },

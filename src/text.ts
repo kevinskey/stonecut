@@ -1,5 +1,6 @@
 import opentype from 'opentype.js'
 import type { Pt } from './model'
+import { splitContoursIntoLetters } from './contours'
 
 // Convert a text string to flattened closed contours in mm.
 // heightMm is the cap height target (measured from the rendered bbox).
@@ -25,6 +26,53 @@ export function textToContours(
     c.map((p) => ({ x: (p.x - minX) * scale, y: (p.y - minY) * scale })),
   )
   return { contours: out, widthMm: (maxX - minX) * scale }
+}
+
+// Bend text contours along a circular arc, Inkscape text-on-path style:
+// each LETTER is placed rigidly (rotated, not warped) with its baseline
+// anchor on a circle whose sweep across the whole word is bendDeg degrees.
+// Positive bend arches up (rainbow), negative bends down (smile). The
+// result is renormalised to a (0,0) top-left corner.
+export function arcContours(contours: Pt[][], bendDeg: number): Pt[][] {
+  if (!contours.length || Math.abs(bendDeg) < 0.5) return contours
+  // a frown is an arch of the vertically mirrored text, mirrored back —
+  // one set of signed formulas provably matches the arch-up case
+  if (bendDeg < 0) {
+    let minY = Infinity, maxY = -Infinity
+    for (const c of contours) for (const q of c) { minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y) }
+    const arched = arcContours(contours.map((c) => c.map((q) => ({ x: q.x, y: minY + maxY - q.y }))), -bendDeg)
+    let aMinY = Infinity, aMaxY = -Infinity
+    for (const c of arched) for (const q of c) { aMinY = Math.min(aMinY, q.y); aMaxY = Math.max(aMaxY, q.y) }
+    return arched.map((c) => c.map((q) => ({ x: q.x, y: aMinY + aMaxY - q.y })))
+  }
+  let minX = Infinity, maxX = -Infinity, baseline = -Infinity
+  for (const c of contours) for (const q of c) { minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); baseline = Math.max(baseline, q.y) }
+  const W = maxX - minX
+  if (W <= 0) return contours
+  const rad = (Math.min(330, bendDeg) * Math.PI) / 180
+  const R = W / rad
+  const cxAll = (minX + maxX) / 2
+  // circle whose TOP passes through the baseline centre (y grows downward)
+  const C = { x: cxAll, y: baseline + R }
+  const groups = splitContoursIntoLetters(contours)
+  const out: Pt[][] = contours.map(() => [])
+  for (const g of groups) {
+    let gMinX = Infinity, gMaxX = -Infinity
+    for (const i of g) for (const q of contours[i]) { gMinX = Math.min(gMinX, q.x); gMaxX = Math.max(gMaxX, q.x) }
+    const cx = (gMinX + gMaxX) / 2
+    const theta = ((cx - cxAll) / W) * rad
+    const ax = C.x + R * Math.sin(theta)
+    const ay = C.y - R * Math.cos(theta)
+    const cos = Math.cos(theta), sin = Math.sin(theta)
+    for (const i of g)
+      out[i] = contours[i].map((q) => {
+        const dx = q.x - cx, dy = q.y - baseline
+        return { x: ax + dx * cos - dy * sin, y: ay + dx * sin + dy * cos }
+      })
+  }
+  let nMinX = Infinity, nMinY = Infinity
+  for (const c of out) for (const q of c) { nMinX = Math.min(nMinX, q.x); nMinY = Math.min(nMinY, q.y) }
+  return out.map((c) => c.map((q) => ({ x: q.x - nMinX, y: q.y - nMinY })))
 }
 
 // font.getPath runs the text through GSUB shaping (ligatures, ccmp), and
