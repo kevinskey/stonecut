@@ -438,6 +438,72 @@ export interface ImageAnalysis {
   strokeMax: number // p96 stroke width, sample px
   blobby: boolean // a real solid blob exists (fill is wanted) — see hasBlob
   sampleW: number // sample bitmap width the strokePx was measured at
+  closeGain: number // fraction of design pixels ADDED by a pitch-scaled closing — fur/hatching fingerprint
+  closeMerge: number // fraction of components LOST to that closing — letter-bridging fingerprint
+}
+
+// How much would Bold's closing change this art? Run the same closing at
+// 0.45x pitch on the analysis sample and measure pixels gained relative
+// to the design. Fur hatching welds shut (big gain); text and solid
+// logos are untouched (near zero). Measuring the operation itself beats
+// guessing from stroke statistics — fur wedges are ATTACHED to the
+// outline, so island-counting and decile spread both failed to separate
+// mascot art from serif text.
+function countComponents(bin: Uint8Array, w: number, h: number, minPx = 4): number {
+  const seen = new Uint8Array(w * h)
+  const stack: number[] = []
+  let n = 0
+  for (let s0 = 0; s0 < w * h; s0++) {
+    if (!bin[s0] || seen[s0]) continue
+    let area = 0
+    stack.length = 0
+    stack.push(s0)
+    seen[s0] = 1
+    while (stack.length) {
+      const i = stack.pop()!
+      area++
+      const x = i % w, y = (i - x) / w
+      if (x > 0 && bin[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1) }
+      if (x < w - 1 && bin[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1) }
+      if (y > 0 && bin[i - w] && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w) }
+      if (y < h - 1 && bin[i + w] && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w) }
+    }
+    if (area >= minPx) n++
+  }
+  return n
+}
+
+function closingGain(bin: Uint8Array, w: number, h: number, k: number): { gain: number; merge: number } {
+  if (k < 1) return { gain: 0, merge: 0 }
+  const pass = (src: Uint8Array, horiz: boolean, dilate: boolean) => {
+    const out = new Uint8Array(w * h)
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x
+        let v = dilate ? 0 : 1
+        for (let d = -k; d <= k; d++) {
+          const xx = horiz ? x + d : x
+          const yy = horiz ? y : y + d
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) { if (!dilate) { v = 0; break } continue }
+          const s = src[yy * w + xx]
+          if (dilate ? s : !s) { v = dilate ? 1 : 0; break }
+        }
+        out[i] = v
+      }
+    return out
+  }
+  let b = pass(bin, true, true)
+  b = pass(b, false, true)
+  b = pass(b, true, false)
+  b = pass(b, false, false)
+  let before = 0, gained = 0
+  for (let i = 0; i < w * h; i++) { if (bin[i]) before++; else if (b[i]) gained++ }
+  const c0 = countComponents(bin, w, h)
+  const c1 = countComponents(b, w, h)
+  return {
+    gain: before ? gained / before : 0,
+    merge: c0 > 1 ? Math.max(0, (c0 - c1) / c0) : 0,
+  }
 }
 
 // Typical stroke width of the design under the chosen settings: p90 of the
@@ -593,7 +659,13 @@ export async function analyzeImage(
   const withBlobby = (st: ReturnType<typeof strokeStats>) => {
     const mmPerPx = imgWidthMm / w
     const p50 = ((st.strokeDeciles[4] ?? st.strokePx) * mmPerPx) || 0
-    return { ...st, blobby: hasBlob(st.bin, st.dt, w, h, mmPerPx, pitchMm, p50) }
+    const cg = closingGain(st.bin, w, h, Math.round((0.45 * pitchMm) / mmPerPx))
+    return {
+      ...st,
+      blobby: hasBlob(st.bin, st.dt, w, h, mmPerPx, pitchMm, p50),
+      closeGain: cg.gain,
+      closeMerge: cg.merge,
+    }
   }
   for (let i = 0; i < w * h; i++) {
     if (data[i * 4 + 3] < 64) transparent++

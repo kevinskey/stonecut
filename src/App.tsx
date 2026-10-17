@@ -3152,12 +3152,28 @@ export default function App() {
       setImgAlphaKey(a.alphaKey)
       setImgLinework(a.linework)
       applyStrokeStyle(a)
+      // Auto Detail. Bold (weld fine detail) when BOTH hold:
+      //  - closing would actually add material (there is sub-pitch detail
+      //    to weld — closeGain probes the real operation on the sample);
+      //  - stroke widths are MIXED (p90/p50 >= 2): wide bodies plus a thin
+      //    tail is the mascot-fur fingerprint. Uniformly thin art (serif,
+      //    script) centerlines fine as drawn, and welding only bridges
+      //    letters. Calibrated: wildcat gain .44 ratio 2.5 -> Bold;
+      //    serif gain .62 ratio 1.5 -> Fine; bold logo gain .03 -> Fine.
+      const p50 = a.strokeDeciles?.[4] ?? 0
+      const ratio = p50 > 0 ? (a.strokeDeciles?.[8] ?? p50) / p50 : 1
+      const autoDetail: typeof imgDetail =
+        a.closeGain > 0.3 && ratio >= 2 ? 'bold'
+        : a.closeGain > 0.15 && ratio >= 2 ? 'smooth'
+        : 'fine'
+      setImgDetail(autoDetail)
       const sw = suggestWidth(a)
+      const detailNote = autoDetail !== 'fine' ? ` · Detail: ${autoDetail} (fine texture welded — the chips override)` : ''
       if (sw && Math.abs(sw - imgWidth) > 10) {
         setImgWidth(sw)
-        setStatus(`${f.name} — ${a.note} · sized to ${sw} mm (${(sw / 25.4).toFixed(1)}″) so the detail holds ${curSize} stones`)
+        setStatus(`${f.name} — ${a.note} · sized to ${sw} mm (${(sw / 25.4).toFixed(1)}″) so the detail holds ${curSize} stones${detailNote}`)
       } else {
-        setStatus(`${f.name} — ${a.note}`)
+        setStatus(`${f.name} — ${a.note}${detailNote}`)
       }
     } catch (e) {
       setStatus(`Could not read ${f.name}${e instanceof Error && e.message ? ` — ${e.message}` : ''}`)
