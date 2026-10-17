@@ -2130,8 +2130,12 @@ export default function App() {
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
 
 
-  const onCanvasMove = useCallback(
-    (e: React.MouseEvent) => {
+  // The actual move logic. Called at most once per animation frame — raw
+  // mousemove arrives faster than a heavy frame can render (a 5k-point
+  // traced mascot paints ~200ms), and processing every event queued the
+  // backlog into a freeze. onCanvasMove below coalesces to the latest.
+  const processCanvasMove = useCallback(
+    (e: { clientX: number; clientY: number; altKey: boolean; shiftKey: boolean }) => {
       ;(window as unknown as Record<string, unknown>).__mvDbg = ((window as unknown as Record<string, number>).__mvDbg ?? 0) + 1
       const pd = previewDragRef.current
       if (pd) {
@@ -2278,6 +2282,16 @@ export default function App() {
     },
     [toMm, tool, selection, selVecs, pushUndo, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, regenElement, holeOf, buildSnapTargets, applySnap],
   )
+  const moveEvtRef = useRef<{ clientX: number; clientY: number; altKey: boolean; shiftKey: boolean } | null>(null)
+  const moveRafRef = useRef<number | null>(null)
+  const onCanvasMove = useCallback((e: React.MouseEvent) => {
+    moveEvtRef.current = { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey, shiftKey: e.shiftKey }
+    if (moveRafRef.current != null) return
+    moveRafRef.current = requestAnimationFrame(() => {
+      moveRafRef.current = null
+      if (moveEvtRef.current) processCanvasMove(moveEvtRef.current)
+    })
+  }, [processCanvasMove])
 
   const onCanvasUp = useCallback(() => {
     previewDragRef.current = null
@@ -2873,8 +2887,25 @@ export default function App() {
   }, [duplicateSelection, copySelection, pasteClipboard])
 
   const sizeKeys = Object.keys(sizes)
-  const stoneColor: Record<string, string> = {}
-  sizeKeys.forEach((k, i) => { stoneColor[k] = `hsl(${(i * 47) % 360} 70% 60%)` })
+  // memoised: a fresh object every render made the stone-canvas effect
+  // repaint ALL stones on every unrelated state change
+  const stoneColor = useMemo(() => {
+    const m: Record<string, string> = {}
+    sizeKeys.forEach((k, i) => { m[k] = `hsl(${(i * 47) % 360} 70% 60%)` })
+    return m
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sizeKeys.join(',')])
+
+  // Cached path data per cut-line object. Rebuilding the d string from a
+  // 30 000-point traced mascot on EVERY render (every drag mousemove) froze
+  // the app; the base array is immutable, so the string is cached by
+  // reference and the browser skips re-parsing an unchanged attribute.
+  const vecDCache = useRef(new WeakMap<Pt[][], string>())
+  const vecD = useCallback((base: Pt[][]): string => {
+    let d = vecDCache.current.get(base)
+    if (!d) { d = pathsToD(base); vecDCache.current.set(base, d) }
+    return d
+  }, [])
 
   // workspace always fills the viewport; grows past it when the design does
   const previewW = previewLive && textPreview ? textPreview.widthMm + 30 : 0
@@ -5048,12 +5079,11 @@ export default function App() {
           {vectors.map((v) => (
             <path
               key={v.id}
-              d={pathsToD(v.base)}
+              d={vecD(v.base)}
               transform={`translate(${v.x * zoom} ${v.y * zoom}) scale(${v.s * zoom})`}
               fill="none"
               stroke={selVecs.has(v.id) ? '#f0b95e' : '#8fd3ff'}
-              strokeWidth={selVecs.has(v.id) ? 2 : 1.5}
-              vectorEffect="non-scaling-stroke"
+              strokeWidth={(selVecs.has(v.id) ? 2 : 1.5) / (v.s * zoom)}
               pointerEvents="none"
             />
           ))}
@@ -5074,6 +5104,16 @@ export default function App() {
           })()}
           {nodeVec && (() => {
             const v = nodeVec
+            const total = v.base.reduce((n, pl) => n + pl.length, 0)
+            // a traced mascot can carry 30k+ vertices — that many DOM rects
+            // kills the tab; node-edit stays for hand-sized paths
+            if (total > 4000) {
+              return (
+                <text x={(v.x + (v.baseW * v.s) / 2) * zoom} y={(v.y - 3) * zoom} fill="#f0b95e" fontSize={12} textAnchor="middle" pointerEvents="none">
+                  {total.toLocaleString()} points — too many to node-edit; use Offset / Pathfinder, or simplify the trace
+                </text>
+              )
+            }
             const r = 3.5
             return (
               <g pointerEvents="none">
