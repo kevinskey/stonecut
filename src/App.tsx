@@ -211,7 +211,7 @@ export default function App() {
   const [strokePolicy, setStrokePolicy] = useState<'auto' | 'walls'>('auto')
   const [uniformRhythm, setUniformRhythm] = useState(true)
   const [canEcho, setCanEcho] = useState(true)
-  const [fillStyle, setFillStyle] = useState<'grid' | 'brick'>('brick')
+  const [fillStyle, setFillStyle] = useState<'grid' | 'brick' | 'concentric' | 'radial'>('brick')
   const [fillSize, setFillSize] = useState('SS6')
   const [fillColor, setFillColor] = useState('#7ec8e3')
   const [outlineColor, setOutlineColor] = useState('#85d653')
@@ -898,7 +898,7 @@ export default function App() {
           // between the outline and the first lattice line.
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-            const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+            const f = fillByGlyph(textPreview.contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
           if (!f.length && textMode === 'both') noFill = true
         }
@@ -1043,7 +1043,7 @@ export default function App() {
           const fRhythm = fHole + fGap
           const fInset = fHole / 2 + 0.1
           const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-            const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+            const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
         }
         // same physics advisory text gets: artwork lines thinner than the
@@ -1118,8 +1118,8 @@ export default function App() {
       const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
       for (const p of outline) fIdx.add(p, hole / 2)
       const f = wholeWord
-        ? fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
-        : fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+        ? fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
+        : fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
       pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
     }
       return pts
@@ -1192,7 +1192,7 @@ export default function App() {
           const fRhythm = fHole + fGap
         const fInset = fHole / 2 + 0.1
         const fIdx = new SpacingIndex(Math.max(fHole + fGap, (hole + fHole) / 2 + fGap), fGap, fHole / 2)
-        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle === 'brick', hole)
+        const f = fillStones(raster.grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
         pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
       }
       const last = lastImageRef.current
@@ -1286,7 +1286,7 @@ export default function App() {
         allOutline.push(...outline)
         pts.push(...outline.map((p) => ({ ...p, size: curSize, color: L.color, layer: 'outline' as const })))
         if (imgMode !== 'outline') {
-          const f = fillStones(L.grid, fHole, fGap, fHole / 2 + 0.1, fIdx, allOutline, fHole + fGap, fillStyle === 'brick', hole)
+          const f = fillStones(L.grid, fHole, fGap, fHole / 2 + 0.1, fIdx, allOutline, fHole + fGap, fillStyle, hole)
           pts.push(...f.map((p) => ({ ...p, size: fillSize, color: L.color, layer: 'fill' as const })))
         }
       }
@@ -4355,7 +4355,7 @@ export default function App() {
             </label>
           </div>
           <div className="sizeinfo">
-            Even spacing: one lattice, stepped on the fill stone ·{' '}
+            Even spacing: stepped on the fill stone ·{' '}
             <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
             <span> — set it in Stones · Spacing</span>
           </div>
@@ -4363,6 +4363,8 @@ export default function App() {
             <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
               <option value="brick">Brick — offset rows</option>
               <option value="grid">Grid — aligned rows</option>
+              <option value="concentric">Concentric — rings following the edge</option>
+              <option value="radial">Radial — rays from the center</option>
             </select>
           </label>
         </Section>

@@ -46,6 +46,11 @@ export interface Grid {
 }
 
 // Spatial index enforcing a minimum center-to-center distance.
+// How a fill area is populated. brick/grid are the one-global-lattice fills;
+// concentric walks offset rings inward from the shape's edge; radial shoots
+// rays out from the shape's deepest point.
+export type FillStyle = 'brick' | 'grid' | 'concentric' | 'radial'
+
 export class SpacingIndex {
   private cell: number
   private map = new Map<string, { x: number; y: number; r: number }[]>()
@@ -3233,13 +3238,14 @@ export function fillStones(
   idx: SpacingIndex,
   fixedPts: Pt[] = [], // outline stones
   rhythmMm?: number,
-  brick = false, // alternate rows half-offset (brick) vs corner-anchored (grid)
+  style: FillStyle = 'brick',
   outlineHoleMm?: number, // when given, fill-to-OUTLINE clearance uses the
   // absolute 0.5mm template floor instead of the design gap. Checking the
   // design gap against the outline made legality flicker with the walls'
   // stagger — a fill row through a medium stroke broke wherever an outline
   // stone sat directly across, though the stone physically fit.
 ): Pt[] {
+  const brick = style === 'brick'
   const { w, h, pxPerMm, padPx } = grid
   const dt = distanceTransform(grid)
   const pitch = holeMm + gapMm
@@ -3534,34 +3540,257 @@ export function fillStones(
     return got
   }
 
-  // Centring gives even margins but pins the lattice's phase, and a pocket
-  // that could hold a row or column can miss it by less than a step — a B's
-  // outer bowl comes out a column short, an R's leg gets one column where it
-  // has room for two. Slide the lattice, as one rigid piece, to whichever
-  // offset seats the most stones. Every row and column stays aligned; only
-  // where the pattern sits changes.
-  //
-  // Scored on the pixel mask, which is ~200x cheaper than the exact test:
-  // scoring 36 offsets exactly locks the UI for seconds on a long word.
-  const STEPS = 6
-  const scored: { dx: number; dy: number; n: number }[] = []
-  for (let iy = 0; iy < STEPS; iy++)
-    for (let ix = 0; ix < STEPS; ix++) {
-      const dx = (ix / STEPS) * stepX
-      const dy = (iy / STEPS) * stepY
-      scored.push({ dx, dy, n: walk(dx, dy, false).length })
+  // CONCENTRIC: rings offset inward from the shape's edge, each a full
+  // rhythm further in, walked with the same even-spacing placer the outline
+  // rows use. Stroke-like and dot components are excluded — they keep their
+  // centered-row / single-stone treatment from the salvage pass below, same
+  // as under the lattice.
+  const concentricRings = (): Pt[] => {
+    const got: Pt[] = []
+    // Rings follow iso-contours of the SHAPE's own distance field, not the
+    // outline-stamped mask. The stamp's boundary scallops around each outline
+    // stone, every ring inherited that wobble, and arcs of each wandering
+    // ring then fell inside the clearance floors and were culled to a
+    // stipple. The shape's field is smooth; the first ring instead takes a
+    // fixed inset deep enough to clear the outline wall's own radial wobble
+    // (~0.55mm), and the exact per-stone checks keep it honest.
+    //
+    // Rings stepped at exactly the rhythm would also sit at exactly the
+    // pairwise floor ring-to-ring; step a shade wider, the same slack the
+    // lattice builds into its default rhythm.
+    const ringStep = rhythm * 1.1
+    const startOff = fixedPts.length ? outlineNeed + 0.6 : startInsetMm + 0.3
+    const ringBin = new Uint8Array(w * h)
+    for (let k = 0; k < 200; k++) {
+      const offPx = (k * ringStep + startOff) * pxPerMm
+      let any = 0
+      for (let i = 0; i < w * h; i++) {
+        // stroke-like and dot components keep their centered-row / single-
+        // stone treatment; label 0 just outside the stamped mask is allowed
+        // through — the exact outline check below owns that band
+        const lbl = fillComps.labels[i]
+        ringBin[i] =
+          grid.bin[i] && dt[i] >= offPx && !(lbl > 0 && (compRows[lbl] || compDot[lbl])) ? 1 : 0
+        any |= ringBin[i]
+      }
+      if (!any) break
+      // The marching-squares contour is a pixel staircase up to ~27% longer
+      // than the true curve, and the even-division placers divide ARC length:
+      // stones laid every rhythm of staircase arc sit ~0.8x rhythm apart in
+      // real distance, so the spacing index rejected scattered stones and
+      // rings came out at half density. Smooth with wraparound, then resample
+      // to ~1mm euclidean chords — chords cut through the residual zigzag, so
+      // path length converges to the true curve. A 1mm chamfer on a corner is
+      // invisible at stone scale.
+      // 6 passes: anything less leaves quantization bumps that analyzeContour
+      // reads as CORNERS (~18 fake corners on a smooth circle), and corner-
+      // anchored division then places apex stones with empty 2-beat segments
+      // between them — a half-density ring. A real tip's turn is an order of
+      // magnitude above the corner threshold and survives the smoothing.
+      const smoothClosed = (poly: Pt[]): Pt[] => {
+        let pts = poly
+        for (let pass = 0; pass < 6; pass++) {
+          const n = pts.length
+          const nx: Pt[] = new Array(n)
+          for (let i = 0; i < n; i++) {
+            const a = pts[(i - 1 + n) % n]
+            const b = pts[i]
+            const c2 = pts[(i + 1) % n]
+            nx[i] = { x: (a.x + 2 * b.x + c2.x) / 4, y: (a.y + 2 * b.y + c2.y) / 4 }
+          }
+          pts = nx
+        }
+        return pts
+      }
+      const chordStep = Math.min(1, pitch / 4)
+      const decimate = (poly: Pt[]): Pt[] => {
+        const kept: Pt[] = [poly[0]]
+        for (const p of poly) {
+          const last = kept[kept.length - 1]
+          if (Math.hypot(p.x - last.x, p.y - last.y) >= chordStep) kept.push(p)
+        }
+        // closing chord: drop a last point that crowds the first
+        while (
+          kept.length > 1 &&
+          Math.hypot(kept[kept.length - 1].x - kept[0].x, kept[kept.length - 1].y - kept[0].y) <
+            chordStep / 2
+        )
+          kept.pop()
+        return kept
+      }
+      const rings = marchingSquares(ringBin, w, h).map((c) =>
+        decimate(smoothClosed(c.map((p) => ({ x: toMmX(p.x), y: toMmY(p.y) })))),
+      )
+      for (const ring of rings) {
+        if (ring.length < 3) continue
+        // Equal division of the ring, with the stone count chosen by CHORD
+        // distance. walkPoly divides by ARC length, and on a curve the chord
+        // of an arc-length step comes up short of the floor — a ring whose
+        // division landed at exactly the pitch placed stones 3.296mm apart
+        // against a 3.300mm floor, and the pairwise check culled every other
+        // stone into a half-density stipple.
+        const n = ring.length
+        const cum: number[] = [0]
+        for (let i2 = 1; i2 <= n; i2++) {
+          const a = ring[i2 - 1]
+          const b = ring[i2 % n]
+          cum.push(cum[i2 - 1] + Math.hypot(b.x - a.x, b.y - a.y))
+        }
+        const per = cum[n]
+        const at = (s: number): Pt => {
+          s = ((s % per) + per) % per
+          let lo = 0
+          let hi = n
+          while (lo + 1 < hi) {
+            const mid = (lo + hi) >> 1
+            if (cum[mid] <= s) lo = mid
+            else hi = mid
+          }
+          const a = ring[lo]
+          const b = ring[(lo + 1) % n]
+          const seg = cum[lo + 1] - cum[lo]
+          const t = seg === 0 ? 0 : (s - cum[lo]) / seg
+          return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
+        }
+        if (per < pitch * 1.6) {
+          // a ring too short for two stones collapses to one centred stone
+          let cx = 0
+          let cy = 0
+          for (const p of ring) {
+            cx += p.x
+            cy += p.y
+          }
+          const c = { x: cx / n, y: cy / n }
+          if (dtAt(c.x, c.y) >= minPx && clearOfOutline(c) && idx.canPlace(c)) {
+            idx.add(c)
+            got.push(c)
+          }
+          continue
+        }
+        const minChord = (mm: number) => {
+          const sp = per / mm
+          let worst = Infinity
+          for (const f of [0, 0.25, 0.5, 0.75]) {
+            const s0 = f * per
+            const p0 = at(s0)
+            const p1 = at(s0 + sp)
+            const d = Math.hypot(p1.x - p0.x, p1.y - p0.y)
+            if (d < worst) worst = d
+          }
+          return worst
+        }
+        let m = Math.max(3, Math.round(per / rhythm))
+        while (m > 3 && minChord(m) < pitch * 1.01) m--
+        const sp = per / m
+        let best: Pt[] = []
+        for (let ph = 0; ph < 7; ph++) {
+          const off = (ph / 7) * sp
+          const placed: Pt[] = []
+          for (let i2 = 0; i2 < m; i2++) {
+            const p = at(off + i2 * sp)
+            if (dtAt(p.x, p.y) < minPx) continue
+            if (!clearOfOutline(p)) continue
+            let ok = idx.canPlace(p)
+            if (ok)
+              for (const q of placed)
+                if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
+                  ok = false
+                  break
+                }
+            if (ok) placed.push(p)
+          }
+          if (placed.length > best.length) best = placed
+        }
+        for (const p of best) {
+          idx.add(p)
+          got.push(p)
+        }
+      }
     }
-  // The cheap score can rank an offset the exact test then dislikes, so
-  // re-check the leading few exactly and keep the real winner.
-  scored.sort((a, b) => b.n - a.n)
-  let best: Pt[] = []
-  for (const s of scored.slice(0, 4)) {
-    const got = walk(s.dx, s.dy, true)
-    if (got.length > best.length) best = got
+    return got
   }
-  for (const p of best) {
-    idx.add(p)
-    out.push(p)
+
+  // RADIAL: rays from each component's deepest point. The ray count is set so
+  // the arc gap between neighbouring rays matches the stone rhythm midway
+  // out — spokes read distinctly at the rim and merge toward the centre,
+  // where the spacing index thins them to a single centre stone.
+  const radialRays = (): Pt[] => {
+    const got: Pt[] = []
+    const deepAt = new Int32Array(fillComps.count + 1).fill(-1)
+    for (let i = 0; i < w * h; i++) {
+      const lbl = fillComps.labels[i]
+      if (!lbl || compRows[lbl] || compDot[lbl] || !mask[i]) continue
+      if (deepAt[lbl] < 0 || dt[i] > dt[deepAt[lbl]]) deepAt[lbl] = i
+    }
+    const maxR = new Float32Array(fillComps.count + 1)
+    for (let i = 0; i < w * h; i++) {
+      const lbl = fillComps.labels[i]
+      if (!lbl || deepAt[lbl] < 0 || !mask[i]) continue
+      const di = deepAt[lbl]
+      const r = Math.hypot((i % w) - (di % w), Math.floor(i / w) - Math.floor(di / w)) / pxPerMm
+      if (r > maxR[lbl]) maxR[lbl] = r
+    }
+    for (let lbl = 1; lbl <= fillComps.count; lbl++) {
+      const di = deepAt[lbl]
+      if (di < 0) continue
+      const c = { x: toMmX(di % w), y: toMmY(Math.floor(di / w)) }
+      if (dtAt(c.x, c.y) >= minPx && clearOfOutline(c) && idx.canPlace(c)) {
+        idx.add(c)
+        got.push(c)
+      }
+      const nRays = Math.max(8, Math.min(72, Math.round((Math.PI * maxR[lbl]) / rhythm)))
+      for (let a = 0; a < nRays; a++) {
+        const th = (a / nRays) * Math.PI * 2
+        const ux = Math.cos(th)
+        const uy = Math.sin(th)
+        for (let r = rhythm; r <= maxR[lbl] + rhythm; r += rhythm) {
+          const p = { x: c.x + ux * r, y: c.y + uy * r }
+          if (compAt(p.x, p.y) !== lbl) continue
+          if (dtAt(p.x, p.y) < minPx) continue
+          if (!clearOfOutline(p)) continue
+          if (!idx.canPlace(p)) continue
+          idx.add(p)
+          got.push(p)
+        }
+      }
+    }
+    return got
+  }
+
+  if (style === 'concentric') {
+    out.push(...concentricRings())
+  } else if (style === 'radial') {
+    out.push(...radialRays())
+  } else {
+    // Centring gives even margins but pins the lattice's phase, and a pocket
+    // that could hold a row or column can miss it by less than a step — a B's
+    // outer bowl comes out a column short, an R's leg gets one column where it
+    // has room for two. Slide the lattice, as one rigid piece, to whichever
+    // offset seats the most stones. Every row and column stays aligned; only
+    // where the pattern sits changes.
+    //
+    // Scored on the pixel mask, which is ~200x cheaper than the exact test:
+    // scoring 36 offsets exactly locks the UI for seconds on a long word.
+    const STEPS = 6
+    const scored: { dx: number; dy: number; n: number }[] = []
+    for (let iy = 0; iy < STEPS; iy++)
+      for (let ix = 0; ix < STEPS; ix++) {
+        const dx = (ix / STEPS) * stepX
+        const dy = (iy / STEPS) * stepY
+        scored.push({ dx, dy, n: walk(dx, dy, false).length })
+      }
+    // The cheap score can rank an offset the exact test then dislikes, so
+    // re-check the leading few exactly and keep the real winner.
+    scored.sort((a, b) => b.n - a.n)
+    let best: Pt[] = []
+    for (const s of scored.slice(0, 4)) {
+      const got = walk(s.dx, s.dy, true)
+      if (got.length > best.length) best = got
+    }
+    for (const p of best) {
+      idx.add(p)
+      out.push(p)
+    }
   }
 
   // NARROW-CHANNEL SALVAGE. The rigid lattice cannot be everywhere: a stroke
@@ -3688,7 +3917,7 @@ export function fillByGlyph(
   idx: SpacingIndex,
   fixedPts: Pt[],
   rhythmMm: number,
-  brick = false,
+  style: FillStyle = 'brick',
   outlineHoleMm?: number,
 ): Pt[] {
   interface Group {
@@ -3741,7 +3970,7 @@ export function fillByGlyph(
     // checkerboarded, with obvious unfilled space inside every stroke.
     const localIdx = new SpacingIndex(idx.minDist, idx.gap, idx.defaultR)
     if (outlineHoleMm == null) for (const p of localFixed) localIdx.add(p, outlineR)
-    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, brick, outlineHoleMm)
+    const placed = fillStones(grid, holeMm, gapMm, startInsetMm, localIdx, localFixed, rhythmMm, style, outlineHoleMm)
     for (const p of placed) {
       const q = { x: p.x + ox, y: p.y + oy }
       // cross-glyph legality still enforced against the global index
