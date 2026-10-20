@@ -3875,6 +3875,36 @@ export function fillStones(
           dotStones.add(q)
         }
       }
+      // COVERAGE PASS. The skeleton rows are the pretty answer when the trace
+      // succeeds, but script glyphs routinely defeat it: a loop's skeleton is
+      // a closed ring the tracer can't walk, a taper shatters into stubs
+      // shorter than one rhythm (skipped above). Everything the rows missed
+      // in this component still gets stones — greedy densest-first packing on
+      // the distance field, so placement starts mid-stroke and works outward,
+      // and every stone passes the same legality the rows enforce. Without
+      // this, fill-only script text came out as scattered chains with whole
+      // bars and loop-sides bare.
+      {
+        const stride = Math.max(1, Math.floor((pitch * pxPerMm) / 3))
+        const cand: number[] = []
+        for (let yy = 0; yy < h; yy += stride) {
+          const row = yy * w
+          for (let xx = 0; xx < w; xx += stride) {
+            const i2 = row + xx
+            if (cm[i2] && mask[i2] && dt[i2] >= minPx) cand.push(i2)
+          }
+        }
+        cand.sort((a, b) => dt[b] - dt[a])
+        const nearR = rhythm * 0.95
+        for (const i2 of cand) {
+          const q = { x: toMmX(i2 % w), y: toMmY(Math.floor(i2 / w)) }
+          if (!clearOfOutline(q)) continue
+          if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < nearR)) continue
+          if (!idx.canPlace(q)) continue
+          idx.add(q)
+          out.push(q)
+        }
+      }
     }
   }
 
