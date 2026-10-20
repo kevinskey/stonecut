@@ -177,6 +177,16 @@ export default function App() {
   const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[]; el?: number } | null>(null)
   // element ids continue past whatever the saved design used
   const elSeq = useRef((savedDesign.current?.stones ?? []).reduce((m, s) => Math.max(m, s.el ?? 0), 0) + 1)
+  // Undo/redo can resurrect stones whose ids are above elSeq (File -> Open
+  // rewinds it to the opened file's max), so a bare elSeq.current++ could
+  // hand out an id that is already on the board — the new commit would then
+  // move as one unit with that element. Always step past the live board.
+  const nextEl = useCallback(() => {
+    let m = elSeq.current
+    for (const st of stonesRef.current) if (st.el != null && st.el >= m) m = st.el + 1
+    elSeq.current = m + 1
+    return m
+  }, [])
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [sizes, setSizes] = useState<Record<string, StoneSpec>>(() => savedDesign.current?.sizes ?? { ...DEFAULT_SIZES })
   const [elements, setElements] = useState<Elements>(() => savedDesign.current?.elements ?? {})
@@ -1075,7 +1085,7 @@ export default function App() {
     (pts: { x: number; y: number; size?: string; color?: string; layer?: 'outline' | 'fill' }[], offsetY: number, recipe?: Omit<Recipe, 'sx' | 'sy'>) => {
       // each commit is its own ELEMENT: a free-moving layer that may overlap
       // other elements — nothing culls across elements anymore
-      const el = elSeq.current++
+      const el = nextEl()
       const fresh: Stone[] = pts.map((p) => ({ x: p.x + previewOffX, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
       mutate((prev) => [...prev, ...fresh])
       if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
@@ -1203,7 +1213,7 @@ export default function App() {
       const offsetY = replacing
         ? last.offsetY
         : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
-      const el = replacing && last.el != null ? last.el : elSeq.current++
+      const el = replacing && last.el != null ? last.el : nextEl()
       const fresh: Stone[] = pts.map((p) => ({
         x: p.x + previewOffX,
         y: p.y + offsetY,
@@ -1743,7 +1753,7 @@ export default function App() {
     const idx = new SpacingIndex(maxHole + hardGap, hardGap, maxHole / 2)
     for (const st of stones) idx.add(st, holeOf(st) / 2)
     const attempts = Math.min(20000, Math.round(w * h * (scatterDensity / 100) * 0.25))
-    const el = elSeq.current++
+    const el = nextEl()
     const fresh: Stone[] = []
     for (let i = 0; i < attempts; i++) {
       const p = { x: minX + Math.random() * w, y: minY + Math.random() * h }
@@ -1948,7 +1958,7 @@ export default function App() {
     const parts: string[] = []
     if (penOut !== 'line') {
       const placed = stonesAlongPath(pts, close)
-      const el = elSeq.current++
+      const el = nextEl()
       const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el }))]
       stonesRef.current = next
       setStones(next)
@@ -2880,7 +2890,7 @@ export default function App() {
       for (const off of offsets) {
         const elMap = new Map<number, number>()
         for (const e of els) {
-          const ne = elSeq.current++
+          const ne = nextEl()
           elMap.set(e, ne)
           const r = elementsRef.current[e]
           if (r) addElements[ne] = { ...r, contours: r.contours.map((c) => c.map((q) => ({ ...q }))) }
@@ -2936,7 +2946,7 @@ export default function App() {
     const elMap = new Map<number, number>()
     const addElements: Elements = {}
     for (const e of els) {
-      const ne = elSeq.current++
+      const ne = nextEl()
       elMap.set(e, ne)
       const r = clip.elements[e]
       if (r) addElements[ne] = { ...r, contours: r.contours.map((c) => c.map((q) => ({ ...q }))) }
@@ -3169,7 +3179,7 @@ export default function App() {
         if (wantStones) {
           const pts = contoursToStones(contours, textMode)
           if (!pts.length) { failed.push(name); continue }
-          const el = elSeq.current++
+          const el = nextEl()
           for (const p of pts) rowH = Math.max(rowH, p.y + (sizes[p.size ?? curSize]?.holeMm ?? 3) / 2)
           freshStones.push(...pts.map((p) => ({ x: p.x + 10, y: p.y + cursor, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el })))
           addElems[el] = { contours: normaliseContours(contours), mode: textMode, wholeWord: true, sx: 1, sy: 1 }
@@ -3610,7 +3620,7 @@ export default function App() {
       for (const i of g) for (const q of scaled[i]) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
       return { minX: minX + tx, maxX: maxX + tx, minY: minY + ty, maxY: maxY + ty }
     })
-    const newEls = groups.map(() => elSeq.current++)
+    const newEls = groups.map(() => nextEl())
     pushUndo(stonesRef.current)
     const next = stones.map((st) => {
       if (st.el !== el) return st
@@ -3753,7 +3763,8 @@ export default function App() {
     const vecs: VecItem[] = Array.isArray(dd.vectors) ? dd.vectors : []
     setVectors(vecs)
     vecSeq.current = vecs.reduce((m, v) => Math.max(m, v.id), 0) + 1
-    elSeq.current = loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1
+    // never rewind: undo can bring back stones with ids above this file's max
+    elSeq.current = Math.max(elSeq.current, loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1)
     setSelection(new Set())
     setStatus(`Opened ${name}: ${loaded.length} stones`)
   }, [pushUndo])
