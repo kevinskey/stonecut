@@ -66,6 +66,58 @@ const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in
 // how wide the design spacing is set
 const hardGapOf = (spacing: number) => Math.max(0.5, Math.min(spacing, 1.2))
 
+// Font-picker rows show each family IN its own face. A row loads its font
+// only when scrolled into view, and the Google CSS request carries
+// `text=<family name>` so the served woff2 contains just those glyphs —
+// a few KB — which is what makes previewing a 1,900-font catalog viable.
+const previewLoaded = new Set<string>()
+function ensureGooglePreview(family: string) {
+  if (previewLoaded.has(family)) return
+  previewLoaded.add(family)
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = `https://fonts.googleapis.com/css2?family=${family.replace(/ /g, '+')}&text=${encodeURIComponent(family)}&display=swap`
+  document.head.appendChild(link)
+}
+async function ensureCustomPreview(family: string) {
+  const key = `custom:${family}`
+  if (previewLoaded.has(key)) return
+  previewLoaded.add(key)
+  try {
+    const buf = await getFont(family)
+    if (!buf) return
+    const face = new FontFace(family, buf)
+    await face.load()
+    document.fonts.add(face)
+  } catch {
+    // preview only — the row just stays in the UI font
+  }
+}
+function FontPreviewName({ family, custom }: { family: string; custom: boolean }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [ready, setReady] = useState(() => previewLoaded.has(custom ? `custom:${family}` : family))
+  useEffect(() => {
+    const el = ref.current
+    if (!el || ready) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return
+        io.disconnect()
+        if (custom) void ensureCustomPreview(family).then(() => setReady(true))
+        else { ensureGooglePreview(family); setReady(true) }
+      },
+      { root: el.closest('.fontlist'), rootMargin: '150px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [family, custom, ready])
+  return (
+    <span ref={ref} className="fname" style={ready ? { fontFamily: `'${family}'` } : undefined}>
+      {family}
+    </span>
+  )
+}
+
 // Illustrator-style glyphs for the Align / Pathfinder buttons.
 function AlignIcon({ kind }: { kind: string }) {
   const c = 'currentColor'
@@ -4240,7 +4292,7 @@ export default function App() {
                           setFontOpen(false)
                         }}
                       >
-                        {f.f}
+                        <FontPreviewName family={f.f} custom={f.id.startsWith('custom:')} />
                         <span>{f.c}</span>
                         {f.id.startsWith('custom:') && (
                           <span

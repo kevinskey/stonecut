@@ -286,6 +286,18 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   font-size: 12.5px;
 }
 .fontlist button span { font-size: 10px; color: #6c7690; }
+/* the family name renders in its own typeface — big enough to judge the style */
+.fontlist button .fname {
+  font-size: 17px;
+  line-height: 1.25;
+  color: inherit;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-right: 8px;
+}
 .fontlist button .delx {
   font-size: 11px;
   color: #6c7690;
