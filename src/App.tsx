@@ -12,6 +12,8 @@ import { distToPaths, parseSvgToPaths, pathsToD } from './vector'
 import { booleanPaths } from './boolean'
 import type { BoolOp } from './boolean'
 import { deleteFont, getFont, listFonts, saveFont } from './fontstore'
+import { DESIGN_EXT, ensureWritable, fsSupported, pickOpenHandle, pickSaveHandle, recallHandle, rememberHandle, writeHandle } from './filesys'
+import type { FSFileHandle } from './filesys'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer, ImageAnalysis } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
@@ -3679,10 +3681,66 @@ export default function App() {
   // Sidebar sections are plain <details>; the Window menu opens one by title
   // and scrolls it into view (Kevin works at a big browser zoom, so finding
   // a folded section by scrolling is the slow part).
-  const saveDesignFile = useCallback(() => {
-    download('stonecut-design.json', JSON.stringify({ v: 1, stones, sizes, elements, vectors }), 'application/json')
-  }, [stones, sizes, elements, vectors])
-  // Replace the whole board with a saved .json design — shared by
+  // ---------- design files on the real file system ----------
+  // "Save" writes back to the SAME file like a desktop app (File System
+  // Access API; Chrome/Edge, which WebUSB already requires). The handle
+  // survives reloads via IndexedDB. Browsers without the API fall back to a
+  // download, but files keep the .stonecut name either way.
+  const fileHandleRef = useRef<FSFileHandle | null>(null)
+  const [fileName, setFileName] = useState<string | null>(null)
+  useEffect(() => {
+    void recallHandle().then((h) => {
+      if (h) {
+        fileHandleRef.current = h
+        setFileName(h.name)
+      }
+    })
+  }, [])
+  const adoptHandle = useCallback((h: FSFileHandle | null, name: string | null) => {
+    fileHandleRef.current = h
+    setFileName(h ? h.name : name)
+    void rememberHandle(h)
+  }, [])
+  const designJson = useCallback(
+    () => JSON.stringify({ v: 1, stones, sizes, elements, vectors }),
+    [stones, sizes, elements, vectors],
+  )
+  const saveDesignAs = useCallback(async () => {
+    const suggested = fileName ?? `design${DESIGN_EXT}`
+    if (!fsSupported) {
+      download(suggested, designJson(), 'application/json')
+      return
+    }
+    const h = await pickSaveHandle(suggested)
+    if (!h) return // cancelled
+    try {
+      await writeHandle(h, designJson())
+      adoptHandle(h, h.name)
+      setStatus(`Saved ${h.name}`)
+    } catch (e) {
+      setStatus(`Could not save: ${e instanceof Error ? e.message : e}`)
+    }
+  }, [fileName, designJson, adoptHandle])
+  const saveDesign = useCallback(async () => {
+    const h = fileHandleRef.current
+    if (!h || !fsSupported) {
+      await saveDesignAs()
+      return
+    }
+    try {
+      if (!(await ensureWritable(h))) {
+        setStatus(`No permission to write ${h.name} — pick where to save it`)
+        await saveDesignAs()
+        return
+      }
+      await writeHandle(h, designJson())
+      setStatus(`Saved ${h.name}`)
+    } catch {
+      // the file moved or was deleted out from under the handle
+      await saveDesignAs()
+    }
+  }, [designJson, saveDesignAs])
+  // Replace the whole board with a saved design file — shared by
   // File -> Open and dropping a design file on the board.
   const applyDesignData = useCallback((d: unknown, name: string) => {
     const dd = d as { stones?: Stone[]; vectors?: VecItem[]; sizes?: Record<string, StoneSpec>; elements?: Elements }
@@ -3699,21 +3757,47 @@ export default function App() {
     setSelection(new Set())
     setStatus(`Opened ${name}: ${loaded.length} stones`)
   }, [pushUndo])
-  const openDesignFile = useCallback(() => {
+  const openDesignFile = useCallback(async () => {
+    if (fsSupported) {
+      const h = await pickOpenHandle()
+      if (!h) return // cancelled
+      try {
+        const f = await h.getFile()
+        applyDesignData(JSON.parse(await f.text()), f.name)
+        adoptHandle(h, h.name) // ⌘S now writes back to this file
+      } catch (e) {
+        setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
+      }
+      return
+    }
     const inp = document.createElement('input')
     inp.type = 'file'
-    inp.accept = '.json,application/json'
+    inp.accept = `${DESIGN_EXT},.json,application/json`
     inp.onchange = async () => {
       const f = inp.files?.[0]
       if (!f) return
       try {
         applyDesignData(JSON.parse(await f.text()), f.name)
+        adoptHandle(null, f.name)
       } catch (e) {
         setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
       }
     }
     inp.click()
-  }, [applyDesignData])
+  }, [applyDesignData, adoptHandle])
+  // ⌘S / ⌘⇧S — separate effect so it can live after the save callbacks;
+  // preventDefault keeps the browser's own save-page dialog out of the way
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault()
+        if (e.shiftKey) void saveDesignAs()
+        else void saveDesign()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [saveDesign, saveDesignAs])
   // ---------- drag & drop onto the board ----------
   // Raster image -> image pipeline, previewed near the drop point.
   // SVG -> cut-line object centered at the drop point.
@@ -3747,16 +3831,19 @@ export default function App() {
       await loadImageFile(f)
       return
     }
-    if (/\.json$/i.test(f.name)) {
+    if (/\.(stonecut|json)$/i.test(f.name)) {
       try {
         applyDesignData(JSON.parse(await f.text()), f.name)
+        // a dropped file carries no writable handle — detach so ⌘S asks
+        // where to save instead of overwriting the previously open file
+        adoptHandle(null, f.name)
       } catch (err) {
         setStatus(`Could not open: ${err instanceof Error ? err.message : err}`)
       }
       return
     }
-    setStatus(`Can't use ${f.name} — drop an image, an SVG, or a StoneCut .json design`)
-  }, [toMm, addVector, loadImageFile, applyDesignData, openSection, boardWmm, boardHmm])
+    setStatus(`Can't use ${f.name} — drop an image, an SVG, or a StoneCut design file`)
+  }, [toMm, addVector, loadImageFile, applyDesignData, adoptHandle, openSection, boardWmm, boardHmm])
 
   const clearAll = useCallback(() => {
     if (stones.length) mutate(() => [])
@@ -3789,10 +3876,11 @@ export default function App() {
   const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Production', 'Material', 'Cut']
   const menus: Menu[] = [
     { label: 'File', items: [
-      { label: 'New design', onClick: clearAll, disabled: !hasStones && !pending && !vectors.length },
-      { label: 'Open design…', onClick: openDesignFile },
+      { label: 'New design', onClick: () => { clearAll(); adoptHandle(null, null) }, disabled: !hasStones && !pending && !vectors.length },
+      { label: 'Open design…', onClick: () => { void openDesignFile() } },
       { label: 'Import vector cut (SVG)…', onClick: importSvg },
-      { label: 'Save design…', shortcut: '.json', onClick: saveDesignFile, disabled: !hasStones },
+      { label: fileName ? `Save — ${fileName}` : 'Save…', shortcut: '⌘S', onClick: () => { void saveDesign() }, disabled: !hasStones && !vectors.length },
+      { label: 'Save As…', shortcut: '⌘⇧S', onClick: () => { void saveDesignAs() }, disabled: !hasStones && !vectors.length },
       'sep',
       { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount },
       { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount },
