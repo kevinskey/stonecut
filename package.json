@@ -9,7 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "app:dev": "electron .",
-    "app:build": "npm run build && electron-builder --mac"
+    "app:build": "npm run build && electron-builder --mac",
+    "app:mas": "npm run build && electron-builder --mac mas"
   },
   "dependencies": {
     "opentype.js": "^2.0.0",
@@ -53,8 +54,25 @@
         }
       ],
       "category": "public.app-category.graphics-design",
-      "identity": null
+      "identity": null,
+      "hardenedRuntime": false
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "mas": {
+      "target": [
+        {
+          "target": "mas",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.graphics-design",
+      "entitlements": "build/entitlements.mas.plist",
+      "entitlementsInherit": "build/entitlements.mas.inherit.plist",
+      "hardenedRuntime": false,
+      "provisioningProfile": "build/StoneCut_MAS.provisionprofile",
+      "identity": "Apple Distribution: kevin johnson (AUJY92SA4D)"
+    }
   }
 }

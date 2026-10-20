@@ -40,7 +40,12 @@ function createWindow() {
     shell.openExternal(url)
     return { action: 'deny' }
   })
-  win.loadURL(LIVE_URL)
+  // Mac App Store build: run the bundled app (review guideline 4.2 — a
+  // storefront app must not be a thin wrapper around a website). The direct
+  // dmg build keeps tracking the live site so it is always on the newest
+  // engine.
+  if (process.mas) win.loadFile(localIndex())
+  else win.loadURL(LIVE_URL)
   return win
 }
 
