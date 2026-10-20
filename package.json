@@ -1,13 +1,15 @@
 {
   "name": "stonecut",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "app:dev": "electron .",
+    "app:build": "npm run build && electron-builder --mac"
   },
   "dependencies": {
     "opentype.js": "^2.0.0",
@@ -21,8 +23,38 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "electron": "^44.9.1",
+    "electron-builder": "^26.15.3",
     "oxlint": "^1.79.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.2"
+  },
+  "main": "electron/main.cjs",
+  "description": "Rhinestone template designer with direct Graphtec cutting",
+  "author": "T-Shirt Brothers",
+  "build": {
+    "appId": "com.tshirtbrothers.stonecut",
+    "productName": "StoneCut",
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "category": "public.app-category.graphics-design",
+      "identity": null
+    },
+    "npmRebuild": false
   }
 }
