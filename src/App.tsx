@@ -19,7 +19,7 @@ import type { ColorLayer, ImageAnalysis } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
-import { MOCKUP_W, drawGem, drawMockup, drawMockupPhoto } from './sim'
+import { MOCKUP_W, drawGem, drawMockup, drawMockupEmpty, drawMockupPhoto } from './sim'
 import { detectText } from './ocr'
 import type { DetectedText } from './ocr'
 import { MenuBar } from './MenuBar'
@@ -2903,12 +2903,14 @@ export default function App() {
       color: colorOfStone(s),
     }))
     const mkPaths = vectors.flatMap(vecPaths)
-    if (mkMode === 'photo' && mkImgRef.current) {
-      drawMockupPhoto(cv, mkImgRef.current, mkSpan, chestIn, mkOff, mkStones, mkPaths)
+    if (mkMode === 'photo') {
+      if (mkImgRef.current) drawMockupPhoto(cv, mkImgRef.current, mkSpan, chestIn, mkOff, mkStones, mkPaths)
+      else if (mkStyle) drawMockupEmpty(cv, ['Loading the product photo…', `${mkStyle.brand} ${mkStyle.name}`])
+      else drawMockupEmpty(cv, ['Search an S&S style above to mock up', 'on a real product photo —', 'or switch to Illustration.'])
     } else {
       drawMockup(cv, garmentColor, chestIn, dropIn, mkStones, mkPaths, mkOff)
     }
-  }, [mockupOpen, garmentColor, chestIn, dropIn, stones, sizes, colorOfStone, vectors, mkMode, mkSpan, mkOff, mkImgTick])
+  }, [mockupOpen, garmentColor, chestIn, dropIn, stones, sizes, colorOfStone, vectors, mkMode, mkStyle, mkSpan, mkOff, mkImgTick])
   const downloadMockup = useCallback(() => {
     mockupCanvasRef.current?.toBlob((b) => {
       if (!b) return

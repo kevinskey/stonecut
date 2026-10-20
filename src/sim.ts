@@ -167,6 +167,30 @@ export function drawMockupPhoto(
   drawDesign(ctx, stones, paths, pxPerMm, W / 2 + off.x, dy + dh * 0.42 + off.y, 'rgba(255,255,255,0.55)')
 }
 
+// Photo mode with no photo loaded yet: say so, instead of quietly showing
+// the drawn illustration while the toggle claims "Product photo".
+export function drawMockupEmpty(cv: HTMLCanvasElement, lines: string[]) {
+  const W = MOCKUP_W, H = MOCKUP_H
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  cv.width = W * dpr
+  cv.height = H * dpr
+  cv.style.width = `${W}px`
+  cv.style.height = `${H}px`
+  const ctx = cv.getContext('2d')!
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.fillStyle = '#f2f3f5'
+  ctx.fillRect(0, 0, W, H)
+  ctx.strokeStyle = '#c3c9d4'
+  ctx.setLineDash([8, 7])
+  ctx.lineWidth = 2
+  ctx.strokeRect(36, 36, W - 72, H - 72)
+  ctx.setLineDash([])
+  ctx.fillStyle = '#5a6475'
+  ctx.font = '15px -apple-system, system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  lines.forEach((t, i) => ctx.fillText(t, W / 2, H / 2 - ((lines.length - 1) / 2 - i) * 24))
+}
+
 export function drawMockup(
   cv: HTMLCanvasElement,
   garmentColor: string,
@@ -188,32 +212,48 @@ export function drawMockup(
   // backdrop
   ctx.fillStyle = '#e9ebef'
   ctx.fillRect(0, 0, W, H)
-  // tee silhouette: body 90..430 (chest), shoulders, sleeves, collar
-  const bodyL = 90, bodyR = 430, shoulderY = 78, hemY = 585
+  // tee silhouette: one continuous outline — sleeve undersides land ON the
+  // armpit points, so there are no open notches for the backdrop to show
+  // through (the old path left white triangles beside each side seam)
+  const bodyL = 142, bodyR = 378, shoulderY = 88, hemY = 568
+  const cx = (bodyL + bodyR) / 2
   ctx.fillStyle = garmentColor
   ctx.strokeStyle = 'rgba(0,0,0,0.35)'
   ctx.lineWidth = 2
   ctx.beginPath()
-  ctx.moveTo(bodyL, 150)                     // left armpit
-  ctx.lineTo(28, 215)                        // left sleeve tip (upper)
-  ctx.lineTo(62, 268)                        // left sleeve hem
-  ctx.lineTo(bodyL + 12, 208)                // back to body
-  ctx.lineTo(bodyL + 6, hemY)                // left side seam
-  ctx.lineTo(bodyR - 6, hemY)                // hem
-  ctx.lineTo(bodyR - 12, 208)                // right side seam
-  ctx.lineTo(458, 268)                       // right sleeve hem
-  ctx.lineTo(492, 215)                       // right sleeve tip
-  ctx.lineTo(bodyR, 150)                     // right armpit
-  ctx.lineTo(352, shoulderY)                 // right shoulder
-  ctx.quadraticCurveTo(260, 128, 168, shoulderY) // collar scoop
+  ctx.moveTo(cx - 92, shoulderY)                        // collar left
+  ctx.quadraticCurveTo(cx, shoulderY + 46, cx + 92, shoulderY) // collar scoop
+  ctx.lineTo(cx + 122, shoulderY + 12)                  // right shoulder tip
+  ctx.quadraticCurveTo(cx + 196, shoulderY + 52, cx + 210, shoulderY + 86) // sleeve top
+  ctx.lineTo(cx + 180, shoulderY + 150)                 // sleeve hem outer
+  ctx.quadraticCurveTo(cx + 150, shoulderY + 140, cx + 122, shoulderY + 126) // sleeve hem inner
+  ctx.lineTo(cx + 118, shoulderY + 122)                 // armpit right
+  ctx.quadraticCurveTo(cx + 112, hemY - 110, cx + 110, hemY) // right side seam
+  ctx.lineTo(cx - 110, hemY)                            // hem
+  ctx.quadraticCurveTo(cx - 112, hemY - 110, cx - 118, shoulderY + 122) // left side seam
+  ctx.lineTo(cx - 122, shoulderY + 126)                 // armpit left
+  ctx.quadraticCurveTo(cx - 150, shoulderY + 140, cx - 180, shoulderY + 150) // sleeve hem inner
+  ctx.lineTo(cx - 210, shoulderY + 86)                  // sleeve hem outer
+  ctx.quadraticCurveTo(cx - 196, shoulderY + 52, cx - 122, shoulderY + 12) // sleeve top
   ctx.closePath()
   ctx.fill()
   ctx.stroke()
+  // sleeve seams: the line where sleeve meets body
+  ctx.strokeStyle = 'rgba(0,0,0,0.18)'
+  ctx.lineWidth = 1.5
+  for (const side of [-1, 1]) {
+    ctx.beginPath()
+    ctx.moveTo(cx + side * 122, shoulderY + 12)
+    ctx.quadraticCurveTo(cx + side * 130, shoulderY + 70, cx + side * 118, shoulderY + 122)
+    ctx.stroke()
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+  ctx.lineWidth = 2
   // collar ribbing
   ctx.beginPath()
-  ctx.moveTo(168, shoulderY)
-  ctx.quadraticCurveTo(260, 128, 352, shoulderY)
-  ctx.quadraticCurveTo(260, 108, 168, shoulderY)
+  ctx.moveTo(cx - 92, shoulderY)
+  ctx.quadraticCurveTo(cx, shoulderY + 46, cx + 92, shoulderY)
+  ctx.quadraticCurveTo(cx, shoulderY + 24, cx - 92, shoulderY)
   ctx.closePath()
   const lum = (() => { const n = parseInt(garmentColor.slice(1), 16); return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) })()
   ctx.fillStyle = lum > 128 ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.14)'
@@ -232,8 +272,8 @@ export function drawMockup(
   let minY = Infinity, maxY = -Infinity
   for (const s of stones) { minY = Math.min(minY, s.y - s.rMm); maxY = Math.max(maxY, s.y + s.rMm) }
   for (const p of paths) for (const q of p) { minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y) }
-  const pxPerMm = (bodyR - bodyL) / (chestIn * 25.4)
-  const cy = 132 + dropIn * 25.4 * pxPerMm + ((maxY - minY) * pxPerMm) / 2
+  const pxPerMm = ((bodyR - bodyL) - 16) / (chestIn * 25.4)
+  const cy = shoulderY + 52 + dropIn * 25.4 * pxPerMm + ((maxY - minY) * pxPerMm) / 2
   drawDesign(ctx, stones, paths, pxPerMm, (bodyL + bodyR) / 2 + off.x, cy + off.y,
     lum > 128 ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.5)')
 }
