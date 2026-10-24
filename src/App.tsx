@@ -17,6 +17,7 @@ import type { FSFileHandle } from './filesys'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer, ImageAnalysis } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
+import { coverageOf, getPublishKey, publishToTsb, renderPreviewPng, setPublishKey } from './publish'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MOCKUP_W, drawGem, drawMockup, drawMockupEmpty, drawMockupPhoto } from './sim'
@@ -2890,6 +2891,7 @@ export default function App() {
     win.document.close()
   }, [job, colorOfStone, stones.length])
 
+
   // garment mockup: redraw whenever it's open and anything it shows changes
   useEffect(() => {
     if (!mockupOpen) return
@@ -3785,6 +3787,61 @@ export default function App() {
       setStatus(`Could not save: ${e instanceof Error ? e.message : e}`)
     }
   }, [fileName, designJson, adoptHandle])
+
+  // ---------- production: publish to TShirt Brothers ----------
+  // Sends the design to the shop: preview PNG into the TSB art library (so
+  // it can be dropped on a garment in the Design Studio and mocked up for a
+  // customer), cut SVG + the real stone BOM into the rhinestone tables (so
+  // the quote prices off actual stone counts). See src/publish.ts.
+  const [publishing, setPublishing] = useState(false)
+  const editPublishKey = useCallback(() => {
+    const next = window.prompt(
+      'TSB publish key (STONECUT_PUBLISH_KEY on the TShirt Brothers server):',
+      getPublishKey(),
+    )
+    if (next == null) return
+    setPublishKey(next)
+    setStatus(next.trim() ? 'TSB publish key saved' : 'TSB publish key cleared')
+  }, [])
+  const publishToShop = useCallback(async () => {
+    if (publishing) return
+    if (!stones.length) { setStatus('Nothing to publish — add stones first'); return }
+    if (!getPublishKey()) {
+      setStatus('Set the TSB publish key first — File ▸ TSB publish key…')
+      editPublishKey()
+      return
+    }
+    const suggested = (fileName || '').replace(/\.[a-zA-Z0-9]+$/, '') || 'Rhinestone design'
+    const name = window.prompt('Publish to TShirt Brothers as:', suggested)
+    if (name == null || !name.trim()) return
+
+    setPublishing(true)
+    setStatus('Publishing to TShirt Brothers…')
+    try {
+      const preview = renderPreviewPng(stones, sizes, colorOfStone)
+      const coverage = coverageOf(stones, sizes, preview.widthMm, preview.heightMm)
+      const result = await publishToTsb({
+        name: name.trim(),
+        previewBase64: preview.dataUrl,
+        // Cut file for the template, same geometry the Cricut/plotter export
+        // uses — so production never has to re-derive it from the preview.
+        svg: cutCount ? toSVG(framedCutJob) : undefined,
+        widthMm: preview.widthMm,
+        heightMm: preview.heightMm,
+        coverage,
+        stoneBom: bom,
+        tags: ['bling', 'spiritwear'],
+      })
+      setStatus(
+        `Published to TShirt Brothers — ${result.design.stone_count} stones, art library #${result.artLibraryId}. ` +
+          'Feature it on /bling from the TSB admin.',
+      )
+    } catch (e) {
+      setStatus(`Publish failed — ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPublishing(false)
+    }
+  }, [publishing, stones, sizes, colorOfStone, bom, framedCutJob, cutCount, fileName, editPublishKey])
   const saveDesign = useCallback(async () => {
     const h = fileHandleRef.current
     if (!h || !fsSupported) {
@@ -3953,6 +4010,9 @@ export default function App() {
       'sep',
       { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
       { label: 'Print 1:1 placement guide…', onClick: printPlacementGuide, disabled: !hasStones && !vectors.length },
+      'sep',
+      { label: publishing ? 'Publishing to TShirt Brothers…' : '💎 Publish to TShirt Brothers…', onClick: () => { void publishToShop() }, disabled: !hasStones || publishing },
+      { label: 'TSB publish key…', onClick: editPublishKey },
       'sep',
       { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount },
     ] },
