@@ -3854,6 +3854,8 @@ export function fillStones(
       out.push(p)
     }
   }
+  const FDBG = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG
+  if (FDBG) console.error(`fill: lattice=${out.length} comps=${fillComps.count} rows=${Array.from(compRows).filter(Boolean).length} dots=${Array.from(compDot).filter(Boolean).length}`)
 
   // NARROW-CHANNEL SALVAGE. The rigid lattice cannot be everywhere: a stroke
   // whose interior channel is barely a stone wide holds a legal position only
@@ -3866,6 +3868,104 @@ export function fillStones(
   const dotStones = new Set<Pt>()
   {
     const cm = new Uint8Array(w * h)
+    // Skeleton rows from a mask: trace, bridge junction breaks, place even
+    // rows, keep only coherent runs of 3+. Returns whether any run landed.
+    const rowsFromMask = (m: Uint8Array): boolean => {
+      let placedAny = false
+      const skel = skeletonize(m, w, h)
+      const traced = traceSkeleton(skel, w, h)
+        .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
+        .sort((a, b) => b.length - a.length)
+      // Bridge junction breaks. The skeleton fractures at every fork, and a
+      // row that restarts its beat at each fragment reads ragged — the break
+      // lands mid-stroke where nothing in the material justifies it. Join
+      // fragments whose endpoints nearly touch (longest first, so stubs
+      // attach to trunks, not to each other) and let one beat flow through.
+      const pool = [...traced]
+      const paths: Pt[][] = []
+      const dd = (p: Pt, q: Pt) => Math.hypot(p.x - q.x, p.y - q.y)
+      while (pool.length) {
+        let curP = pool.shift() as Pt[]
+        let grew = true
+        while (grew) {
+          grew = false
+          for (let k = 0; k < pool.length; k++) {
+            const c = pool[k]
+            const lim = rhythm * 1.8
+            const a0 = curP[0], a1 = curP[curP.length - 1]
+            const b0 = c[0], b1 = c[c.length - 1]
+            if (dd(a1, b0) <= lim) curP = curP.concat(c)
+            else if (dd(a1, b1) <= lim) curP = curP.concat([...c].reverse())
+            else if (dd(a0, b1) <= lim) curP = c.concat(curP)
+            else if (dd(a0, b0) <= lim) curP = [...c].reverse().concat(curP)
+            else continue
+            pool.splice(k, 1)
+            grew = true
+            break
+          }
+        }
+        paths.push(curP)
+      }
+      paths.sort((a, b) => b.length - a.length)
+      for (const pth of paths) {
+        let len = 0
+        for (let k = 1; k < pth.length; k++)
+          len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+        if (len < rhythm) continue
+        const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+          const drop = () => {
+            idx.remove(q)
+            return false
+          }
+          if (dtAt(q.x, q.y) < minPx) return drop()
+          if (!clearOfOutline(q)) return drop()
+          // the lattice already covers here — rows only fill its holes
+          if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
+          return true
+        })
+        // Coherence: an interior row is a RUN or it is nothing. Mixed
+        // outline/fill sizes put the medial right at the wall-clearance
+        // boundary, and the legality flicker shredded rows into singles and
+        // pairs that read as mistakes. Keep only runs of 3+ consecutive
+        // stones on the beat; release the fragments.
+        const runs: Pt[][] = []
+        let cur: Pt[] = []
+        for (const q of got) {
+          if (!cur.length || Math.hypot(q.x - cur[cur.length - 1].x, q.y - cur[cur.length - 1].y) <= rhythm * 1.6) cur.push(q)
+          else {
+            runs.push(cur)
+            cur = [q]
+          }
+        }
+        if (cur.length) runs.push(cur)
+        for (const r of runs) {
+          if (r.length >= 3) {
+            placedAny = true
+            out.push(...r)
+          } else for (const q of r) idx.remove(q)
+        }
+      }
+      return placedAny
+    }
+    // SCRIPT GLYPHS: when the lattice found almost nothing, the glyph is all
+    // stroke. The clearance-stamped mask shatters into pockets under mixed
+    // outline/fill sizes, and rows derived pocket-by-pocket come out as
+    // scatter (Doc, Spirit!, 2026-10-25). Derive the rows from the
+    // MATERIAL's own skeleton instead — continuous, exactly what fill-only
+    // mode does — and let per-stone legality plus the run cull drop what
+    // the walls refuse.
+    const materialRows = out.length < 3 && fixedPts.length > 0
+    if (materialRows) {
+      const mat2 = labelComponents(grid.bin, w, h)
+      for (let ml = 1; ml <= mat2.count; ml++) {
+        let any = false
+        for (let i = 0; i < w * h; i++) {
+          cm[i] = mat2.labels[i] === ml ? 1 : 0
+          if (cm[i]) any = true
+        }
+        if (any) rowsFromMask(cm)
+      }
+    }
     for (let lbl = 1; lbl <= fillComps.count; lbl++) {
       if (compDot[lbl]) {
         // one stone, dead centre of the dot
@@ -3887,6 +3987,7 @@ export function fillStones(
         continue
       }
       if (!compRows[lbl]) continue // lattice territory: no centered rows
+      if (materialRows) continue // the material pass already rowed this glyph
       let area = 0
       let deepest = -1
       let deepD = 0
@@ -3901,31 +4002,7 @@ export function fillStones(
         }
       }
       if (area < (pitch * pxPerMm) ** 2 * 0.25) continue
-      let rowPlaced = false
-      const skel = skeletonize(cm, w, h)
-      const paths = traceSkeleton(skel, w, h)
-        .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
-        .sort((a, b) => b.length - a.length)
-      for (const pth of paths) {
-        let len = 0
-        for (let k = 1; k < pth.length; k++)
-          len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
-        if (len < rhythm) continue
-        const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
-          const drop = () => {
-            idx.remove(q)
-            return false
-          }
-          if (dtAt(q.x, q.y) < minPx) return drop()
-          if (!clearOfOutline(q)) return drop()
-          // (component-level territory already guarantees the lattice ceded here)
-          // the lattice already covers here — salvage only fills its holes
-          if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
-          return true
-        })
-        if (got.length) rowPlaced = true
-        out.push(...got)
-      }
+      const rowPlaced = rowsFromMask(cm)
       // a channel whose skeleton yielded nothing — a note head's interior,
       // too big for the dot rule, too small for a traceable path — still
       // deserves its deepest-point stone rather than sitting hollow
@@ -3937,16 +4014,16 @@ export function fillStones(
           dotStones.add(q)
         }
       }
-      // COVERAGE PASS. The skeleton rows are the pretty answer when the trace
-      // succeeds, but script glyphs routinely defeat it: a loop's skeleton is
-      // a closed ring the tracer can't walk, a taper shatters into stubs
-      // shorter than one rhythm (skipped above). Everything the rows missed
-      // in this component still gets stones — greedy densest-first packing on
-      // the distance field, so placement starts mid-stroke and works outward,
-      // and every stone passes the same legality the rows enforce. Without
-      // this, fill-only script text came out as scattered chains with whole
-      // bars and loop-sides bare.
-      {
+      // COVERAGE PASS — FILL-ONLY designs. The skeleton rows are the pretty
+      // answer when the trace succeeds, but script glyphs routinely defeat
+      // it: a loop's skeleton is a closed ring the tracer can't walk, a
+      // taper shatters into stubs shorter than one rhythm (skipped above).
+      // In fill-only mode the stones ARE the lettering, so bare beats ugly:
+      // greedy densest-first packing covers what the rows missed. With an
+      // OUTLINE present the outline already draws the shape — greedy
+      // scatter inside it reads as noise, so the pass is skipped and the
+      // interior keeps only its coherent rows (Doc, 2026-10-25, Spirit!).
+      if (!fixedPts.length) {
         const stride = Math.max(1, Math.floor((pitch * pxPerMm) / 3))
         const cand: number[] = []
         for (let yy = 0; yy < h; yy += stride) {
@@ -3978,12 +4055,32 @@ export function fillStones(
   // are too light for a fill and only tiny pockets survive the edge inset.
   // a dot's centre stone is DELIBERATELY alone — the ring around it is
   // outline, not fill, so the lonely-stone cull must not eat it
+  if (FDBG) console.error(`fill: total-before-cull=${out.length}`)
+  // Except lonely CHAINS: a fill stone is part of the pattern only if it
+  // belongs to a run of 3+. Mixed outline/fill sizes can shatter a stroke's
+  // interior into pockets that each emit one or two stones — a neighbour
+  // test kept those pairs, and they read as mistakes (Doc, Spirit!,
+  // 2026-10-25). Group by proximity and drop every chain under 3 stones;
+  // a dot's centre stone is DELIBERATELY alone and survives.
   const near = rhythm * 1.6
-  const keep = out.filter(
-    (p) =>
-      dotStones.has(p) ||
-      out.some((q) => q !== p && Math.hypot(p.x - q.x, p.y - q.y) <= near),
-  )
+  const n = out.length
+  const parent = Array.from({ length: n }, (_, i2) => i2)
+  const find = (a: number): number => {
+    while (parent[a] !== a) {
+      parent[a] = parent[parent[a]]
+      a = parent[a]
+    }
+    return a
+  }
+  for (let i2 = 0; i2 < n; i2++)
+    for (let j2 = i2 + 1; j2 < n; j2++)
+      if (Math.hypot(out[i2].x - out[j2].x, out[i2].y - out[j2].y) <= near) parent[find(i2)] = find(j2)
+  const chain = new Map<number, number>()
+  for (let i2 = 0; i2 < n; i2++) {
+    const r = find(i2)
+    chain.set(r, (chain.get(r) ?? 0) + 1)
+  }
+  const keep = out.filter((p, i2) => dotStones.has(p) || (chain.get(find(i2)) ?? 0) >= 3)
   return keep
 }
 

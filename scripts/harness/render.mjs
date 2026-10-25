@@ -30,4 +30,4 @@ for (const s of debugStones) {
 for (const p of fillPts) svg += `<circle cx="${((p.x+5)*S).toFixed(1)}" cy="${((p.y+8)*S).toFixed(1)}" r="${1.25*S}" fill="#e05563" fill-opacity="0.85"/>`
 svg += '</svg>'
 await writeFile(outPath, svg)
-console.log('wrote', outPath, debugStones.length, 'stones')
+console.log('wrote', outPath, debugStones.length, 'outline +', fillPts.length, 'fill')
