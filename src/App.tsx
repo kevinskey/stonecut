@@ -1442,11 +1442,26 @@ export default function App() {
     const bar = barRef.current?.offsetHeight ?? 36
     return { el, bar, w: el?.clientWidth ?? 0, h: (el?.clientHeight ?? 0) - bar }
   }, [])
-  // Zoom keeping whatever is in the middle of the viewport in the middle.
+  // Zoom buttons / ⌘± / the slider anchor on the selection when there is one
+  // (Doc, 2026-10-25): the selected design holds its spot while the board
+  // scales around it — on-screen it stays put, off-screen it gets centred.
+  // No selection: zoom keeps the middle of the viewport in the middle.
+  // Pinch / ⌘-wheel still zoom about the cursor (separate native handler).
+  const selAnchorRef = useRef<Pt | null>(null)
   const zoomAbout = useCallback((z: number) => {
     const { el, bar, w, h } = viewport()
     if (!el) return
     const z0 = zoomRef.current
+    const a = selAnchorRef.current
+    if (a) {
+      // Same screen convention as setView: centre of the visible canvas is
+      // {w/2, h/2}, i.e. p.y*z0 - scrollTop + bar.
+      const sx = a.x * z0 - el.scrollLeft
+      const sy = a.y * z0 - el.scrollTop + bar
+      const vis = sx >= 0 && sx <= w && sy >= 0 && sy <= h
+      setView(z, a, vis ? { x: sx, y: sy } : { x: w / 2, y: h / 2 })
+      return
+    }
     const centre = { x: (el.scrollLeft + w / 2) / z0, y: (el.scrollTop - bar + h / 2) / z0 }
     setView(z, centre, { x: w / 2, y: h / 2 })
   }, [setView, viewport])
@@ -1668,6 +1683,25 @@ export default function App() {
     }
     return isFinite(minX) ? { minX, minY, maxX, maxY } : null
   }, [selVecs, vectors, tool])
+  // Centre of everything selected (stones + cut-line objects), for the
+  // selection-anchored zoom above. Computed from the raw selections, not
+  // selBox/vecSelBox: those are null for partial-element picks or other tools.
+  useEffect(() => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const i of selection) {
+      const st = stones[i]
+      if (!st) continue
+      minX = Math.min(minX, st.x); minY = Math.min(minY, st.y)
+      maxX = Math.max(maxX, st.x); maxY = Math.max(maxY, st.y)
+    }
+    for (const v of vectors) {
+      if (!selVecs.has(v.id)) continue
+      const b = vecBox(v)
+      minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY)
+      maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY)
+    }
+    selAnchorRef.current = isFinite(minX) ? { x: (minX + maxX) / 2, y: (minY + maxY) / 2 } : null
+  }, [selection, stones, selVecs, vectors])
   const hitVecHandle = useCallback(
     (p: Pt): Handle | null => {
       if (!vecSelBox || tool !== 'select') return null
