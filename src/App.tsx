@@ -1497,44 +1497,17 @@ export default function App() {
   // they want it.
   const stoneCountRef = useRef(0)
   useEffect(() => { stoneCountRef.current = stones.length }, [stones.length])
-  // The view (zoom + scroll) is remembered, so a refresh comes back exactly
-  // where it was. Fitting the restored design on load zoomed in on it, which
-  // read as "refresh changes my zoom". Without a saved view: fit the sheet.
-  const VIEW_KEY = 'stonecut.view'
+  // The app always opens with the whole artboard in view (Doc, 2026-10-25).
+  // It used to restore the last session's zoom/scroll from localStorage, but
+  // coming back into a view zoomed on one corner of an old design read as
+  // broken; the saved-view machinery is gone.
   const didInitialFit = useRef(false)
   useEffect(() => {
     if (didInitialFit.current || !measured.current) return
     didInitialFit.current = true
-    try {
-      const v = JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null')
-      if (v && typeof v.zoom === 'number' && v.zoom >= ZOOM_MIN && v.zoom <= ZOOM_MAX) {
-        pendingScroll.current = { left: +v.left || 0, top: +v.top || 0 }
-        setZoom(v.zoom)
-        setViewTick((t) => t + 1)
-        return
-      }
-    } catch { /* fall through to the fit */ }
+    try { localStorage.removeItem('stonecut.view') } catch { /* ignore */ }
     fitSheet()
   }, [avail, fitSheet])
-  useEffect(() => {
-    const el = wrapRef.current
-    if (!el) return
-    let t: number | null = null
-    const save = () => {
-      if (t != null) window.clearTimeout(t)
-      t = window.setTimeout(() => {
-        try { localStorage.setItem(VIEW_KEY, JSON.stringify({ zoom: zoomRef.current, left: el.scrollLeft, top: el.scrollTop })) } catch { /* ignore */ }
-      }, 300)
-    }
-    el.addEventListener('scroll', save, { passive: true })
-    return () => { el.removeEventListener('scroll', save); if (t != null) window.clearTimeout(t) }
-  }, [])
-  useEffect(() => {
-    if (!didInitialFit.current) return
-    const el = wrapRef.current
-    if (!el) return
-    try { localStorage.setItem(VIEW_KEY, JSON.stringify({ zoom, left: el.scrollLeft, top: el.scrollTop })) } catch { /* ignore */ }
-  }, [zoom, viewTick])
   const drag = useRef<{ startX: number; startY: number; moved: boolean; orig: Stone[] } | null>(null)
   // marquee: drag over empty canvas in Select mode to box-select stones
   // x1/y1 live in the ref too: mouseup must not depend on React having
