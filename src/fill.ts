@@ -1538,7 +1538,7 @@ export function outlineOrSpine(
       const chMask = new Uint8Array(w * h)
       const acceptedMask = new Uint8Array(w * h)
       let anyAccepted = false
-      const SC_DBG = typeof process !== 'undefined' && process.env?.SC_DBG
+      const SC_DBG = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG
       for (const [lbl, px] of members) {
         if (SC_DBG) {
           let sx = 0, sy = 0
