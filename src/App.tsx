@@ -199,7 +199,8 @@ const ZOOM_MAX = 40
 // browser so a refresh, a crash, or a closed tab does not wipe the work.
 // Settings were always saved; the stones were the one thing that was not.
 const DESIGN_KEY = 'stonecut.design'
-function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements; vectors: VecItem[] } | null {
+type SavedLastText = { el: number; fontName: string; text: string; height: number; spacing: number; bend: number }
+function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements; vectors: VecItem[]; lastText?: SavedLastText } | null {
   try {
     const raw = localStorage.getItem(DESIGN_KEY)
     if (!raw) return null
@@ -215,7 +216,11 @@ function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elem
     const vectors: VecItem[] = Array.isArray(d.vectors)
       ? (d.vectors as VecItem[]).filter((v) => Array.isArray(v?.base) && typeof v.x === 'number' && typeof v.s === 'number')
       : []
-    return { stones, sizes, elements, vectors }
+    const lastText: SavedLastText | undefined =
+      d.lastText && typeof d.lastText.el === 'number' && typeof d.lastText.text === 'string'
+        ? { el: d.lastText.el, fontName: String(d.lastText.fontName ?? ''), text: d.lastText.text, height: +d.lastText.height, spacing: +d.lastText.spacing, bend: +d.lastText.bend || 0 }
+        : undefined
+    return { stones, sizes, elements, vectors, lastText }
   } catch {
     return null
   }
@@ -228,6 +233,12 @@ export default function App() {
   // last image commit — while untouched, generation-setting changes REGENERATE
   // it in place instead of only affecting the next add
   const lastImageRef = useRef<{ file: File; offsetY: number; before: Stone[]; after: Stone[]; el?: number } | null>(null)
+  // The last text commit, so stone-setting changes can regenerate it in
+  // place while its text is untouched (same idea as the image regen).
+  // Persisted with the design and rehydrated when the font comes back:
+  // losing it across a reload meant the first setting change popped a
+  // duplicate preview below the restored design instead of re-stoning it.
+  const lastTextRef = useRef<{ el: number; font: unknown; fontName: string; text: string; height: number; spacing: number; bend: number } | null>(null)
   // element ids continue past whatever the saved design used
   const elSeq = useRef((savedDesign.current?.stones ?? []).reduce((m, s) => Math.max(m, s.el ?? 0), 0) + 1)
   // Undo/redo can resurrect stones whose ids are above elSeq (File -> Open
@@ -260,7 +271,12 @@ export default function App() {
           const live = new Set(stones.map((st) => st.el))
           const kept: Elements = {}
           for (const [k, r] of Object.entries(elements)) if (live.has(+k)) kept[+k] = r
-          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept, vectors }))
+          const lt = lastTextRef.current
+          const lastText =
+            lt && live.has(lt.el)
+              ? { el: lt.el, fontName: lt.fontName, text: lt.text, height: lt.height, spacing: lt.spacing, bend: lt.bend }
+              : undefined
+          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept, vectors, lastText }))
         } else localStorage.removeItem(DESIGN_KEY)
       } catch (e) {
         console.error('[stonecut] could not save design', e)
@@ -903,9 +919,16 @@ export default function App() {
   useEffect(() => {
     setPreviewLive(true)
   }, [textPreview, fontOpen, pinPreviewBase])
-  // The last text commit, so stone-setting changes can regenerate it in
-  // place while its text is untouched (same idea as the image regen).
-  const lastTextRef = useRef<{ el: number; font: unknown; text: string; height: number; spacing: number; bend: number } | null>(null)
+  // lastTextRef is declared up with the design state (it persists with it).
+  // Rehydrate it once the restored font arrives: the regen-in-place guard
+  // compares the live font object, so we re-point it at the loaded font
+  // when the names match and the element is still on the board.
+  useEffect(() => {
+    const saved = savedDesign.current?.lastText
+    if (!saved || lastTextRef.current || !font || fontName !== saved.fontName) return
+    if (!stonesRef.current.some((st) => st.el === saved.el)) return
+    lastTextRef.current = { el: saved.el, font, fontName, text: saved.text, height: saved.height, spacing: saved.spacing, bend: saved.bend }
+  }, [font, fontName])
   useEffect(() => {
     // No holes until the user says "rhinestones" — cut-lines-only (and
     // not-yet-chosen) previews show the letter outlines only, which also
@@ -1202,11 +1225,11 @@ export default function App() {
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
     const el = addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
-    lastTextRef.current = { el, font, text, height: textHeight, spacing: letterSpacing, bend: textBend }
+    lastTextRef.current = { el, font, fontName, text, height: textHeight, spacing: letterSpacing, bend: textBend }
     setPreviewBaseY(null); setPreviewOffX(10)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
+  }, [font, fontName, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
 
   const generateShape = useCallback(() => {
     const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
