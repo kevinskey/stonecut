@@ -406,26 +406,43 @@ function walkPoly(poly: Pt[], closed: boolean, pitch: number, idx: SpacingIndex,
   // CLOSED loop: divide the circumference into equal parts. Walking it
   // greedily leaves the remainder at the seam — an O came out with 28 gaps
   // of 4.54mm and one of 7.86mm.
+  // A point canPlace refuses (e.g. an inner-ring stone landing opposite an
+  // already-placed outer-ring stone where the stroke is near the floor) must
+  // not become a hole in the ring: try m, m−1, m+1 over a fine phase sweep
+  // and take a COMPLETE ring at a slightly different beat over a holed ring
+  // at the target beat (same never-silent-drop rule as the span engine).
   if (closed) {
-    let m = Math.max(3, Math.round(path.total / target))
-    while (m > 3 && path.total / m < pitch) m--
-    const sp = path.total / m
+    let m0 = Math.max(3, Math.round(path.total / target))
+    while (m0 > 3 && path.total / m0 < pitch) m0--
+    const counts = [m0, m0 - 1, m0 + 1].filter((m) => m >= 3 && path.total / m >= pitch)
+    if (!counts.length) counts.push(Math.max(3, m0))
+    const PH = Math.max(phases, 12)
     let best: Pt[] = []
-    for (let ph = 0; ph < phases; ph++) {
-      const offset = (ph / phases) * sp
-      const placed: Pt[] = []
-      for (let i = 0; i < m; i++) {
-        const p = pointAt(path, offset + i * sp)
-        let ok = idx.canPlace(p)
-        if (ok)
-          for (const q of placed)
-            if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
-              ok = false
-              break
-            }
-        if (ok) placed.push(p)
+    let bestComplete = false
+    for (const m of counts) {
+      const sp = path.total / m
+      for (let ph = 0; ph < PH; ph++) {
+        const offset = (ph / PH) * sp
+        const placed: Pt[] = []
+        for (let i = 0; i < m; i++) {
+          const p = pointAt(path, offset + i * sp)
+          let ok = idx.canPlace(p)
+          if (ok)
+            for (const q of placed)
+              if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
+                ok = false
+                break
+              }
+          if (ok) placed.push(p)
+        }
+        const complete = placed.length === m
+        if ((complete && !bestComplete) || (complete === bestComplete && placed.length > best.length)) {
+          best = placed
+          bestComplete = complete
+        }
       }
-      if (placed.length > best.length) best = placed
+      // counts are ordered nearest-to-target first: the first complete count wins
+      if (bestComplete) break
     }
     for (const p of best) idx.add(p)
     return best
@@ -1521,7 +1538,13 @@ export function outlineOrSpine(
       const chMask = new Uint8Array(w * h)
       const acceptedMask = new Uint8Array(w * h)
       let anyAccepted = false
+      const SC_DBG = typeof process !== 'undefined' && process.env?.SC_DBG
       for (const [lbl, px] of members) {
+        if (SC_DBG) {
+          let sx = 0, sy = 0
+          for (const i of px) { sx += i % w; sy += (i / w) | 0 }
+          console.error(`ch lbl=${lbl} px=${px.length} multi=${multi[lbl]} flank=${flank[lbl]} centre=(${(sx / px.length / pxPerMm).toFixed(1)},${(sy / px.length / pxPerMm).toFixed(1)})`)
+        }
         // a detail line lives INSIDE one letter; letter-to-letter gaps have
         // two flanking letters and are left alone
         if (multi[lbl] || !flank[lbl] || px.length < 6) continue
@@ -1564,6 +1587,7 @@ export function outlineOrSpine(
         // rounded corner never does. Rejecting on any single one-sided pixel
         // condemned every wedge in a K, V or N — both walls then got stoned
         // and their stones interleaved into a zigzag down the taper.
+        if (SC_DBG) console.error(`  border=${borderPx} open=${openPx}`)
         if (borderPx && openPx === borderPx) continue
         chMask.fill(0)
         for (const i of px) chMask[i] = 1
@@ -1580,7 +1604,44 @@ export function outlineOrSpine(
         const g90 = gaps[Math.floor(0.9 * (gaps.length - 1))]
         const thin = g90 < pitch * 1.3
         const wedge = g50 < pitch * 1.1 && g90 >= pitch * 1.3
+        if (SC_DBG) console.error(`  g50=${g50.toFixed(2)} g90=${g90.toFixed(2)} thin=${thin} wedge=${wedge}`)
         if (!thin && !wedge) continue
+        // A detail line threads BETWEEN material: along its skeleton the
+        // letter must flank it on BOTH sides for most of its length (an M
+        // valley left/right, an E notch above/below). The thin background
+        // band that wraps AROUND a short glyph (lowercase o mid-word never
+        // reaches the clamp border, so the corner-pocket test can't see it)
+        // fools every 1-D width metric, but material only ever sits on its
+        // inner side — reject it here, not by luck of where the trace broke.
+        {
+          let skN = 0
+          let bilat = 0
+          for (let y = 1; y < h - 1; y++)
+            for (let x = 1; x < w - 1; x++) {
+              const i = y * w + x
+              if (!skel[i]) continue
+              skN++
+              const reach = Math.ceil(2 * dtInv[i]) + 6
+              let ok = false
+              for (const [dx2, dy2] of [[1, 0], [0, 1], [1, 1], [1, -1]] as const) {
+                let a = false
+                let b = false
+                for (let k = 1; k <= reach && !(a && b); k++) {
+                  const x1 = x + dx2 * k, y1 = y + dy2 * k
+                  const x2 = x - dx2 * k, y2 = y - dy2 * k
+                  if (!a && x1 >= 0 && y1 >= 0 && x1 < w && y1 < h && labels[y1 * w + x1]) a = true
+                  if (!b && x2 >= 0 && y2 >= 0 && x2 < w && y2 < h && labels[y2 * w + x2]) b = true
+                }
+                if (a && b) {
+                  ok = true
+                  break
+                }
+              }
+              if (ok) bilat++
+            }
+          if (SC_DBG) console.error(`  skN=${skN} bilat=${bilat} frac=${(bilat / Math.max(1, skN)).toFixed(2)}`)
+          if (bilat < skN * 0.5) continue
+        }
         // a detail line must be LINE-shaped: much longer than wide. Square-ish
         // pockets (E notches) have X-shaped spur skeletons that fake both
         // thinness and taper — elongation is the unfakeable test.
@@ -1604,6 +1665,7 @@ export function outlineOrSpine(
           // long to clear the bar — it gets rejected, both its walls get
           // stoned, and where they converge the stones interleave into a
           // zigzag instead of running down the middle.
+          if (SC_DBG) console.error(`  chord=${chord.toFixed(1)} arc=${arcLen.toFixed(1)} ratio=${(chord / arcLen).toFixed(2)} -> ${chord < Math.max(2.2 * (wedge ? g50 : g90), pitch * 1.1) || (arcLen > 0 && chord / arcLen < 0.65) ? 'REJECT' : 'ACCEPT'}`)
           if (chord < Math.max(2.2 * (wedge ? g50 : g90), pitch * 1.1)) continue
           if (arcLen > 0 && chord / arcLen < 0.65) continue
         }
