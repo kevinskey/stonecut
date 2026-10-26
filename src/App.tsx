@@ -258,6 +258,23 @@ const LRISY_COLORS: { n: string; c: string }[] = [
   { n: 'Orange Red', c: '#e2502b' },
   { n: 'Brown', c: '#6b4a2f' },
 ]
+// Catalog name for a hex: exact palette match, else the nearest palette
+// color within a tolerant RGB distance (marked ≈), else the raw hex.
+function colorName(hex: string): string {
+  const h = hex.toLowerCase()
+  const exact = LRISY_COLORS.find((s) => s.c === h)
+  if (exact) return exact.n
+  const rgb = (x: string) => [parseInt(x.slice(1, 3), 16), parseInt(x.slice(3, 5), 16), parseInt(x.slice(5, 7), 16)]
+  if (!/^#[0-9a-f]{6}$/.test(h)) return hex
+  const [r, g, b] = rgb(h)
+  let best: { n: string; d: number } | null = null
+  for (const s of LRISY_COLORS) {
+    const [r2, g2, b2] = rgb(s.c)
+    const d = Math.hypot(r - r2, g - g2, b - b2)
+    if (!best || d < best.d) best = { n: s.n, d }
+  }
+  return best && best.d < 60 ? `≈ ${best.n}` : hex
+}
 function Swatches({ value, onPick }: { value: string; onPick: (c: string) => void }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }} title="Lrisy stone colors">
@@ -2956,6 +2973,7 @@ export default function App() {
       title: `${stones.length} stones · ${new Date().toLocaleDateString()}`,
       boardLabel: `${boardWIn}″ × ${boardHIn}″, origin lower-${originCorner === 'br' ? 'right' : 'left'}`,
       material: `${preset.name} · force ${preset.force} · speed ${preset.speed}${preset.passes > 1 ? ` · ${preset.passes} passes` : ''}`,
+      nameOf: colorName,
     })
     const win = window.open('', '_blank')
     if (!win) { setStatus('Pop-up blocked — allow pop-ups for this site to print'); return }
@@ -5184,7 +5202,7 @@ export default function App() {
               <tbody>
                 {bom.map((r) => (
                   <tr key={`${r.size}|${r.color}`}>
-                    <td><span style={{ display: 'inline-block', width: 11, height: 11, borderRadius: '50%', background: r.color, border: '1px solid #666', marginRight: 6, verticalAlign: -1 }} />{r.color}</td>
+                    <td title={r.color}><span style={{ display: 'inline-block', width: 11, height: 11, borderRadius: '50%', background: r.color, border: '1px solid #666', marginRight: 6, verticalAlign: -1 }} />{colorName(r.color)}</td>
                     <td>{r.size}</td>
                     <td style={{ textAlign: 'right' }}>{r.n}</td>
                     <td style={{ textAlign: 'right' }}>{Math.ceil(r.n * 1.1)}</td>

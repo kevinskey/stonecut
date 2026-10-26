@@ -276,7 +276,7 @@ export function workOrderHtml(
   job: Job,
   bom: BomRow[],
   colorOf: (s: Stone) => string,
-  meta: { title: string; boardLabel: string; material: string },
+  meta: { title: string; boardLabel: string; material: string; nameOf?: (hex: string) => string },
 ): string {
   const total = bom.reduce((t, r) => t + r.n, 0)
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -300,7 +300,7 @@ export function workOrderHtml(
   const rows = bom
     .map(
       (r) => `<tr>
-  <td><span class="sw" style="background:${r.color}"></span>${r.color}</td>
+  <td><span class="sw" style="background:${r.color}"></span>${meta.nameOf ? `${meta.nameOf(r.color)} <small style="color:#888">${r.color}</small>` : r.color}</td>
   <td>${r.size}</td>
   <td>${r.stoneMm ? r.stoneMm.toFixed(1) : '—'} mm</td>
   <td>${r.holeMm.toFixed(1)} mm</td>
