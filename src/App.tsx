@@ -36,7 +36,8 @@ type StoneMode = 'outline' | 'fill' | 'both'
 // the scale they were generated; sx/sy is the scale the element is at now.
 // Resizing never scales holes: the contours are scaled and the stones are
 // laid out again at the panel's current stone size and spacing.
-interface Recipe { contours: Pt[][]; mode: StoneMode; wholeWord: boolean; sx: number; sy: number }
+interface TextMeta { text: string; fontName: string; fontId: string; weight: 'bold' | 'regular'; height: number; spacing: number; bend: number }
+interface Recipe { contours: Pt[][]; mode: StoneMode; wholeWord: boolean; sx: number; sy: number; textMeta?: TextMeta }
 type Elements = Record<number, Recipe>
 // A vector cut: an imported SVG flattened to mm polylines. `base` is the
 // file's geometry normalised to (0,0); x/y/s place and scale it on the board.
@@ -212,7 +213,10 @@ function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elem
     if (d.elements && typeof d.elements === 'object')
       for (const [k, r] of Object.entries(d.elements as Record<string, Recipe>))
         if (Array.isArray(r?.contours) && typeof r.sx === 'number' && typeof r.sy === 'number')
-          elements[+k] = { contours: r.contours, mode: r.mode ?? 'outline', wholeWord: !!r.wholeWord, sx: r.sx, sy: r.sy }
+          elements[+k] = {
+            contours: r.contours, mode: r.mode ?? 'outline', wholeWord: !!r.wholeWord, sx: r.sx, sy: r.sy,
+            textMeta: r.textMeta && typeof r.textMeta.text === 'string' ? r.textMeta : undefined,
+          }
     const vectors: VecItem[] = Array.isArray(d.vectors)
       ? (d.vectors as VecItem[]).filter((v) => Array.isArray(v?.base) && typeof v.x === 'number' && typeof v.s === 'number')
       : []
@@ -983,7 +987,12 @@ export default function App() {
   // A change to the TEXT itself (words, font, height, spacing) is a new
   // design: show the preview again. Stone/fill setting changes are handled
   // further down — they re-stone the design already on the board instead.
+  // EXCEPT while a committed text element is selected: then the Text panel
+  // is EDITING that element (see the editable-text effects below), and the
+  // preview must stay out of the way.
+  const editingTextElRef = useRef<number | null>(null)
   useEffect(() => {
+    if (editingTextElRef.current != null) return
     setPreviewLive(true)
   }, [textPreview, fontOpen, pinPreviewBase])
   // lastTextRef is declared up with the design state (it persists with it).
@@ -1291,12 +1300,17 @@ export default function App() {
     // commit exactly where the preview showed; release the pin so the next
     // preview session stacks below the committed stones
     const offsetY = previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
-    const el = addGenerated(pts, offsetY, { contours, mode: textMode, wholeWord: true })
+    const el = addGenerated(pts, offsetY, {
+      contours, mode: textMode, wholeWord: true,
+      // the committed design remembers WHAT TEXT it is — selecting it later
+      // reloads these into the Text panel and edits re-stone it in place
+      textMeta: { text, fontName, fontId: selFont, weight, height: textHeight, spacing: letterSpacing, bend: textBend },
+    })
     lastTextRef.current = { el, font, fontName, text, height: textHeight, spacing: letterSpacing, bend: textBend }
     setPreviewBaseY(null); setPreviewOffX(10)
     setPreviewLive(false)
     setStatus(`Added ${pts.length} stones from text`)
-  }, [font, fontName, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
+  }, [font, fontName, selFont, weight, text, textHeight, letterSpacing, textBend, textPreview, textMode, contoursToStones, stones.length, bbox.maxY, previewBaseY, addGenerated])
 
   const generateShape = useCallback(() => {
     const { contours } = shapeToContours(shapeKind, shapeW, shapeH)
@@ -1963,6 +1977,78 @@ export default function App() {
     },
     [contoursToStones, sizes, curSize],
   )
+  // ---------------------------------------------------------------------
+  // EDITABLE TEXT. A committed text design remembers its recipe (textMeta);
+  // selecting it loads the words/font/size back into the Text panel, and
+  // any further edit re-stones THAT element in place — same board position,
+  // no new copy. The preview stays dormant the whole time.
+  // ---------------------------------------------------------------------
+  const pendingFontRef = useRef<string | null>(null)
+  useEffect(() => {
+    const meta = selectedEl != null ? elementsRef.current[selectedEl]?.textMeta : undefined
+    editingTextElRef.current = meta && selectedEl != null ? selectedEl : null
+    if (!meta) return
+    setText(meta.text)
+    setTextHeight(meta.height)
+    setLetterSpacing(meta.spacing)
+    setTextBend(meta.bend)
+    setPreviewLive(false)
+    if (fontName !== meta.fontName) {
+      // the element was set in another font: swap the panel to it before
+      // any edit regenerates — and remember we're waiting, so the regen
+      // below doesn't re-stone the design in the WRONG font meanwhile
+      const gf = gfonts.find((g) => g.id === meta.fontId) ?? gfonts.find((g) => g.f === meta.fontName)
+      if (gf) {
+        pendingFontRef.current = meta.fontName
+        setWeight(meta.weight)
+        void loadGFont(gf, meta.weight)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEl])
+  useEffect(() => {
+    const el = editingTextElRef.current
+    if (el == null || selectedEl !== el) return
+    const rec = elementsRef.current[el]
+    const meta = rec?.textMeta
+    if (!meta || !textPreview || !font || !text.trim()) return
+    if (pendingFontRef.current) {
+      if (fontName !== pendingFontRef.current) return // element's font still loading
+      pendingFontRef.current = null
+    }
+    const changed =
+      meta.text !== text || meta.height !== textHeight || meta.spacing !== letterSpacing ||
+      meta.bend !== textBend || meta.fontName !== fontName || meta.weight !== weight
+    if (!changed) {
+      // settled: arm the stone-setting regen machinery on this element
+      lastTextRef.current = { el, font, fontName, text, height: textHeight, spacing: letterSpacing, bend: textBend }
+      return
+    }
+    const t = window.setTimeout(() => {
+      if (!stonesRef.current.some((st) => st.el === el)) return
+      const { contours } = textPreview
+      const pts = contoursToStones(contours, rec.mode, true)
+      if (!pts.length) { setStatus('Too small to hold stones at this size'); return }
+      // hold the element's top-left anchor on the board
+      let oMinX = Infinity, oMinY = Infinity
+      for (const st of stonesRef.current) if (st.el === el) { oMinX = Math.min(oMinX, st.x); oMinY = Math.min(oMinY, st.y) }
+      let nMinX = Infinity, nMinY = Infinity
+      for (const q of pts) { nMinX = Math.min(nMinX, q.x); nMinY = Math.min(nMinY, q.y) }
+      pushUndo(stonesRef.current)
+      const base = stonesRef.current.filter((st) => st.el !== el)
+      const fresh: Stone[] = pts.map((q) => ({ x: q.x - nMinX + oMinX, y: q.y - nMinY + oMinY, size: q.size ?? curSize, color: q.color, layer: q.layer ?? 'outline', el }))
+      const next = [...base, ...fresh]
+      stonesRef.current = next
+      setStones(next)
+      setSelection(new Set(fresh.map((_, i) => base.length + i)))
+      const newMeta: TextMeta = { text, fontName, fontId: selFont, weight, height: textHeight, spacing: letterSpacing, bend: textBend }
+      setElements((prev) => ({ ...prev, [el]: { ...prev[el], contours: normaliseContours(contours), sx: 1, sy: 1, textMeta: newMeta } }))
+      lastTextRef.current = { el, font, fontName, text, height: textHeight, spacing: letterSpacing, bend: textBend }
+      setPreviewLive(false)
+      setStatus(`Re-stoned “${text}” — ${fresh.length} stones`)
+    }, 350)
+    return () => window.clearTimeout(t)
+  }, [selectedEl, textPreview, text, textHeight, letterSpacing, textBend, font, fontName, weight, selFont, contoursToStones, curSize, pushUndo])
   // Stone / fill setting changes: if the last text commit is still on the
   // board with its text unchanged, re-stone THAT design in place (same
   // size, new stones). Otherwise the change applies to the live preview.
