@@ -4392,7 +4392,7 @@ export default function App() {
               // cap by viewport HEIGHT too: at full 520px width the 620px-tall
               // canvas pushed the view/size controls and the customer-PNG
               // button below the fold on a laptop screen
-              style={{ borderRadius: 8, width: 'auto', maxWidth: '100%', maxHeight: 'min(56vh, 620px)', display: 'block', margin: '0 auto', cursor: 'grab', touchAction: 'none' }}
+              style={{ borderRadius: 8, width: 'auto', maxWidth: '100%', maxHeight: 'min(48vh, 620px)', display: 'block', margin: '0 auto', cursor: 'grab', touchAction: 'none' }}
               onPointerDown={(e) => { mkDrag.current = { x: e.clientX, y: e.clientY }; e.currentTarget.setPointerCapture(e.pointerId) }}
               onPointerMove={(e) => {
                 const d = mkDrag.current
