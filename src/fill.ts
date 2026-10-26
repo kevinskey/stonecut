@@ -1413,7 +1413,7 @@ export function outlineOrSpine(
   // from the same vector: opposite sides of the contour paired point-by-
   // point. "Just follow the vector" — the drawn path, not a pixel skeleton.
   const bandRings: { outer: Pt[]; inner: Pt[] }[] = []
-  const openBands: { contours: Pt[][]; medW: number }[] = []
+  const openBands: { contours: Pt[][]; medW: number; uniform?: boolean }[] = []
   const bandLbls = new Set<number>()
   // Walls are placed from the MERGED outline, not the source contours.
   //
@@ -1799,7 +1799,14 @@ export function outlineOrSpine(
         ws.sort((a, b) => a - b)
         const med = ws[Math.floor(ws.length / 2)]
         const p90 = ws[Math.floor(ws.length * 0.9)]
-        if (!(med < needW && p90 < needW * 1.4)) continue
+        // MONOLINE POLICY: a component whose stroke width is UNIFORM (p90
+        // within 1.35× of median) and under 1.5×pitch is a monoline script
+        // stroke — it runs as ONE line for its whole length. Judged per
+        // stretch it flickered walls/spine as the width wobbled around the
+        // bar (Doc, Dancing Script, 2026-10-25); the long-standing law says
+        // demote to centreline below 1.5×pitch, judged by the MEDIAN.
+        const monoline = p90 < med * 1.35 && med < pitch * 1.5
+        if (!(med < needW && p90 < needW * 1.4) && !monoline) continue
         // a RING band — closed loop, exactly two boundary contours — gets
         // its midline from the smooth vector contours (below), which keeps
         // corners crisp and rows even; a pixel skeleton of a hand-drawn
@@ -1853,15 +1860,17 @@ export function outlineOrSpine(
             spinedMask[i2] = 1
             thin[i2] = 0
           }
-        } else if (med < needW * 0.85) {
+        } else if (med < needW * 0.85 || monoline) {
           // a narrow STROKE follows its vector — open paths, loops and
           // counters together. The WHOLE component is offered to the
-          // pairing pass, but the single-line-vs-walls decision is made
-          // PER PAIR by local width: a cursive capital wide enough for two
-          // rows keeps its walls while its connected lowercase runs as a
-          // single line. Only midpoints that actually land mask out walls,
-          // so the component's contours stay in the wall list.
-          openBands.push({ contours: bc, medW: med })
+          // pairing pass. For MODULATED faces the single-line-vs-walls
+          // decision is made PER PAIR by local width (a cursive capital
+          // wide enough for two rows keeps its walls while its connected
+          // lowercase runs as a single line); a monoline band skips that
+          // veto and lines end to end. Only midpoints that actually land
+          // mask out walls, so the component's contours stay in the wall
+          // list.
+          openBands.push({ contours: bc, medW: med, uniform: monoline })
           for (const i2 of mem2) thin[i2] = 0
         } else {
           for (const i2 of mem2) thin[i2] = 1
@@ -2101,7 +2110,13 @@ export function outlineOrSpine(
     }
     const n = pts.length
     if (n < 8) continue
-    const minArc = Math.max(3, band.medW * 2.2)
+    // At a 180° fold — a crown, a stroke END — the true opposite-side
+    // partner is CLOSE in arc (≈ π·w/2), and the 2.2×w floor rejected it:
+    // crowns and tips got no midline, and taper/wall stones filled the gap
+    // off-line. The midpoint depth test below already rejects same-side
+    // neighbour pairs (their midpoint sits on the edge), so a uniform
+    // monoline band can pair right around its folds.
+    const minArc = Math.max(3, band.medW * (band.uniform ? 1.05 : 2.2))
     // opposite-side pairing -> midpoint cloud (deduped on a 0.4mm grid).
     // Pairs beyond medW*1.8 are rejected below anyway, so the partner search
     // only needs a spatial hash within that radius — the all-pairs scan was
@@ -2134,6 +2149,11 @@ export function outlineOrSpine(
               if (arc < minArc) continue
             }
             const dd = (pts[j].x - pts[i].x) ** 2 + (pts[j].y - pts[i].y) ** 2
+            // the floor must apply DURING selection: a same-side neighbour
+            // slightly closer than the true cross partner would win the
+            // nearest-pick, fail the depth veto, and leave the sample with
+            // no midpoint at all — whole stretches lost their line that way
+            if (band.uniform && dd < (band.medW * 0.55) ** 2) continue
             if (dd < bd) {
               bd = dd
               bj = j
@@ -2144,10 +2164,15 @@ export function outlineOrSpine(
       // a true opposite partner sits about a stroke-width away; a far-off
       // "nearest" means i is at a tip or junction mouth — skip it
       if (Math.sqrt(bd) > band.medW * 1.8) continue
+      // ...and no closer than about half a stroke-width: with the fold-
+      // friendly arc floor, same-side neighbours on a tight inner curve
+      // can pair and drop false midpoints just inside the concave edge.
+      if (band.uniform && Math.sqrt(bd) < band.medW * 0.55) continue
       // PER-PAIR width decision: wide enough here for two wall rows means
       // NO midpoint — the walls keep this stretch (a cursive capital joined
-      // to a thin lowercase was getting a midline plus rescue rows)
-      if (Math.sqrt(bd) >= needW * 0.85) continue
+      // to a thin lowercase was getting a midline plus rescue rows).
+      // A uniform monoline band skips the veto: one line, end to end.
+      if (!band.uniform && Math.sqrt(bd) >= needW * 0.85) continue
       const m = { x: (pts[i].x + pts[bj].x) / 2, y: (pts[i].y + pts[bj].y) / 2 }
       // and the midpoint of a TRUE pair sits at the stroke's centre — about
       // half the pair distance deep. A false pair across a junction's
@@ -2157,7 +2182,11 @@ export function outlineOrSpine(
         const xi = Math.round(m.x * pxPerMm + padPx)
         const yi = Math.round(m.y * pxPerMm + padPx)
         if (xi < 0 || yi < 0 || xi >= w || yi >= h) continue
-        if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * 0.33) continue
+        // a true cross-stroke midpoint sits at the centre, ≈ half the pair
+        // distance deep. Uniform bands demand nearly that: with the fold-
+        // friendly arc floor, a same-side pair on a concave stretch has a
+        // shallower midpoint and must not seed a line off the vector.
+        if (dt[yi * w + xi] / pxPerMm < Math.sqrt(bd) * (band.uniform ? 0.44 : 0.33)) continue
       }
       const key = `${Math.round(m.x / 0.4)},${Math.round(m.y / 0.4)}`
       if (cloudKeys.has(key)) continue
