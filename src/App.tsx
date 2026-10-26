@@ -226,6 +226,56 @@ function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elem
   }
 }
 
+// Lrisy wholesale rhinestone range (lrisy.com/collections/wholesale-rhinestones-bulk,
+// pulled 2026-10-25) — their catalog color names with hexes approximated
+// from the product photos. The picker stays free-form; these are presets.
+const LRISY_COLORS: { n: string; c: string }[] = [
+  { n: 'Crystal (Silver White)', c: '#e9eef5' },
+  { n: 'AB Crystal Iridescent', c: '#d8e6f5' },
+  { n: 'Snow Opal', c: '#f4f6ef' },
+  { n: 'Black Pearl', c: '#23262e' },
+  { n: 'Jet Black', c: '#0d0d10' },
+  { n: 'Grey', c: '#9aa0a8' },
+  { n: 'Deep Blue', c: '#1d3f8f' },
+  { n: 'Dream Blue AB', c: '#9cc4f0' },
+  { n: 'Light Blue (Aquamarine)', c: '#7ec8e3' },
+  { n: 'Blue Purple', c: '#5a4fcf' },
+  { n: 'Purple', c: '#7a3fa8' },
+  { n: 'Emerald Green', c: '#0e7a4f' },
+  { n: 'Grass Green', c: '#4caf50' },
+  { n: 'Olive Green', c: '#708238' },
+  { n: 'Pacific Opal', c: '#a7d8c9' },
+  { n: 'Lemon Yellow', c: '#f7e04b' },
+  { n: 'Yellow Gold', c: '#e8b923' },
+  { n: 'Gold', c: '#d4af37' },
+  { n: 'Khaki', c: '#b9a37e' },
+  { n: 'Champagne Pink', c: '#efc9b8' },
+  { n: 'Pink Opal', c: '#f4b8c8' },
+  { n: 'Gold Pink', c: '#e89bb0' },
+  { n: 'Fuchsia (Rose Pink)', c: '#d81b7f' },
+  { n: 'Rose Red', c: '#c21e56' },
+  { n: 'American Red', c: '#c8102e' },
+  { n: 'Orange Red', c: '#e2502b' },
+  { n: 'Brown', c: '#6b4a2f' },
+]
+function Swatches({ value, onPick }: { value: string; onPick: (c: string) => void }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }} title="Lrisy stone colors">
+      {LRISY_COLORS.map((s) => (
+        <button
+          key={s.c}
+          title={s.n}
+          onClick={() => onPick(s.c)}
+          style={{
+            width: 18, height: 18, padding: 0, flex: 'none', borderRadius: '50%', background: s.c,
+            border: value.toLowerCase() === s.c ? '2px solid #fff' : '1px solid #444c5e', cursor: 'pointer',
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
 export default function App() {
   const savedDesign = useRef(loadDesign())
   const [stones, setStones] = useState<Stone[]>(() => savedDesign.current?.stones ?? [])
@@ -4550,6 +4600,7 @@ export default function App() {
               <input type="color" value={outlineColor} onChange={(e) => setOutlineColor(e.target.value)} />
             </label>
           </div>
+          <Swatches value={outlineColor} onPick={setOutlineColor} />
           <div className="grid2">
             <label>Hole ⌀ (mm)
               <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
@@ -4616,6 +4667,7 @@ export default function App() {
               <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
             </label>
           </div>
+          <Swatches value={fillColor} onPick={setFillColor} />
           <div className="sizeinfo">
             Even spacing: stepped on the fill stone ·{' '}
             <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
