@@ -2459,7 +2459,9 @@ export default function App() {
         const vert = rz.handle.includes('n') || rz.handle.includes('s')
         let fx = horiz ? Math.abs(p.x - ax) / w0 : 1
         let fy = vert ? Math.abs(p.y - ay) / h0 : 1
-        if (horiz && vert) fx = fy = (fx + fy) / 2 // corners keep proportions
+        // corners keep proportions; Shift sets the aspect free (the engine
+        // regenerates from the scaled vectors, so stretching stays legal)
+        if (horiz && vert && !e.shiftKey) fx = fy = (fx + fy) / 2
         fx = Math.max(fx, 5 / w0)
         fy = Math.max(fy, 5 / h0)
         rz.fx = fx; rz.fy = fy
@@ -2497,14 +2499,27 @@ export default function App() {
         const ay = vr.handle.includes('n') ? b.maxY : b.minY
         const horiz = vr.handle.includes('e') || vr.handle.includes('w')
         const vert = vr.handle.includes('n') || vr.handle.includes('s')
-        let f = horiz && vert
-          ? (Math.abs(p.x - ax) / w0 + Math.abs(p.y - ay) / h0) / 2
-          : horiz ? Math.abs(p.x - ax) / w0 : Math.abs(p.y - ay) / h0
-        f = Math.max(f, 5 / Math.max(w0, h0))
+        // side handles stretch ONE axis; corners stay proportional unless
+        // Shift frees the aspect. VecItem has a single scale, so the x/y
+        // ratio is baked into the base points — recomputed from vr.orig
+        // every move, so nothing compounds.
+        let fx = horiz ? Math.abs(p.x - ax) / w0 : 1
+        let fy = vert ? Math.abs(p.y - ay) / h0 : 1
+        if (horiz && vert && !e.shiftKey) fx = fy = (fx + fy) / 2
+        fx = Math.max(fx, 5 / w0)
+        fy = Math.max(fy, 5 / h0)
+        const rx = fx / fy
         vr.moved = true
         setVectors(vr.orig.map((v) =>
           selVecs.has(v.id)
-            ? { ...v, s: v.s * f, x: ax + (v.x - ax) * f, y: ay + (v.y - ay) * f }
+            ? {
+                ...v,
+                s: v.s * fy,
+                x: ax + (v.x - ax) * fx,
+                y: ay + (v.y - ay) * fy,
+                base: rx === 1 ? v.base : v.base.map((pl) => pl.map((q) => ({ x: q.x * rx, y: q.y }))),
+                baseW: v.baseW * rx,
+              }
             : v))
         return
       }
