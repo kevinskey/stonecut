@@ -3417,7 +3417,22 @@ export default function App() {
     const freshVecs: VecItem[] = []
     const failed: string[] = []
     let widest = 0
+    // measure every row first so each name can CENTRE on the batch's widest
+    // (a roster reads as a column, not a left-aligned list)
+    const rowWidth = new Map<string, number>()
+    let maxRowW = 0
     for (const name of names) {
+      try {
+        const base = textToContours(font, name, textHeight, letterSpacing)
+        const cs = textBend ? arcContours(base.contours, textBend) : base.contours
+        let w = 0
+        for (const c of cs) for (const q of c) w = Math.max(w, q.x)
+        rowWidth.set(name, w)
+        maxRowW = Math.max(maxRowW, w)
+      } catch { /* the main loop reports it */ }
+    }
+    for (const name of names) {
+      const xOff = 10 + Math.max(0, (maxRowW - (rowWidth.get(name) ?? 0)) / 2)
       try {
         const base = textToContours(font, name, textHeight, letterSpacing)
         const contours = textBend ? arcContours(base.contours, textBend) : base.contours
@@ -3427,7 +3442,7 @@ export default function App() {
           if (!pts.length) { failed.push(name); continue }
           const el = nextEl()
           for (const p of pts) rowH = Math.max(rowH, p.y + (sizes[p.size ?? curSize]?.holeMm ?? 3) / 2)
-          freshStones.push(...pts.map((p) => ({ x: p.x + 10, y: p.y + cursor, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el })))
+          freshStones.push(...pts.map((p) => ({ x: p.x + xOff, y: p.y + cursor, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el })))
           addElems[el] = { contours: normaliseContours(contours), mode: textMode, wholeWord: true, sx: 1, sy: 1 }
         }
         if (wantLines) {
@@ -3447,7 +3462,7 @@ export default function App() {
               base: closed.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
               baseW: maxX - minX,
               baseH: maxY - minY,
-              x: 10,
+              x: xOff,
               y: cursor,
               s: 1,
             })
