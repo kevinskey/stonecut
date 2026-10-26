@@ -93,6 +93,38 @@ export function drawGem(ctx: CanvasRenderingContext2D, x: number, y: number, rPx
   ctx.globalAlpha = 1
 }
 
+// A stone catching the light: soft bloom + 4-point star flash. At garment
+// scale each stone is a couple of pixels — THIS is what reads as "shiny",
+// not the facets.
+export function drawGlint(ctx: CanvasRenderingContext2D, x: number, y: number, len: number) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, len)
+  g.addColorStop(0, 'rgba(255,255,255,0.95)')
+  g.addColorStop(0.25, 'rgba(255,255,255,0.30)')
+  g.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = g
+  ctx.beginPath()
+  ctx.arc(x, y, len, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.lineCap = 'round'
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+  ctx.lineWidth = Math.max(0.6, len * 0.09)
+  ctx.beginPath()
+  ctx.moveTo(x - len, y)
+  ctx.lineTo(x + len, y)
+  ctx.moveTo(x, y - len)
+  ctx.lineTo(x, y + len)
+  ctx.stroke()
+  const d = len * 0.45
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'
+  ctx.lineWidth = Math.max(0.5, len * 0.06)
+  ctx.beginPath()
+  ctx.moveTo(x - d, y - d)
+  ctx.lineTo(x + d, y + d)
+  ctx.moveTo(x - d, y + d)
+  ctx.lineTo(x + d, y - d)
+  ctx.stroke()
+}
+
 // ---------------------------------------------------------------------------
 // Garment mockup: a stylised tee drawn on canvas, the design stamped on the
 // chest at true relative scale (chest width in inches sets the mm -> px map).
@@ -131,6 +163,18 @@ function drawDesign(
   }
   for (const s of stones)
     drawGem(ctx, ox + (s.x - minX) * pxPerMm, oy + (s.y - minY) * pxPerMm, Math.max(1.2, s.rMm * pxPerMm), s.color)
+  // GLINT PASS — a scatter of stones flashing. Deterministic (index hash),
+  // so the same design sparkles identically on every render and in the
+  // customer-approval PNG; sizes vary so it reads as light, not a pattern.
+  for (let i = 0; i < stones.length; i++) {
+    const h = (i * 2654435761) >>> 0
+    if (h % 100 >= 14) continue
+    const s = stones[i]
+    const x = ox + (s.x - minX) * pxPerMm
+    const y = oy + (s.y - minY) * pxPerMm
+    const r = Math.max(1.2, s.rMm * pxPerMm)
+    drawGlint(ctx, x, y, r * (2.1 + ((h >>> 8) % 100) / 60))
+  }
 }
 
 export const MOCKUP_W = 520
