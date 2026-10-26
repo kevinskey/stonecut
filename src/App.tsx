@@ -3481,8 +3481,11 @@ export default function App() {
       (failed.length ? ` · failed: ${failed.join(', ')}` : '') +
       ' · counts are in Production',
     )
+    // The new rows stack BELOW everything on the board — often outside the
+    // current view, which read as "nothing happened". Show the whole design.
+    window.setTimeout(fitDesign, 60)
   }, [font, textOutput, teamNames, textHeight, letterSpacing, textBend, textMode, wantStones, wantLines,
-      contoursToStones, sizes, curSize, stones.length, vectors.length, bbox.maxY, boardHmm, boardHIn, boardWmm, boardWIn, pushUndo])
+      contoursToStones, sizes, curSize, stones.length, vectors.length, bbox.maxY, boardHmm, boardHIn, boardWmm, boardWIn, pushUndo, fitDesign])
 
   const addTextOutput = useCallback(() => {
     if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
