@@ -4339,7 +4339,7 @@ export default function App() {
       )}
       {mockupOpen && (
         <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setMockupOpen(false) }}>
-          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 580 }}>
+          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 580, maxHeight: '94vh', overflowY: 'auto' }}>
             <h3>Garment mockup</h3>
             <div className="chiprow">
               <button className={`chip ${mkMode === 'photo' ? 'active' : ''}`} onClick={() => setMkMode('photo')}>Product photo (S&amp;S)</button>
@@ -4389,7 +4389,10 @@ export default function App() {
             )}
             <canvas
               ref={mockupCanvasRef}
-              style={{ borderRadius: 8, width: '100%', maxWidth: 520, cursor: 'grab', touchAction: 'none' }}
+              // cap by viewport HEIGHT too: at full 520px width the 620px-tall
+              // canvas pushed the view/size controls and the customer-PNG
+              // button below the fold on a laptop screen
+              style={{ borderRadius: 8, width: 'auto', maxWidth: '100%', maxHeight: 'min(56vh, 620px)', display: 'block', margin: '0 auto', cursor: 'grab', touchAction: 'none' }}
               onPointerDown={(e) => { mkDrag.current = { x: e.clientX, y: e.clientY }; e.currentTarget.setPointerCapture(e.pointerId) }}
               onPointerMove={(e) => {
                 const d = mkDrag.current
