@@ -79,12 +79,12 @@ export function renderPreviewPng(
   }
   for (let i = 0; i < stones.length; i++) {
     const h = (i * 2654435761) >>> 0
-    if (h % 100 >= 14) continue
+    if (h % 100 >= 6) continue
     const s = stones[i]
     const r = stoneRadiusMm(sizes, s) * pxPerMm
     const x = (s.x - minX + marginMm) * pxPerMm
     const y = (s.y - minY + marginMm) * pxPerMm
-    drawGlint(ctx, x, y, r * (2.1 + ((h >>> 8) % 100) / 60))
+    drawGlint(ctx, x, y, r * (1.5 + ((h >>> 8) % 100) / 90))
   }
 
   return { dataUrl: cv.toDataURL('image/png'), widthMm, heightMm }
