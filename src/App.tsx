@@ -4471,9 +4471,28 @@ export default function App() {
             <label>Height (mm)
               <input type="number" min={10} max={500} value={textHeight} onChange={(e) => setTextHeight(+e.target.value)} />
             </label>
+            <label>Width (mm)
+              {/* width drives height through the font's fixed aspect; commit
+                  on blur/Enter so live typing doesn't re-scale mid-keystroke */}
+              <input type="number" min={10} max={2000}
+                key={`tw-${textPreview ? Math.round(textPreview.widthMm) : 0}`}
+                defaultValue={textPreview ? Math.round(textPreview.widthMm) : undefined}
+                disabled={!textPreview}
+                onBlur={(e) => {
+                  if (!textPreview) return
+                  const v = +e.target.value
+                  if (!v || Math.abs(v - textPreview.widthMm) < 0.5) return
+                  setTextHeight(Math.max(10, Math.min(500, Math.round(textHeight * (v / textPreview.widthMm)))))
+                }}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+              />
+            </label>
+          </div>
+          <div className="grid2">
             <label>Letter spacing
               <input type="number" min={0} max={20} value={letterSpacing} onChange={(e) => setLetterSpacing(+e.target.value)} />
             </label>
+            <div />
           </div>
           <label>Arc bend {textBend ? `${textBend}°` : '— straight'}
             <input type="range" min={-180} max={180} step={5} value={textBend} onChange={(e) => setTextBend(+e.target.value)} />
