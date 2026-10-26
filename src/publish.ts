@@ -11,6 +11,7 @@
 // no TSB session to borrow.
 
 import type { Stone, StoneSpec } from './model'
+import { drawGem, drawGlint } from './sim'
 
 const KEY_STORAGE = 'stonecut_tsb_key'
 const API_STORAGE = 'stonecut_tsb_api'
@@ -67,21 +68,23 @@ export function renderPreviewPng(
   const ctx = cv.getContext('2d')
   if (!ctx) throw new Error('could not get a 2D canvas context')
 
+  // Faceted gems + a glint pass — this PNG is what every TSB surface shows
+  // (Design Studio art panel, customer mockups, /bling), so it has to read
+  // as rhinestones, not flat dots.
   for (const s of stones) {
     const r = stoneRadiusMm(sizes, s) * pxPerMm
     const x = (s.x - minX + marginMm) * pxPerMm
     const y = (s.y - minY + marginMm) * pxPerMm
-    ctx.beginPath()
-    ctx.arc(x, y, r, 0, Math.PI * 2)
-    ctx.fillStyle = colorOf(s)
-    ctx.fill()
-    // A thin darker rim reads as a faceted stone rather than a flat dot at
-    // thumbnail size, which is how most of these previews get seen.
-    if (r > 1.5) {
-      ctx.lineWidth = Math.max(0.5, r * 0.18)
-      ctx.strokeStyle = 'rgba(0,0,0,0.28)'
-      ctx.stroke()
-    }
+    drawGem(ctx, x, y, r, colorOf(s))
+  }
+  for (let i = 0; i < stones.length; i++) {
+    const h = (i * 2654435761) >>> 0
+    if (h % 100 >= 14) continue
+    const s = stones[i]
+    const r = stoneRadiusMm(sizes, s) * pxPerMm
+    const x = (s.x - minX + marginMm) * pxPerMm
+    const y = (s.y - minY + marginMm) * pxPerMm
+    drawGlint(ctx, x, y, r * (2.1 + ((h >>> 8) % 100) / 60))
   }
 
   return { dataUrl: cv.toDataURL('image/png'), widthMm, heightMm }
