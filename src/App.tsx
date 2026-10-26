@@ -2137,6 +2137,12 @@ export default function App() {
     (e: React.MouseEvent) => {
       if (e.button !== 0) return
       e.preventDefault() // no text selection / native drag while moving stones
+      // preventDefault also suppresses the browser's native focus transfer,
+      // so a sidebar field could KEEP keyboard focus after a canvas click —
+      // the user selects a design, presses Delete, and the keystroke edits
+      // the Team Names box instead. Selecting on canvas reclaims the keys.
+      const ae = document.activeElement as HTMLElement | null
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) ae.blur()
       const p = toMm(e)
       if (tool === 'pen') {
         const first = penPtsRef.current[0]
