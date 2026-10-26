@@ -5527,8 +5527,14 @@ export default function App() {
             min={1}
             max={60}
             step={0.25}
-            value={boardWIn}
-            onChange={(e) => setBoardWIn(Math.max(1, +e.target.value || 1))}
+            key={`bw-${boardWIn}`}
+            defaultValue={boardWIn}
+            // commit on blur/Enter, NOT per keystroke: backspacing "22"
+            // passed through "2" and "" and the artboard collapsed to 1"
+            // mid-edit — which read as "Delete deleted my artboard" when
+            // this field happened to hold focus
+            onBlur={(e) => setBoardWIn(Math.min(60, Math.max(1, +e.target.value || boardWIn)))}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
             style={{ width: 54 }}
           />
           <span>×</span>
@@ -5537,8 +5543,10 @@ export default function App() {
             min={1}
             max={60}
             step={0.5}
-            value={boardHIn}
-            onChange={(e) => setBoardHIn(Math.max(1, +e.target.value || 1))}
+            key={`bh-${boardHIn}`}
+            defaultValue={boardHIn}
+            onBlur={(e) => setBoardHIn(Math.min(60, Math.max(1, +e.target.value || boardHIn)))}
+            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
             style={{ width: 54 }}
           />
           <input
