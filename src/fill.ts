@@ -1799,13 +1799,19 @@ export function outlineOrSpine(
         ws.sort((a, b) => a - b)
         const med = ws[Math.floor(ws.length / 2)]
         const p90 = ws[Math.floor(ws.length * 0.9)]
-        // MONOLINE POLICY: a component whose stroke width is UNIFORM (p90
-        // within 1.35× of median) and under 1.5×pitch is a monoline script
-        // stroke — it runs as ONE line for its whole length. Judged per
-        // stretch it flickered walls/spine as the width wobbled around the
-        // bar (Doc, Dancing Script, 2026-10-25); the long-standing law says
-        // demote to centreline below 1.5×pitch, judged by the MEDIAN.
-        const monoline = p90 < med * 1.35 && med < pitch * 1.5
+        // MONOLINE POLICY: a component whose stroke width is UNIFORM and
+        // under 1.5×pitch is a monoline script stroke — it runs as ONE
+        // line for its whole length. Judged per stretch it flickered
+        // walls/spine as the width wobbled around the bar (Doc, Dancing
+        // Script, 2026-10-25); the long-standing law says demote to
+        // centreline below 1.5×pitch, judged by the MEDIAN. Uniformity is
+        // judged at the 75th percentile: the top decile is junction
+        // inflation (a t-bar crossing its stem doubles the local width),
+        // and p90 left every crossed glyph in the old mixed machinery.
+        const p75 = ws[Math.floor(ws.length * 0.75)]
+        const monoline = p75 < med * 1.3 && med < pitch * 1.5
+        const ODBG = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG
+        if (ODBG) console.error(`comp lbl=${lbl} px=${ws.length} med=${med.toFixed(2)} p75=${p75.toFixed(2)} p90=${p90.toFixed(2)} needW=${needW.toFixed(2)} monoline=${monoline}`)
         if (!(med < needW && p90 < needW * 1.4) && !monoline) continue
         // a RING band — closed loop, exactly two boundary contours — gets
         // its midline from the smooth vector contours (below), which keeps
@@ -1872,6 +1878,10 @@ export function outlineOrSpine(
           // list.
           openBands.push({ contours: bc, medW: med, uniform: monoline })
           for (const i2 of mem2) thin[i2] = 0
+          // a monoline band is a LINE drawing: its wall contours place
+          // nothing at all — corner anchors at crossing notches and taper
+          // stones were the junction clumps. Coherence beats coverage.
+          if (monoline) bandLbls.add(lbl)
         } else {
           for (const i2 of mem2) thin[i2] = 1
         }
@@ -2224,7 +2234,9 @@ export function outlineOrSpine(
           else chain.unshift(cloud[bi])
         }
       }
-      if (chain.length >= 3) chains.push(chain)
+      // a 2-point chain is a real (short) stroke arm on a uniform band —
+      // a t-bar's left arm holds one or two stones and deserves them
+      if (chain.length >= (band.uniform ? 2 : 3)) chains.push(chain)
     }
     // SPLICE chains whose ends nearly meet — a crossing or joint breaks the
     // chain there, and an unspliced break becomes a gap in the bead line
@@ -2240,8 +2252,33 @@ export function outlineOrSpine(
             [A[0], B[0], 2],
             [A[0], B[B.length - 1], 3],
           ] as [Pt, Pt, number][]
+          // outward unit vector at a chain end — where the line is heading
+          const outward = (c: Pt[], tail: boolean): Pt => {
+            const n3 = c.length
+            const a3 = tail ? c[Math.max(0, n3 - 4)] : c[Math.min(n3 - 1, 3)]
+            const b3 = tail ? c[n3 - 1] : c[0]
+            const L3 = Math.hypot(b3.x - a3.x, b3.y - a3.y) || 1
+            return { x: (b3.x - a3.x) / L3, y: (b3.y - a3.y) / L3 }
+          }
           for (const [p, q, mode] of ends) {
-            if (Math.hypot(p.x - q.x, p.y - q.y) > 2.2) continue
+            const g3 = Math.hypot(p.x - q.x, p.y - q.y)
+            let ok3 = g3 <= 2.2
+            // JUNCTION SPLICE. A crossing's dead zone is about a stroke
+            // wide — pairing can't see "opposite sides" inside the overlap,
+            // so the four line-ends meeting there sat beyond the 2.2mm
+            // splice, the lines all stopped short, nothing painted the
+            // wall mask, and corner/taper stones clumped in the notches.
+            // On a uniform band, bridge up to 1.5× the stroke width when
+            // the two ends CONTINUE each other straight through: the stem
+            // stays one line through the crossing, the bar another;
+            // perpendicular ends never pair.
+            if (!ok3 && band.uniform && g3 <= band.medW * 1.5 && g3 > 1e-9) {
+              const gd = { x: (q.x - p.x) / g3, y: (q.y - p.y) / g3 }
+              const op = outward(A, mode === 0 || mode === 1)
+              const oq = outward(B, mode === 1 || mode === 3)
+              ok3 = op.x * gd.x + op.y * gd.y > 0.7 && oq.x * gd.x + oq.y * gd.y < -0.7
+            }
+            if (!ok3) continue
             if (mode === 0) chains[a2] = A.concat(B)
             else if (mode === 1) chains[a2] = A.concat([...B].reverse())
             else if (mode === 2) chains[a2] = [...A].reverse().concat(B)
@@ -2260,6 +2297,8 @@ export function outlineOrSpine(
       return dt[yi * w + xi] / pxPerMm >= minDeep2
     }
     chains.sort((a, b) => b.length - a.length)
+    if ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG)
+      console.error(`band medW=${band.medW.toFixed(2)} uniform=${!!band.uniform} cloud=${cloud.length} chains=[${chains.map((c) => c.length).join(',')}]`)
     for (const chain of chains) {
       const sm = smoothPath(chain, 2)
       let len = 0
@@ -2267,9 +2306,23 @@ export function outlineOrSpine(
         len += Math.hypot(sm[k].x - sm[k - 1].x, sm[k].y - sm[k - 1].y)
       if (len < pitch * 0.7) continue
       const got = placeOpenEven(sm, pitch, idx, rhythm).filter((q) => {
-        if (deepOk(q)) return true
-        idx.remove(q)
-        return false
+        if (!deepOk(q)) {
+          idx.remove(q)
+          return false
+        }
+        // where two lines CROSS (a t-bar through its stem, a bowl against a
+        // stem), stones from the two chains crowd at the legal floor and
+        // read as a clump. Same rule the part spines earned: hold FOREIGN
+        // stones to near the rhythm — own-row neighbours sit at the rhythm
+        // and pass; the crossing line skips the beat the through-line owns.
+        const tooClose = idx
+          .within(q, rhythm * 0.85)
+          .some((o) => Math.hypot(o.x - q.x, o.y - q.y) > 1e-9)
+        if (tooClose) {
+          idx.remove(q)
+          return false
+        }
+        return true
       })
       if (got.length) {
         dbg('vectorline', got)
