@@ -52,14 +52,47 @@ export function toMulti(paths: Pt[][]): Multi {
   return polys
 }
 
+// polygon-clipping can emit zero-width SPURS where operands share a
+// collinear edge — unite a rectangle flush against a letter stem and the
+// buried seam survives as a dangling edge. A spur tip is a vertex whose two
+// edges double straight back (reversed direction, no area); removing it
+// exposes the next spur vertex, so peel until the ring is clean.
+function despur(ring: Ring): Ring {
+  const out = [...ring]
+  let changed = true
+  while (changed && out.length > 3) {
+    changed = false
+    for (let i = 0; i < out.length; i++) {
+      const a = out[(i + out.length - 1) % out.length]
+      const b = out[i]
+      const c = out[(i + 1) % out.length]
+      const abx = b[0] - a[0], aby = b[1] - a[1]
+      const bcx = c[0] - b[0], bcy = c[1] - b[1]
+      const lab = Math.hypot(abx, aby)
+      const lbc = Math.hypot(bcx, bcy)
+      const cross = abx * bcy - aby * bcx
+      const dot = abx * bcx + aby * bcy
+      if (lab < 1e-9 || lbc < 1e-9 || (Math.abs(cross) <= 1e-6 * Math.max(1, lab * lbc) && dot < 0)) {
+        out.splice(i, 1)
+        changed = true
+        break
+      }
+    }
+  }
+  return out
+}
+
 export function fromMulti(m: Multi): Pt[][] {
   return m.flatMap((poly) =>
-    poly.map((ring) => {
-      const pts = ring.map(([x, y]) => ({ x, y }))
-      const a = pts[0], b = pts[pts.length - 1]
-      if (pts.length && (a.x !== b.x || a.y !== b.y)) pts.push({ x: a.x, y: a.y })
-      return pts
-    }),
+    poly
+      .map(despur)
+      .filter((ring) => ring.length >= 3 && Math.abs(ringArea(ring)) > 1e-6)
+      .map((ring) => {
+        const pts = ring.map(([x, y]) => ({ x, y }))
+        const a = pts[0], b = pts[pts.length - 1]
+        if (pts.length && (a.x !== b.x || a.y !== b.y)) pts.push({ x: a.x, y: a.y })
+        return pts
+      }),
   )
 }
 
