@@ -104,15 +104,15 @@ export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 
 // M = move, D = draw. Units per mm MUST match the machine's GP-GL STEP SIZE
 // (MENU -> I/F -> STEP SIZE); a mismatch scales the whole job silently —
 // 0.1mm step read as 0.05mm plots everything at double size.
-//   0.100mm =  254 steps/in ->  10 units/mm
-//   0.050mm =  508 steps/in ->  20 units/mm  (long-standing default here)
+//   0.100mm =  254 steps/in ->  10 units/mm  (default — matches the shop's CE6000)
+//   0.050mm =  508 steps/in ->  20 units/mm
 //   0.025mm = 1016 steps/in ->  40 units/mm
 //   0.010mm = 2540 steps/in -> 100 units/mm
 export function toGPGL(
   job: Job,
   preset: MaterialPreset,
   origin: OriginCorner = 'bl',
-  unitsPerMm = 20,
+  unitsPerMm = 10,
   sendConditions = false,
   swapAxes = false,
   opts: CutOpts = {},
@@ -198,7 +198,7 @@ export function toGPGL(
 // Absolute-minimum GP-GL: one small square near the origin. No speed/force,
 // no home, no trailing M0,0 — nothing but positioning and drawing. If the
 // machine still scrolls on this, the cause is outside the data stream.
-export function gpglTestShape(unitsPerMm = 20, offsetMm = 2, swapAxes = false): string {
+export function gpglTestShape(unitsPerMm = 10, offsetMm = 2, swapAxes = false): string {
   // An L, not a square. A square looks identical rotated or mirrored, so it
   // cannot tell you which axis is which or whether the job comes out reversed.
   // Tall bar runs 20mm, foot runs 10mm — both directions readable at a glance.

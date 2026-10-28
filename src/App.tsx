@@ -486,8 +486,11 @@ export default function App() {
   )
   useEffect(() => { localStorage.setItem('stonecut.origin', originCorner) }, [originCorner])
   // Must match MENU -> I/F -> STEP SIZE on the machine, or the job is scaled.
-  const [gpStep, setGpStep] = useState(() => +(localStorage.getItem('stonecut.gpstep') ?? 20) || 20)
-  useEffect(() => { localStorage.setItem('stonecut.gpstep', String(gpStep)) }, [gpStep])
+  // Default is 0.100 mm (254 steps/in, 10 units/mm) — what Kevin's CE6000 is
+  // set to. The old 20 u/mm default cut every hole at double size on it. New
+  // storage key so browsers that silently saved the old default start fresh.
+  const [gpStep, setGpStep] = useState(() => +(localStorage.getItem('stonecut.gpstep2') ?? 10) || 10)
+  useEffect(() => { localStorage.setItem('stonecut.gpstep2', String(gpStep)) }, [gpStep])
   // On by default: the app sends the preset's speed and force ahead of the
   // geometry. The machine only honours them when TOOLS SETTING ->
   // CONDITION PRIORITY is PROGRAM; otherwise the panel conditions still win.
