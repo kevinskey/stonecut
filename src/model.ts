@@ -13,14 +13,35 @@ export interface StoneSpec {
 }
 
 // Hole = stone diameter + clearance so stones brush in easily but don't flip.
+// SS6 went 2.5 -> 2.8 on 2026-10-28: at 2.5 the stones had to be pushed in.
 export const DEFAULT_SIZES: Record<string, StoneSpec> = {
-  SS6: { stoneMm: 2.0, holeMm: 2.5 },
+  SS6: { stoneMm: 2.0, holeMm: 2.8 },
   SS8: { stoneMm: 2.4, holeMm: 2.9 },
   SS10: { stoneMm: 2.9, holeMm: 3.4 },
   SS12: { stoneMm: 3.1, holeMm: 3.7 },
   SS16: { stoneMm: 4.0, holeMm: 4.6 },
   SS20: { stoneMm: 4.8, holeMm: 5.4 },
   SS30: { stoneMm: 6.4, holeMm: 7.0 },
+}
+
+// Hole sizes a design was saved with that were just the default of the day,
+// not something the operator typed. Saved designs carry their own size table,
+// so without this an old default would outlive its fix in every design.
+const LEGACY_HOLES: Record<string, number[]> = { SS6: [2.5] }
+
+// Merge a saved size table over the defaults, lifting entries that still hold
+// a superseded default up to the current one.
+export function mergeSavedSizes(saved: unknown): Record<string, StoneSpec> {
+  const out: Record<string, StoneSpec> = { ...DEFAULT_SIZES }
+  if (!saved || typeof saved !== 'object') return out
+  for (const [k, v] of Object.entries(saved as Record<string, Partial<StoneSpec>>)) {
+    if (!v || typeof v.holeMm !== 'number') continue
+    const legacy = LEGACY_HOLES[k]?.includes(v.holeMm) && DEFAULT_SIZES[k]
+    out[k] = legacy
+      ? { ...DEFAULT_SIZES[k], ...v, holeMm: DEFAULT_SIZES[k].holeMm }
+      : { ...(DEFAULT_SIZES[k] ?? { stoneMm: v.holeMm - 0.5 }), ...v } as StoneSpec
+  }
+  return out
 }
 
 export interface MaterialPreset {

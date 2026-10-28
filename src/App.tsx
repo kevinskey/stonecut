@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
-import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
+import { DEFAULT_PRESETS, DEFAULT_SIZES, mergeSavedSizes } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
@@ -208,7 +208,7 @@ function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elem
     const d = JSON.parse(raw)
     if (!Array.isArray(d?.stones) && !Array.isArray(d?.vectors)) return null
     const stones = ((d.stones ?? []) as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
-    const sizes = d.sizes && typeof d.sizes === 'object' ? { ...DEFAULT_SIZES, ...d.sizes } : { ...DEFAULT_SIZES }
+    const sizes = mergeSavedSizes(d.sizes)
     const elements: Elements = {}
     if (d.elements && typeof d.elements === 'object')
       for (const [k, r] of Object.entries(d.elements as Record<string, Recipe>))
@@ -4095,7 +4095,7 @@ export default function App() {
     pushUndo(stonesRef.current)
     const loaded = (dd.stones ?? []) as Stone[]
     setStones(loaded)
-    if (dd.sizes && typeof dd.sizes === 'object') setSizes({ ...DEFAULT_SIZES, ...dd.sizes })
+    if (dd.sizes && typeof dd.sizes === 'object') setSizes(mergeSavedSizes(dd.sizes))
     setElements(dd.elements && typeof dd.elements === 'object' ? dd.elements : {})
     const vecs: VecItem[] = Array.isArray(dd.vectors) ? dd.vectors : []
     setVectors(vecs)
