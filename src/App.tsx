@@ -766,6 +766,13 @@ export default function App() {
   // material
   const [presets, setPresets] = useState<MaterialPreset[]>(loadPresets)
   const [presetIdx, setPresetIdx] = useState(0)
+  // Vector cut lines are usually a different material from the holes (vinyl
+  // or HTV, not flock), so they get their own preset. -1 = same as holes.
+  const [linePresetName, setLinePresetName] = useState<string | null>(() => localStorage.getItem('stonecut.linepreset'))
+  useEffect(() => {
+    if (linePresetName) localStorage.setItem('stonecut.linepreset', linePresetName)
+    else localStorage.removeItem('stonecut.linepreset')
+  }, [linePresetName])
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
   type Snapshot = { stones: Stone[]; elements: Elements; vectors: VecItem[] }
@@ -837,7 +844,7 @@ export default function App() {
       // machine origin, so on-screen placement is the cut placement.
       // NOT rounded: heightMm is the datum the exporters flip Y against, so
       // ceiling a 304.8mm sheet to 305 would shift the whole design 0.2mm.
-      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm, paths: vectors.flatMap(vecPaths) }
+      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm, paths: vectors.flatMap(vecPaths), pathOwner: vectors.flatMap((v, i) => vecPaths(v).map(() => i)) }
     }
     const w = bbox.maxX - bbox.minX + margin * 2
     const h = bbox.maxY - bbox.minY + margin * 2
@@ -847,6 +854,8 @@ export default function App() {
       widthMm: Math.ceil(w),
       heightMm: Math.ceil(h),
       paths: vectors.flatMap(vecPaths).map((p) => p.map((q) => ({ x: q.x - bbox.minX + margin, y: q.y - bbox.minY + margin }))),
+      // which vector each path came from, so a selection can cut its own lines
+      pathOwner: vectors.flatMap((v, i) => vecPaths(v).map(() => i)),
     }
   }, [stones, vectors, bbox, sizes, margin, placement, boardWmm, boardHmm])
 
@@ -2803,16 +2812,19 @@ export default function App() {
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
-  const updatePreset = useCallback(
-    (patch: Partial<MaterialPreset>) => {
-      setPresets((prev) => {
-        const next = prev.map((p, i) => (i === presetIdx ? { ...p, ...patch } : p))
-        localStorage.setItem('stonecut.presets', JSON.stringify(next))
-        return next
-      })
-    },
-    [presetIdx],
-  )
+  const linePresetIdx = linePresetName ? presets.findIndex((p) => p.name === linePresetName) : -1
+  // the lines' preset object is the holes' very object when they share one,
+  // which is how the exporters know not to re-send conditions
+  const linePreset = linePresetIdx >= 0 ? presets[linePresetIdx] : preset
+  const updatePresetAt = useCallback((idx: number, patch: Partial<MaterialPreset>) => {
+    setPresets((prev) => {
+      const next = prev.map((p, i) => (i === idx ? { ...p, ...patch } : p))
+      localStorage.setItem('stonecut.presets', JSON.stringify(next))
+      return next
+    })
+  }, [])
+  const updatePreset = useCallback((patch: Partial<MaterialPreset>) => updatePresetAt(presetIdx, patch), [updatePresetAt, presetIdx])
+  const presetLabel = (p: MaterialPreset) => `${p.name} · force ${p.force} · speed ${p.speed}${p.passes > 1 ? ` · ${p.passes} passes` : ''}`
   const addPreset = useCallback(() => {
     const name = prompt('Preset name?')
     if (!name) return
@@ -2885,9 +2897,20 @@ export default function App() {
     if (cutLayer.startsWith('color:') && !cutColors.some(([c]) => `color:${c}` === cutLayer)) setCutLayer('all')
     if (cutLayer.startsWith('size:') && !cutSizes.some(([s]) => `size:${s}` === cutLayer)) setCutLayer('all')
   }, [cutLayer, cutColors, cutSizes])
+  // Anything highlighted on the board is what cuts; with nothing selected the
+  // Layer picker decides. The selection's own vector lines come along, so a
+  // highlighted vector cuts on its own and a highlighted design cuts without
+  // the vinyl shapes sitting next to it.
+  const selectionCut = selection.size > 0 || selVecs.size > 0
   const cutJob = useMemo(
     () =>
-      cutLayer === 'all'
+      selectionCut
+        ? {
+            ...job,
+            stones: job.stones.filter((_, i) => selection.has(i)),
+            paths: (job.paths ?? []).filter((_, i) => selVecs.has(job.pathOwner[i])),
+          }
+        : cutLayer === 'all'
         ? job
         : cutLayer === 'lines'
           ? { ...job, stones: [] }
@@ -2896,10 +2919,10 @@ export default function App() {
             : cutLayer.startsWith('size:')
               ? { ...job, stones: job.stones.filter((st) => st.size === cutLayer.slice(5)), paths: [] }
               : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] },
-    [job, cutLayer, colorOfStone],
+    [job, cutLayer, colorOfStone, selectionCut, selection, selVecs],
   )
   // filenames: 'color:#dc2034' -> 'color-dc2034'
-  const cutLayerSlug = cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
+  const cutLayerSlug = selectionCut ? 'selection' : cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
   const framedCutJob = useMemo(() => {
     if (!frameOn) return cutJob
     // frame bbox comes from the FULL job, never the filtered layer — a
@@ -2940,9 +2963,9 @@ export default function App() {
   const cutData = useCallback(
     () =>
       format === 'gpgl'
-        ? toGPGL(framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut })
-        : toHPGL(framedCutJob, preset, originCorner, { overcutMm: overcut }),
-    [format, framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
+        ? toGPGL(framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut, linePreset })
+        : toHPGL(framedCutJob, preset, originCorner, { overcutMm: overcut, linePreset }),
+    [format, framedCutJob, preset, linePreset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
   )
 
   // Cut goes through an in-app confirmation (styled like the rest of the
@@ -3083,7 +3106,7 @@ export default function App() {
     const html = workOrderHtml(job, bom, colorOfStone, {
       title: `${stones.length} stones · ${new Date().toLocaleDateString()}`,
       boardLabel: `${boardWIn}″ × ${boardHIn}″, origin lower-${originCorner === 'br' ? 'right' : 'left'}`,
-      material: `${preset.name} · force ${preset.force} · speed ${preset.speed}${preset.passes > 1 ? ` · ${preset.passes} passes` : ''}`,
+      material: presetLabel(preset) + (job.paths?.length && linePreset !== preset ? ` · lines: ${presetLabel(linePreset)}` : ''),
       nameOf: colorName,
     })
     const win = window.open('', '_blank')
@@ -4351,14 +4374,22 @@ export default function App() {
             <h3>⚡ Cut on Graphtec</h3>
             <table className="modal-facts"><tbody>
               <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Not connected yet — Chrome will ask which cutter to use, this once'}</td></tr>
-              <tr><td>Stones</td><td>{framedCutJob.stones.length}{cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
-              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{framedCutJob.paths!.length} path{framedCutJob.paths!.length === 1 ? '' : 's'}{frameOn ? ' (incl. weeding frame)' : ''}</td></tr>}
+              <tr><td>Stones</td><td>{framedCutJob.stones.length}{selectionCut ? ' (selected)' : cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
+              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{framedCutJob.paths!.length} path{framedCutJob.paths!.length === 1 ? '' : 's'}{selectionCut && selVecs.size ? ' (selected)' : ''}{frameOn ? ' (incl. weeding frame)' : ''}</td></tr>}
               <tr><td>Size</td><td>{((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}″ × {((bbox.maxY - bbox.minY) / 25.4).toFixed(2)}″</td></tr>
               {fromOrigin && placement === 'artboard' && (
                 <tr><td>From origin</td><td>{fromOrigin.across.toFixed(2)}″ across, {fromOrigin.feed.toFixed(2)}″ up</td></tr>
               )}
-              <tr><td>Material</td><td>{preset.name} · force {preset.force} · speed {preset.speed}{preset.passes > 1 ? ` · ${preset.passes} passes` : ''}{sendConditions ? '' : ' (panel settings)'}</td></tr>
+              {framedCutJob.stones.length > 0 && <tr><td>{framedCutJob.paths?.length ? 'Holes material' : 'Material'}</td><td>{presetLabel(preset)}{sendConditions ? '' : ' (panel settings)'}</td></tr>}
+              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>{framedCutJob.stones.length ? 'Lines material' : 'Material'}</td><td>{presetLabel(linePreset)}{sendConditions ? '' : ' (panel settings)'}</td></tr>}
             </tbody></table>
+            {framedCutJob.stones.length > 0 && (framedCutJob.paths?.length ?? 0) > 0 && linePreset !== preset && (
+              <p className="modal-warn">
+                Holes and cut lines use different materials, but this one job cuts both on the sheet that is loaded now.
+                If they belong on different sheets, cancel and cut the holes and the lines as two jobs
+                (highlight one, or pick a layer).
+              </p>
+            )}
             {offBoard && <p className="modal-warn">Part of the design is off the board and will be clipped.</p>}
             {spacingAudit.involved.length > 0 && (
               <p className="modal-warn">
@@ -5409,11 +5440,40 @@ export default function App() {
             <label>Passes<input type="number" min={1} max={5} value={preset.passes} onChange={(e) => updatePreset({ passes: +e.target.value })} /></label>
           </div>
           <button onClick={addPreset}>Save as new preset</button>
+          {vectors.length > 0 && (
+            <>
+              <label>Vector cut lines
+                <select value={linePresetIdx} onChange={(e) => setLinePresetName(+e.target.value < 0 ? null : presets[+e.target.value].name)}>
+                  <option value={-1}>Same as holes ({preset.name})</option>
+                  {Array.from(new Set(presets.map((p) => p.group ?? 'My presets'))).map((g) => (
+                    <optgroup key={g} label={g}>
+                      {presets.map((p, i) => (p.group ?? 'My presets') === g ? <option key={i} value={i}>{p.name}</option> : null)}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              {linePresetIdx >= 0 && (
+                <div className="grid3">
+                  <label>Force<input type="number" min={1} max={38} value={linePreset.force} onChange={(e) => updatePresetAt(linePresetIdx, { force: +e.target.value })} /></label>
+                  <label>Speed<input type="number" min={1} max={64} value={linePreset.speed} onChange={(e) => updatePresetAt(linePresetIdx, { speed: +e.target.value })} /></label>
+                  <label>Passes<input type="number" min={1} max={5} value={linePreset.passes} onChange={(e) => updatePresetAt(linePresetIdx, { passes: +e.target.value })} /></label>
+                </div>
+              )}
+              <p className="hint">Vector lines (vinyl, HTV) cut with this preset; holes cut with the one above. Highlight the lines or the stones on the board to cut just those.</p>
+            </>
+          )}
         </Section>
 
         <Section title="Cut">
+          {selectionCut && (
+            <p className="hint">
+              <b>Cutting the selection:</b> {cutJob.stones.length} stone{cutJob.stones.length === 1 ? '' : 's'}
+              {cutJob.paths?.length ? ` + ${cutJob.paths.length} cut line${cutJob.paths.length === 1 ? '' : 's'}` : ''}.
+              Click empty board to clear it and cut by layer.
+            </p>
+          )}
           <label>Layer
-            <select value={cutLayer} onChange={(e) => setCutLayer(e.target.value)}>
+            <select value={cutLayer} disabled={selectionCut} onChange={(e) => setCutLayer(e.target.value)}>
               <option value="all">Everything ({stones.length} stones{vectors.length ? ` + ${job.paths?.length ?? 0} cut lines` : ''})</option>
               <option value="outline">Outline stones only ({layerCounts.o})</option>
               <option value="fill">Fill stones only ({layerCounts.f})</option>

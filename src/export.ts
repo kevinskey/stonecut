@@ -22,6 +22,11 @@ export interface CutOpts {
   // swivel leaves a tiny uncut tag where a closed path ends; the overcut
   // recuts the first bit of the circle so small holes weed cleanly.
   overcutMm?: number
+  // Material for the vector cut lines when it differs from the holes'.
+  // Conditions are re-sent before the lines and they get their own passes,
+  // so a sheet that carries both (template holes plus its outline, say)
+  // cuts each with the right force.
+  linePreset?: MaterialPreset
 }
 
 // Extra polygon segments to recut `over` mm past closure (capped at one lap).
@@ -130,10 +135,14 @@ export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 
       lines.push(`PD${pts.slice(1).join(',')};`)
     }
   }
-  for (const p of job.paths ?? []) {
-    const pts = p.map((q) => `${Math.round(mapX(job, origin, q.x) * U)},${Math.round((job.heightMm - q.y) * U)}`)
-    lines.push(`PU${pts[0]};`)
-    lines.push(`PD${pts.slice(1).join(',')};`)
+  const lp = opts.linePreset ?? preset
+  if (job.paths?.length && lp !== preset) lines.push(`FS${lp.force};`, `VS${lp.speed};`)
+  for (let pass = 0; pass < lp.passes; pass++) {
+    for (const p of job.paths ?? []) {
+      const pts = p.map((q) => `${Math.round(mapX(job, origin, q.x) * U)},${Math.round((job.heightMm - q.y) * U)}`)
+      lines.push(`PU${pts[0]};`)
+      lines.push(`PD${pts.slice(1).join(',')};`)
+    }
   }
   lines.push('PU0,0;', 'SP0;', 'IN;')
   return lines.join('\n') + '\n'
@@ -224,14 +233,18 @@ export function toGPGL(
       for (let i = 1; i <= n + overcutSegs(over, r, n); i++) cmds.push(`D${pt(i)}`)
     }
   }
-  for (const p of job.paths ?? []) {
-    const enc = (q: Pt) => {
-      const px = Math.round(mapX(job, origin, q.x) * U)
-      const py = Math.round((job.heightMm - q.y) * U)
-      return swapAxes ? `${py},${px}` : `${px},${py}`
+  const lp = opts.linePreset ?? preset
+  if (sendConditions && job.paths?.length && lp !== preset) cmds.push(`!${lp.speed}`, `*2,${lp.force}`)
+  for (let pass = 0; pass < lp.passes; pass++) {
+    for (const p of job.paths ?? []) {
+      const enc = (q: Pt) => {
+        const px = Math.round(mapX(job, origin, q.x) * U)
+        const py = Math.round((job.heightMm - q.y) * U)
+        return swapAxes ? `${py},${px}` : `${px},${py}`
+      }
+      cmds.push(`M${enc(p[0])}`)
+      for (let i = 1; i < p.length; i++) cmds.push(`D${enc(p[i])}`)
     }
-    cmds.push(`M${enc(p[0])}`)
-    for (let i = 1; i < p.length; i++) cmds.push(`D${enc(p[i])}`)
   }
   cmds.push('M0,0')
   return cmds.join('\x03') + '\x03'
