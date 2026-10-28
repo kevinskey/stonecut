@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
-import { DEFAULT_PRESETS, DEFAULT_SIZES, mergeSavedSizes } from './model'
+import { DEFAULT_PRESETS, DEFAULT_SIZES, isLegacyPreset, mergeSavedSizes } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
@@ -172,6 +172,7 @@ function loadPresets(): MaterialPreset[] {
         const byName = new Map(DEFAULT_PRESETS.map((d) => [d.name, d]))
         const merged: MaterialPreset[] = saved.map((p): MaterialPreset => {
           const d = byName.get(p.name)
+          if (d && isLegacyPreset(p)) return d
           return d ? { ...d, ...p, group: d.group, blade: d.blade, note: d.note } : { ...p, group: p.group ?? 'My presets' }
         })
         const have = new Set(merged.map((p) => p.name))

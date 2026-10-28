@@ -13,9 +13,10 @@ export interface StoneSpec {
 }
 
 // Hole = stone diameter + clearance so stones brush in easily but don't flip.
-// SS6 went 2.5 -> 2.8 on 2026-10-28: at 2.5 the stones had to be pushed in.
+// SS6 went 2.5 -> 2.8 -> 3.0 on 2026-10-28: flock nap leans into the hole,
+// so at 2.8 the stones still had to be pushed in.
 export const DEFAULT_SIZES: Record<string, StoneSpec> = {
-  SS6: { stoneMm: 2.0, holeMm: 2.8 },
+  SS6: { stoneMm: 2.0, holeMm: 3.0 },
   SS8: { stoneMm: 2.4, holeMm: 2.9 },
   SS10: { stoneMm: 2.9, holeMm: 3.4 },
   SS12: { stoneMm: 3.1, holeMm: 3.7 },
@@ -27,7 +28,7 @@ export const DEFAULT_SIZES: Record<string, StoneSpec> = {
 // Hole sizes a design was saved with that were just the default of the day,
 // not something the operator typed. Saved designs carry their own size table,
 // so without this an old default would outlive its fix in every design.
-const LEGACY_HOLES: Record<string, number[]> = { SS6: [2.5] }
+const LEGACY_HOLES: Record<string, number[]> = { SS6: [2.5, 2.8] }
 
 // Merge a saved size table over the defaults, lifting entries that still hold
 // a superseded default up to the current one.
@@ -54,6 +55,16 @@ export interface MaterialPreset {
   note?: string // where the numbers came from / caveats
 }
 
+// Built-in preset values that were defaults in the past. A saved copy that
+// still carries one of these was never edited by the operator, so it follows
+// the current default instead of pinning the old numbers forever.
+export const LEGACY_PRESETS: Record<string, Array<Pick<MaterialPreset, 'force' | 'speed' | 'passes'>>> = {
+  'Sticky Flock': [{ force: 30, speed: 10, passes: 1 }],
+}
+
+export const isLegacyPreset = (p: MaterialPreset) =>
+  (LEGACY_PRESETS[p.name] ?? []).some((l) => l.force === p.force && l.speed === p.speed && l.passes === p.passes)
+
 // Built-in presets. Force/speed are CE6000 condition units, exactly as the
 // manufacturers publish them for Graphtec (Siser prints "Gram-Force" on its
 // chart but the Graphtec column is machine units — 8-9 gf would not mark the
@@ -70,7 +81,7 @@ export interface MaterialPreset {
 const S45 = '45° blade, CB09U+0'
 export const DEFAULT_PRESETS: MaterialPreset[] = [
   // --- rhinestone template materials (this shop's own settings) ---
-  { name: 'Sticky Flock', force: 30, speed: 10, passes: 1, group: 'Rhinestone templates', note: 'Confirmed on this CE6000 (2026-10-04).' },
+  { name: 'Sticky Flock', force: 32, speed: 8, passes: 2, group: 'Rhinestone templates', note: 'Two passes at 32: one pass at 30 (2026-10-04) left the small holes under-cut.' },
   { name: 'Rhinestone Rubber', force: 33, speed: 8, passes: 2, group: 'Rhinestone templates' },
   { name: 'Hartco Sandmask', force: 28, speed: 12, passes: 1, group: 'Rhinestone templates' },
 
