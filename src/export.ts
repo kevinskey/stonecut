@@ -16,7 +16,7 @@ const holeOf = (job: Job, s: Stone) => (job.sizes[s.size]?.holeMm ?? 3) / 2
 export interface CutOpts {
   // Cut holes with the firmware's W (CIRCLE) arc command — one command per
   // hole, interpolated by the machine (truly round, ~20x less data) —
-  // instead of a 12-24 segment polygon. GP-GL only.
+  // instead of a 24-36 segment polygon. GP-GL only.
   firmwareCircles?: boolean
   // Continue each hole this far past its closing point. A drag knife's
   // swivel leaves a tiny uncut tag where a closed path ends; the overcut
@@ -27,6 +27,46 @@ export interface CutOpts {
 // Extra polygon segments to recut `over` mm past closure (capped at one lap).
 const overcutSegs = (over: number, r: number, n: number) =>
   over > 0 ? Math.min(n, Math.ceil(over / ((2 * Math.PI * r) / n))) : 0
+
+// Hole polygon as integer offsets from the hole's centre, in plotter units.
+// The smallest integer polygon whose every flat lies at or outside the
+// nominal circle, so the knife never cuts INSIDE the hole. Before, holes
+// were inscribed 12-gons (3.4% under across the flats: a 2.8 mm SS6 hole cut
+// 2.70 before the knife's own loss) with vertices rounded after adding a
+// fractional centre, so holes differed by up to a step from each other
+// depending on where they sat on the sheet — one SS6 hole took the stone,
+// the next one didn't. Offsets now come from the integer centre, so every
+// hole of a size is the identical polygon.
+const holePolyCache = new Map<string, Array<[number, number]>>()
+function holePoly(r: number, U: number): Array<[number, number]> {
+  const key = `${r}/${U}`
+  const hit = holePolyCache.get(key)
+  if (hit) return hit
+  const want = 2 * r * U - 1e-9
+  let best: Array<[number, number]> | undefined
+  let bestOver = Infinity
+  // Integer rounding makes some segment counts lumpy at a given radius, so
+  // try a few and keep the polygon that sticks out past the circle least.
+  for (const n of [20, 24, 28, 32, 36, 40]) {
+    for (let R = (r / Math.cos(Math.PI / n)) * U; R < (r + 0.5) * U; R += 0.05) {
+      const pts = Array.from({ length: n }, (_, i): [number, number] => {
+        const a = (i / n) * Math.PI * 2
+        return [Math.round(R * Math.cos(a)), Math.round(R * Math.sin(a))]
+      })
+      // across flats = twice the distance from the centre to each edge's line
+      const flats = pts.map(([x1, y1], i) => {
+        const [x2, y2] = pts[(i + 1) % n]
+        return (2 * Math.abs(x1 * y2 - x2 * y1)) / Math.hypot(x2 - x1, y2 - y1)
+      })
+      if (Math.min(...flats) < want) continue
+      const over = Math.max(...pts.map(([x, y]) => Math.hypot(x, y))) - r * U
+      if (over < bestOver) { best = pts; bestOver = over }
+      break
+    }
+  }
+  holePolyCache.set(key, best!)
+  return best!
+}
 
 // Which corner of the material the machine's (0,0) sits at. Graphtec carriages
 // home to the RIGHT, so a CE6000 with ORIGIN set at the right edge needs X
@@ -74,18 +114,17 @@ export function toHPGL(job: Job, preset: MaterialPreset, origin: OriginCorner = 
   for (let pass = 0; pass < preset.passes; pass++) {
     for (const s of ordered) {
       const r = holeOf(job, s)
-      const n = r < 1.6 ? 12 : r < 3 ? 16 : 24
+      const poly = holePoly(r, U)
+      const n = poly.length
       // flip Y: HP-GL origin is bottom-left, our model is top-left
-      const cy = job.heightMm - s.y
+      const cy = Math.round((job.heightMm - s.y) * U)
       // a mirrored circle is still a circle, so only the centre needs mapping
-      const cx = mapX(job, origin, s.x)
+      const cx = Math.round(mapX(job, origin, s.x) * U)
       const pts: string[] = []
-      // i past n laps into the overcut: cos/sin wrap, recutting the start
+      // i past n laps into the overcut: wraps, recutting the start
       for (let i = 0; i <= n + overcutSegs(over, r, n); i++) {
-        const a = (i / n) * Math.PI * 2
-        const x = Math.round((cx + r * Math.cos(a)) * U)
-        const y = Math.round((cy + r * Math.sin(a)) * U)
-        pts.push(`${x},${y}`)
+        const [dx, dy] = poly[i % n]
+        pts.push(`${cx + dx},${cy + dy}`)
       }
       lines.push(`PU${pts[0]};`)
       lines.push(`PD${pts.slice(1).join(',')};`)
@@ -147,12 +186,13 @@ export function toGPGL(
   for (let pass = 0; pass < preset.passes; pass++) {
     for (const s of ordered) {
       const r = holeOf(job, s)
-      const n = r < 1.6 ? 12 : r < 3 ? 16 : 24
+      const poly = holePoly(r, U)
+      const n = poly.length
       const cy = job.heightMm - s.y
       const cx = mapX(job, origin, s.x)
       if (opts.firmwareCircles) {
         // W (CIRCLE): Wx0,y0,r1,r2,θ1,θ2 — the machine interpolates the arc
-        // itself: one command per hole instead of 13-25, truly round cut.
+        // itself: one command per hole instead of 25-37, truly round cut.
         // Explicit M to the arc's 0° start first: the plotter has a menu
         // setting for whether W travels to the arc start pen-up or pen-down,
         // and starting from the arc start makes either setting safe.
@@ -171,10 +211,12 @@ export function toGPGL(
       }
       // Graphtec's first coordinate is the media-feed axis, which is not
       // necessarily the model's X. swapAxes emits (feed, carriage) instead.
+      const ux = Math.round(cx * U)
+      const uy = Math.round(cy * U)
       const pt = (i: number) => {
-        const a = (i / n) * Math.PI * 2
-        const px = Math.round((cx + r * Math.cos(a)) * U)
-        const py = Math.round((cy + r * Math.sin(a)) * U)
+        const [dx, dy] = poly[i % n]
+        const px = ux + dx
+        const py = uy + dy
         return swapAxes ? `${py},${px}` : `${px},${py}`
       }
       cmds.push(`M${pt(0)}`)
