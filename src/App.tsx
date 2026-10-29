@@ -844,7 +844,7 @@ export default function App() {
       // machine origin, so on-screen placement is the cut placement.
       // NOT rounded: heightMm is the datum the exporters flip Y against, so
       // ceiling a 304.8mm sheet to 305 would shift the whole design 0.2mm.
-      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm, paths: vectors.flatMap(vecPaths), pathOwner: vectors.flatMap((v, i) => vecPaths(v).map(() => i)) }
+      return { stones, sizes, widthMm: boardWmm, heightMm: boardHmm, paths: vectors.flatMap(vecPaths), pathOwner: vectors.flatMap((v) => vecPaths(v).map(() => v.id)) }
     }
     const w = bbox.maxX - bbox.minX + margin * 2
     const h = bbox.maxY - bbox.minY + margin * 2
@@ -854,8 +854,8 @@ export default function App() {
       widthMm: Math.ceil(w),
       heightMm: Math.ceil(h),
       paths: vectors.flatMap(vecPaths).map((p) => p.map((q) => ({ x: q.x - bbox.minX + margin, y: q.y - bbox.minY + margin }))),
-      // which vector each path came from, so a selection can cut its own lines
-      pathOwner: vectors.flatMap((v, i) => vecPaths(v).map(() => i)),
+      // id of the vector each path came from, so a selection can cut its own lines
+      pathOwner: vectors.flatMap((v) => vecPaths(v).map(() => v.id)),
     }
   }, [stones, vectors, bbox, sizes, margin, placement, boardWmm, boardHmm])
 
