@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "app:dev": "electron .",
     "app:build": "npm run build && electron-builder --mac",
-    "app:mas": "npm run build && electron-builder --mac mas"
+    "app:mas": "npm run build && electron-builder --mac mas --universal"
   },
   "dependencies": {
     "opentype.js": "^2.0.0",
@@ -73,7 +73,7 @@
       "entitlementsInherit": "build/entitlements.mas.inherit.plist",
       "hardenedRuntime": false,
       "provisioningProfile": "build/StoneCut_MAS.provisionprofile",
-      "identity": "Apple Distribution: kevin johnson (AUJY92SA4D)"
+      "identity": "kevin johnson (AUJY92SA4D)"
     },
     "buildVersion": "3"
   }
