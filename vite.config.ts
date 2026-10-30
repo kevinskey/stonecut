@@ -3,6 +3,10 @@ import { defineConfig } from 'vite'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Relative asset URLs: the Mac App Store build loads dist/index.html over
+  // file://, where an absolute "/assets/…" resolves to the filesystem root
+  // instead of the app bundle and the window comes up empty.
+  base: './',
   plugins: [react()],
   server: {
     proxy: {

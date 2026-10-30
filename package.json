@@ -75,6 +75,6 @@
       "provisioningProfile": "build/StoneCut_MAS.provisionprofile",
       "identity": "Apple Distribution: kevin johnson (AUJY92SA4D)"
     },
-    "buildVersion": "2"
+    "buildVersion": "3"
   }
 }

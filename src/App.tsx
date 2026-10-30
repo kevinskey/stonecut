@@ -29,6 +29,16 @@ import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import './App.css'
 
+// The Mac App Store build runs the bundled copy off file://, where the Vite
+// dev-server proxies do not exist and a root-relative "/tsb-api/…" resolves
+// to the filesystem root. Packaged, those calls go straight to the
+// rhinestones vhost, which serves both proxies with Access-Control-Allow-
+// Origin: *. CDN art rides the API's image-proxy instead of /tsb-cdn because
+// the Spaces CDN sends no CORS header and the shape fetch needs one.
+const PACKAGED = !location.protocol.startsWith('http')
+const TSB_ORIGIN = 'https://rhinestones.tshirtbrothers.com'
+const tsbApi = (path: string) => (PACKAGED ? TSB_ORIGIN + path : path)
+
 type Tool = 'select' | 'add' | 'node' | 'pen'
 type StoneMode = 'outline' | 'fill' | 'both'
 // What a committed design was generated FROM, kept so it can be re-stoned
@@ -419,7 +429,7 @@ export default function App() {
     const q = mkSearch.trim()
     if (!q) return
     try {
-      const j = await fetch(`/tsb-api/products?search=${encodeURIComponent(q)}&limit=10`).then((r) => r.json())
+      const j = await fetch(tsbApi(`/tsb-api/products?search=${encodeURIComponent(q)}&limit=10`)).then((r) => r.json())
       const rows = (j.products ?? []).filter((p: { ss_id?: string }) => p.ss_id)
       setMkResults(rows.map((p: { ss_id: string; name: string; brand: string }) => ({ ss_id: p.ss_id, name: p.name, brand: p.brand })))
       if (!rows.length) setStatus(`No S&S styles match “${q}”`)
@@ -435,7 +445,7 @@ export default function App() {
     setMkColors([])
     setMkColorIdx(0)
     try {
-      const j = await fetch(`/tsb-api/products/colors/${s.ss_id}`).then((r) => r.json())
+      const j = await fetch(tsbApi(`/tsb-api/products/colors/${s.ss_id}`)).then((r) => r.json())
       const colors = (j.colors ?? []).filter((c: SsColor) => c.image || c.backImage)
       setMkColors(colors)
       if (!colors.length) setStatus(`${s.name}: S&S has no product photos for this style`)
@@ -459,7 +469,7 @@ export default function App() {
     img.crossOrigin = 'anonymous'
     img.onload = () => { mkImgRef.current = img; setMkImgTick((t) => t + 1) }
     img.onerror = () => { mkImgRef.current = null; setMkImgTick((t) => t + 1); setStatus('Could not load the garment photo') }
-    img.src = `/tsb-api/products/image-proxy?url=${encodeURIComponent(url)}`
+    img.src = tsbApi(`/tsb-api/products/image-proxy?url=${encodeURIComponent(url)}`)
   }, [mockupOpen, mkMode, mkColors, mkColorIdx, mkView])
   // light material needs dark rules/labels on it, and vice versa
   const boardIsLight = useMemo(() => {
@@ -560,7 +570,9 @@ export default function App() {
     listFonts().then(setCustomFonts).catch(() => {})
   }, [])
   useEffect(() => {
-    fetch('/gfonts.json')
+    // relative, not "/gfonts.json": the packaged build reads it out of the
+    // app bundle over file://, where a leading slash is the filesystem root
+    fetch('./gfonts.json')
       .then((r) => r.json())
       .then(setGfonts)
       .catch(() => setStatus('Could not load Google Fonts catalog'))
@@ -685,7 +697,7 @@ export default function App() {
   const [tplCats, setTplCats] = useState<TemplateCat[]>([])
   const [tplCat, setTplCat] = useState('')
   useEffect(() => {
-    fetch('/templates/index.json')
+    fetch('./templates/index.json')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((m: { categories: TemplateCat[] }) => {
         const cats = m.categories.filter((c) => c.items.length > 0)
@@ -697,7 +709,7 @@ export default function App() {
   const loadTemplate = async (t: TemplateItem) => {
     try {
       setStatus(`Loading ${t.name}…`)
-      const blob = await fetch(`/templates/${t.file}`).then((r) => {
+      const blob = await fetch(`./templates/${t.file}`).then((r) => {
         if (!r.ok) throw new Error(String(r.status))
         return r.blob()
       })
@@ -721,10 +733,12 @@ export default function App() {
   const [tsbCat, setTsbCat] = useState('')
   const [tsbShapes, setTsbShapes] = useState<TsbShape[]>([])
   const tsbThumb = (url: string) =>
-    url.replace('https://tshirtbrothers.atl1.cdn.digitaloceanspaces.com', '/tsb-cdn')
+    PACKAGED
+      ? tsbApi(`/tsb-api/products/image-proxy?url=${encodeURIComponent(url)}`)
+      : url.replace('https://tshirtbrothers.atl1.cdn.digitaloceanspaces.com', '/tsb-cdn')
   useEffect(() => {
     if (!tsbOpen || tsbCats.length) return
-    fetch('/tsb-api/design/art-categories')
+    fetch(tsbApi('/tsb-api/design/art-categories'))
       .then((r) => r.json())
       .then((cats: { name: string; count: number }[]) => {
         setTsbCats(cats.filter((c) => c.count > 0))
@@ -734,7 +748,7 @@ export default function App() {
   }, [tsbOpen, tsbCats.length])
   useEffect(() => {
     if (!tsbOpen || !tsbCat) return
-    fetch(`/tsb-api/design/art-library?category=${encodeURIComponent(tsbCat)}&limit=30`)
+    fetch(tsbApi(`/tsb-api/design/art-library?category=${encodeURIComponent(tsbCat)}&limit=30`))
       .then((r) => r.json())
       .then(setTsbShapes)
       .catch(() => setStatus('Could not load shapes'))
