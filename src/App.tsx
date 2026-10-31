@@ -4174,19 +4174,7 @@ export default function App() {
     } else setSavedProfile(null)
     setStatus(`Opened ${name}: ${loaded.length} stones${dd.context ? ' · saved cutter profile available under Cut' : ''}`)
   }, [pushUndo, font, fontName])
-  const openDesignFile = useCallback(async () => {
-    if (fsSupported) {
-      try {
-        const h = await pickOpenHandle()
-        if (!h) return // cancelled
-        const f = await h.getFile()
-        applyDesignData(JSON.parse(await readProjectFileText(f)), f.name)
-        adoptHandle(h, h.name) // ⌘S now writes back to this file
-      } catch (e) {
-        setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
-      }
-      return
-    }
+  const importProjectFile = useCallback(() => {
     const inp = document.createElement('input')
     inp.type = 'file'
     inp.accept = `${DESIGN_EXT},.json,application/json`
@@ -4202,6 +4190,16 @@ export default function App() {
     }
     inp.click()
   }, [applyDesignData, adoptHandle])
+  const openDesignFile = useCallback(async () => {
+    if (!fsSupported) { importProjectFile(); return }
+    try {
+      const h = await pickOpenHandle()
+      if (!h) return
+      const f = await h.getFile()
+      applyDesignData(JSON.parse(await readProjectFileText(f)), f.name)
+      adoptHandle(h, h.name)
+    } catch (e) { setStatus(`Could not open: ${e instanceof Error ? e.message : e}. Use File → Import project file instead.`) }
+  }, [applyDesignData, adoptHandle, importProjectFile])
   // ⌘S / ⌘⇧S — separate effect so it can live after the save callbacks;
   // preventDefault keeps the browser's own save-page dialog out of the way
   useEffect(() => {
@@ -4295,6 +4293,7 @@ export default function App() {
     { label: 'File', items: [
       { label: 'New design', onClick: () => { clearAll(); adoptHandle(null, null) }, disabled: !hasStones && !pending && !vectors.length },
       { label: 'Open design…', onClick: () => { void openDesignFile() } },
+      { label: 'Import project file…', onClick: importProjectFile },
       { label: 'Save named project version…', disabled: !hasStones && !vectors.length, onClick: () => { void (async () => {
         const name = window.prompt('Save a named version on this computer:', fileName ?? 'StoneCut design')
         if (!name?.trim()) return
@@ -5833,7 +5832,7 @@ export default function App() {
           <div className="start-actions">
             <button onClick={() => openSection('Text', 'input')}>Create text</button>
             <button onClick={() => openSection('Image', 'input[type=file]')}>Import artwork</button>
-            <button onClick={() => { void openDesignFile() }}>Open project</button>
+            <button onClick={importProjectFile}>Open project</button>
             <button onClick={() => openSection('Templates')}>Use a template</button>
           </div><p className="hint">Direct cutter control requires a compatible desktop browser or the StoneCut desktop app.</p>
         </div>}
