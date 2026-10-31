@@ -1329,10 +1329,33 @@ export default function App() {
       setStatus('Shape is too small to hold stones at this size — raise the size or pick a smaller stone')
       return
     }
-    const offsetY = stones.length ? bbox.maxY + 10 : 10
-    addGenerated(pts, offsetY, { contours, mode: shapeMode, wholeWord: true })
-    setStatus(`Added ${pts.length} stones from ${shapeKind}`)
-  }, [shapeKind, shapeW, shapeH, shapeMode, contoursToStones, stones.length, bbox.maxY, addGenerated])
+    // Place the shape in the middle of what the operator is looking at,
+    // kept inside the media. "Below the existing design" (bbox.maxY + 10)
+    // walked off the bottom edge as soon as anything sat near it — the
+    // shape landed off the board where it could not even be selected.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const p of pts) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y) }
+    const w = maxX - minX, h = maxY - minY
+    const wrap = wrapRef.current
+    const z = zoomRef.current
+    const bar = barRef.current?.offsetHeight ?? 36
+    let cx = boardWmm / 2, cy = boardHmm / 2
+    if (wrap && z > 0) {
+      cx = (wrap.scrollLeft + wrap.clientWidth / 2) / z
+      cy = (wrap.scrollTop - bar + (wrap.clientHeight - bar) / 2) / z
+    }
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+    const x0 = clamp(cx - w / 2, 10, Math.max(10, boardWmm - w - 10))
+    const y0 = clamp(cy - h / 2, 10, Math.max(10, boardHmm - h - 10))
+    const placed = pts.map((p) => ({ ...p, x: p.x - minX + x0 - previewOffX, y: p.y - minY }))
+    const first = stones.length
+    addGenerated(placed, y0, { contours, mode: shapeMode, wholeWord: true })
+    // hand it over selected so it can be dragged straight away
+    setSelection(new Set(placed.map((_, i) => first + i)))
+    setSelVecs(new Set())
+    setStatus(`Added ${pts.length} stones from ${shapeKind} — selected, drag to place`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shapeKind, shapeW, shapeH, shapeMode, contoursToStones, stones.length, addGenerated, boardWmm, boardHmm, previewOffX])
 
   const generateImage = useCallback(async () => {
     if (!imageFile) { setStatus('Choose an image first'); return }
@@ -4982,7 +5005,7 @@ export default function App() {
           </label>
           <p className="hint">
             Uses the same stone size, spacing, outline and fill settings as text — set those in
-            the Stones and Fill panels. Shapes are added below the existing design.
+            the Stones and Fill panels. Shapes land in the middle of the view, selected and ready to drag.
           </p>
           <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
           <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
