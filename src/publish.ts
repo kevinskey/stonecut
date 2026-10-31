@@ -6,8 +6,8 @@
 // the rhinestone tables so the real stone BOM — not a square-inch guess —
 // drives the quote.
 //
-// Auth is a shared key (STONECUT_PUBLISH_KEY on the TSB server) kept in
-// localStorage, because StoneCut runs on rhinestones.tshirtbrothers.com with
+// Auth is a shared key (STONECUT_PUBLISH_KEY on the TSB server) kept for the current browser session in
+// sessionStorage, because StoneCut runs on rhinestones.tshirtbrothers.com with
 // no TSB session to borrow.
 
 import type { Stone, StoneSpec } from './model'
@@ -19,11 +19,34 @@ const KEY_STORAGE = 'stonecut_tsb_key'
 const API_STORAGE = 'stonecut_tsb_api'
 const DEFAULT_API = 'https://tshirtbrothers.com'
 
-export const getPublishKey = () => localStorage.getItem(KEY_STORAGE) || ''
-export const setPublishKey = (k: string) => localStorage.setItem(KEY_STORAGE, k.trim())
-// Overridable so the app can be pointed at a dev server without a rebuild.
-export const getApiBase = () => (localStorage.getItem(API_STORAGE) || DEFAULT_API).replace(/\/+$/, '')
-export const setApiBase = (u: string) => localStorage.setItem(API_STORAGE, u.trim())
+export const getPublishKey = () => {
+  try {
+    const current = sessionStorage.getItem(KEY_STORAGE)
+    if (current) return current
+    // Migrate the existing key once; future sessions require re-entry.
+    const old = localStorage.getItem(KEY_STORAGE)
+    if (old) { sessionStorage.setItem(KEY_STORAGE, old); localStorage.removeItem(KEY_STORAGE); return old }
+  } catch { /* storage may be unavailable */ }
+  return ''
+}
+export const setPublishKey = (k: string) => {
+  try { sessionStorage.setItem(KEY_STORAGE, k.trim()); localStorage.removeItem(KEY_STORAGE) }
+  catch { throw new Error('Session storage is unavailable; the publish key could not be saved') }
+}
+// Never send a shop credential to an arbitrary URL from browser preferences.
+export function approvedApiBase(raw: string): string {
+  const url = new URL(raw)
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '')) throw new Error('Invalid TSB API address')
+  const production = url.origin === DEFAULT_API
+  const local = ['localhost', '127.0.0.1'].includes(url.hostname) && ['http:', 'https:'].includes(url.protocol)
+  if (!production && !local) throw new Error('The publish API must be T-Shirt Brothers or a local development server')
+  return url.origin
+}
+export const getApiBase = () => {
+  try { return approvedApiBase(localStorage.getItem(API_STORAGE) || DEFAULT_API) }
+  catch { return DEFAULT_API }
+}
+export const setApiBase = (u: string) => localStorage.setItem(API_STORAGE, approvedApiBase(u.trim()))
 
 export interface BomRow { size: string; color: string; n: number; stoneMm: number }
 

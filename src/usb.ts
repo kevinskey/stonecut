@@ -16,39 +16,64 @@ function usbApi(): USBLike {
 export async function grantedCutter(): Promise<{ name: string } | null> {
   try {
     const list = await usbApi().getDevices()
-    const d = list.find((x) => x.vendorId === GRAPHTEC)
+    const matches = list.filter((x) => x.vendorId === GRAPHTEC)
+    const d = matches.length === 1 ? matches[0] : undefined
     return d ? { name: d.productName || 'Graphtec cutter' } : null
   } catch {
     return null
   }
 }
 
-export async function sendToCutter(
-  data: string,
-  onProgress?: (sent: number, total: number) => void,
-): Promise<void> {
-  const usb = usbApi()
-  // Reuse the granted cutter; only show Chrome's chooser when there is none.
-  const granted = (await usb.getDevices().catch(() => [] as USBDeviceLike[])).find((x) => x.vendorId === GRAPHTEC)
-  const device = granted ?? (await usb.requestDevice({ filters: [{ vendorId: GRAPHTEC }] }))
-  await device.open()
+// Synchronous lock covers normal jobs AND diagnostics, including the chooser.
+let sending = false
+
+export async function sendToCutter(data: string, onProgress?: (sent: number, total: number) => void): Promise<void> {
+  if (sending) throw new Error('A job is already being sent to the cutter.')
+  sending = true
   try {
+    const locks = navigator.locks
+    if (locks?.request) await locks.request('stonecut-usb-send', { ifAvailable: true }, async (lock) => {
+      if (!lock) throw new Error('Another StoneCut tab is sending to the cutter.')
+      await transmit(data, onProgress)
+    })
+    else await transmit(data, onProgress)
+  } finally { sending = false }
+}
+
+async function transmit(data: string, onProgress?: (sent: number, total: number) => void): Promise<void> {
+  let device: USBDeviceLike | undefined
+  let opened = false
+  let claimed: number | undefined
+  try {
+    const usb = usbApi()
+    const matches = (await usb.getDevices().catch(() => [] as USBDeviceLike[])).filter((x) => x.vendorId === GRAPHTEC)
+    const granted = matches.length === 1 ? matches[0] : undefined
+    device = granted ?? (await usb.requestDevice({ filters: [{ vendorId: GRAPHTEC }] }))
+    await device.open()
+    opened = true
     if (device.configuration == null) await device.selectConfiguration(1)
     const iface = device.configuration!.interfaces.find((i) =>
       i.alternate.endpoints.some((e) => e.direction === 'out' && e.type === 'bulk'),
     )
     if (!iface) throw new Error('No bulk-out endpoint found on cutter.')
     await device.claimInterface(iface.interfaceNumber)
+    claimed = iface.interfaceNumber
     const ep = iface.alternate.endpoints.find((e) => e.direction === 'out' && e.type === 'bulk')!
     const bytes = new TextEncoder().encode(data)
     const chunk = 4096
     for (let off = 0; off < bytes.length; off += chunk) {
-      await device.transferOut(ep.endpointNumber, bytes.slice(off, off + chunk))
-      onProgress?.(Math.min(off + chunk, bytes.length), bytes.length)
+      const part = bytes.slice(off, off + chunk)
+      const result = await device.transferOut(ep.endpointNumber, part)
+      if (result.status !== 'ok' || result.bytesWritten !== part.length) {
+        throw new Error('Incomplete USB transfer. The job may be partially sent; check the cutter before resending.')
+      }
+      onProgress?.(off + part.length, bytes.length)
     }
-    await device.releaseInterface(iface.interfaceNumber)
   } finally {
-    await device.close()
+    // A failed transfer must still release the interface and the send lock.
+    // Cleanup failures must not hide the original transfer error.
+    if (device && claimed !== undefined) await device.releaseInterface(claimed).catch(() => {})
+    if (device && opened) await device.close().catch(() => {})
   }
 }
 
@@ -74,6 +99,6 @@ interface USBDeviceLike {
   selectConfiguration(n: number): Promise<void>
   claimInterface(n: number): Promise<void>
   releaseInterface(n: number): Promise<void>
-  transferOut(ep: number, data: Uint8Array): Promise<unknown>
+  transferOut(ep: number, data: Uint8Array): Promise<{ status: string; bytesWritten: number }>
   configuration: { interfaces: USBInterfaceLike[] } | null
 }

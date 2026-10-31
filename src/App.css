@@ -481,3 +481,43 @@ textarea {
   touch-action: none;
 }
 .panel-resizer:hover { background: #3b5bd9; }
+
+/* Focus, recovery and first-run navigation remain legible at shop viewing distances. */
+:focus-visible { outline: 2px solid #ffb56b; outline-offset: 3px; }
+.hint, .fontlist .empty, .iconlabels { color: #a6b1c5; font-size: 12px; }
+details.sec summary { color: #b0bbd0; }
+.recovery-strip, .workspace-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px; flex-wrap: wrap; background: #191d27; border-bottom: 1px solid #343c50; font-size: 12px; }
+.recovery-strip button, .workspace-bar button { width: auto; margin: 0; padding: 5px 10px; }
+.workspace-bar span { margin-left: auto; color: #b4c0d4; }
+.panel-toggle { display: none; }
+.start-card { position: sticky; z-index: 4; left: 20px; top: 64px; width: min(480px, calc(100% - 40px)); margin: 20px; padding: 22px; background: #202737; border: 1px solid #52617b; border-radius: 14px; box-shadow: 0 8px 35px #0005; }
+.start-card h2 { margin: 0; font-size: 22px; color: #fff; }
+.start-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.start-actions button { min-height: 42px; }
+.saved-profile { padding: 10px; background: #202737; border: 1px solid #52617b; border-radius: 8px; }
+.app[data-workspace="design"] .panel > details.sec:not([data-section="Text"]):not([data-section="Stones"]):not([data-section="Fill"]):not([data-section="Shapes"]):not([data-section="Templates"]):not([data-section="Image"]):not([data-section="Vector cut"]),
+.app[data-workspace="prepare"] .panel > details.sec:not([data-section="Edit"]):not([data-section="Align & Pathfinder"]):not([data-section="Production"]),
+.app[data-workspace="produce"] .panel > details.sec:not([data-section="Production"]):not([data-section="Material"]):not([data-section="Cut"]) { display: none; }
+@media (max-width: 760px) {
+  .app { height: 100dvh; }
+  .menubar { overflow-x: auto; flex-shrink: 0; }
+  .workspace-bar span { width: 100%; margin: 0; }
+  .panel-toggle { display: inline-block; }
+  .app-body { position: relative; }
+  .panel { display: none; position: absolute; z-index: 15; left: 0; top: 0; bottom: 0; width: min(340px, 92vw) !important; min-width: 0 !important; box-shadow: 12px 0 24px #0008; }
+  .panel-open .panel { display: flex; }
+  .panel-resizer { display: none; }
+  .canvas-wrap { min-width: 0; }
+  .start-actions { grid-template-columns: 1fr; }
+  .modal-facts { font-size: 12px; }
+  .modal-facts td { overflow-wrap: anywhere; }
+}
+.statusbar .pending { font-size: 12px; }
+.project-version { display:flex; align-items:center; gap:12px; border-bottom:1px solid #39475d; padding:12px 0; }
+.project-version span { flex:1; overflow-wrap:anywhere; }
+.project-version img { object-fit:contain; background:#11151d; border-radius:6px; }
+.project-version button { width:auto; }
+.image-compare { display:flex; gap:6px; margin:8px 0; }
+.image-compare figure { flex:1; min-width:0; margin:0; font-size:11px; text-align:center; color:#b6c4da; }
+.image-compare img { display:block; width:100%; height:90px; object-fit:contain; background:#11151d; border:1px solid #46536b; border-radius:6px; }
+@media (max-width:760px) { .menubar .menu-list { position:fixed; top:44px; left:8px; max-width:calc(100vw - 16px); max-height:75dvh; overflow:auto; } }

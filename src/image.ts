@@ -58,6 +58,7 @@ export async function imageToRaster(
   const img = await loadImage(file)
   const w = Math.max(8, Math.round(widthMm * pxPerMm))
   const h = Math.max(8, Math.round((img.height / img.width) * w))
+  if (w > 8192 || h > 8192 || w * h > 16_000_000) throw new Error('This image needs too much working memory. Reduce the design width or crop the image first.')
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h

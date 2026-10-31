@@ -49,7 +49,7 @@ export function findOverlaps(
   holeOf: (s: Stone) => number,
   minGap: number,
 ): { involved: number[]; removal: number[] } {
-  const cell = 8
+  const cell = stones.reduce((m, s) => Math.max(m, holeOf(s) + minGap), 8)
   const grid = new Map<string, number[]>()
   const key = (x: number, y: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)}`
   const involved = new Set<number>()
@@ -87,21 +87,4 @@ export function findOverlaps(
 // (0,0) — the exporters mirror X and flip Y, so the model origin is the far
 // corner on the cutter. Ordering from the wrong end made the head traverse
 // the whole design before its first cut.
-export function orderNearestNeighbor(stones: Stone[], start: Pt = { x: 0, y: 0 }): Stone[] {
-  if (stones.length < 3) return stones
-  const remaining = [...stones]
-  const out: Stone[] = []
-  let cur: Pt = start
-  while (remaining.length) {
-    let bi = 0
-    let bd = Infinity
-    for (let i = 0; i < remaining.length; i++) {
-      const d = (remaining[i].x - cur.x) ** 2 + (remaining[i].y - cur.y) ** 2
-      if (d < bd) { bd = d; bi = i }
-    }
-    const s = remaining.splice(bi, 1)[0]
-    out.push(s)
-    cur = s
-  }
-  return out
-}
+export { spatialCutOrder as orderNearestNeighbor } from './cut-order'

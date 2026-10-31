@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --import tsx --test tests/*.test.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:saved-sizes": "node --import tsx --test tests/saved-sizes.test.mjs",
@@ -12,9 +13,12 @@
     "app:dev": "electron .",
     "app:build": "npm run build && electron-builder --mac",
     "app:mas": "npm run build && electron-builder --mac mas",
-    "test:publish": "node --import tsx --test tests/publish.test.mjs"
+    "test:publish": "node --import tsx --test tests/publish.test.mjs",
+    "test:frame": "node --import tsx --test tests/weeding-frame.test.mjs",
+    "test:cutter": "node --import tsx --test tests/cutter-send.test.mjs"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "opentype.js": "^2.0.0",
     "polygon-clipping": "^0.15.7",
     "react": "^19.2.8",

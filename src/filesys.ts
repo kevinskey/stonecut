@@ -39,8 +39,9 @@ export const fsSupported = typeof w.showSaveFilePicker === 'function'
 export async function pickSaveHandle(suggestedName: string): Promise<FSFileHandle | null> {
   try {
     return await w.showSaveFilePicker!({ suggestedName, types: PICKER_TYPES, id: 'stonecut-designs' })
-  } catch {
-    return null
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') return null
+    throw e
   }
 }
 
@@ -49,8 +50,9 @@ export async function pickOpenHandle(): Promise<FSFileHandle | null> {
   try {
     const got = await w.showOpenFilePicker!({ types: PICKER_TYPES, id: 'stonecut-designs' })
     return got?.[0] ?? null
-  } catch {
-    return null
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') return null
+    throw e
   }
 }
 
