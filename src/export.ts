@@ -272,7 +272,7 @@ export function gpglTestShape(unitsPerMm = 10, offsetMm = 2, swapAxes = false): 
 
 // ---------- DXF (R12) for laser cutters and other machine software ----------
 // Holes as true CIRCLE entities on layer HOLES, cut lines as POLYLINE on
-// layer LINES. R12 ASCII with an ENTITIES-only body — the most widely
+// layer LINES. R12-style entities with an explicit millimeter header — the most widely
 // accepted dialect (LWPOLYLINE is R13+ and some laser tools choke on it).
 // DXF is Y-up; the model is Y-down, so Y flips against the job height.
 // Units are implicitly mm — tell the receiving software "millimetres" if
@@ -280,7 +280,7 @@ export function gpglTestShape(unitsPerMm = 10, offsetMm = 2, swapAxes = false): 
 export function toDXF(job: Job): string {
   const H = job.heightMm
   const f = (v: number) => v.toFixed(3)
-  const L: string[] = ['0', 'SECTION', '2', 'ENTITIES']
+  const L: string[] = ['0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES']
   for (const s of job.stones) {
     L.push('0', 'CIRCLE', '8', 'HOLES', '10', f(s.x), '20', f(H - s.y), '30', '0', '40', f(holeOf(job, s)))
   }
@@ -296,6 +296,8 @@ export function toDXF(job: Job): string {
   L.push('0', 'ENDSEC', '0', 'EOF')
   return L.join('\r\n') + '\r\n'
 }
+
+export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 
 // ---------- stone counts (bill of materials) ----------
 export interface BomRow {
@@ -355,8 +357,8 @@ export function workOrderHtml(
   const rows = bom
     .map(
       (r) => `<tr>
-  <td><span class="sw" style="background:${r.color}"></span>${meta.nameOf ? `${meta.nameOf(r.color)} <small style="color:#888">${r.color}</small>` : r.color}</td>
-  <td>${r.size}</td>
+  <td><span class="sw" style="background:${r.color}"></span>${meta.nameOf ? `${escapeHtml(meta.nameOf(r.color))} <small style="color:#888">${r.color}</small>` : r.color}</td>
+  <td>${escapeHtml(r.size)}</td>
   <td>${r.stoneMm ? r.stoneMm.toFixed(1) : '—'} mm</td>
   <td>${r.holeMm.toFixed(1)} mm</td>
   <td class="n">${r.n}</td>
@@ -364,7 +366,7 @@ export function workOrderHtml(
 </tr>`,
     )
     .join('\n')
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${meta.title}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(meta.title)}</title>
 <style>
   body { font: 13px/1.45 -apple-system, Segoe UI, sans-serif; color: #111; margin: 28px; }
   h1 { font-size: 18px; margin: 0 0 2px; }
@@ -380,18 +382,18 @@ export function workOrderHtml(
   @media print { body { margin: 10mm; } }
 </style></head><body>
 <h1>StoneCut work order</h1>
-<p class="sub">${meta.title} · ${new Date().toLocaleString()}</p>
+<p class="sub">${escapeHtml(meta.title)} · ${new Date().toLocaleString()}</p>
 <table class="facts"><tbody>
 <tr><td>Design size</td><td><b>${(w / 25.4).toFixed(2)}″ × ${(h / 25.4).toFixed(2)}″</b> (${w.toFixed(0)} × ${h.toFixed(0)} mm)</td></tr>
-<tr><td>Media</td><td>${meta.boardLabel}</td></tr>
-<tr><td>Material</td><td>${meta.material}</td></tr>
+<tr><td>Media</td><td>${escapeHtml(meta.boardLabel)}</td></tr>
+<tr><td>Material</td><td>${escapeHtml(meta.material)}</td></tr>
 <tr><td>Holes</td><td><b>${total}</b>${(job.paths?.length ?? 0) ? ` + ${job.paths!.length} cut line${job.paths!.length === 1 ? '' : 's'}` : ''}</td></tr>
 </tbody></table>
 <table>
 <thead><tr><th>Color</th><th>Size</th><th>Stone ⌀</th><th>Hole ⌀</th><th class="n">Holes</th><th class="n">Order (+10%)</th></tr></thead>
 <tbody>
 ${rows}
-<tr><th colspan="4">Total</th><th class="n">${total}</th><th class="n">${Math.ceil(total * 1.1)}</th></tr>
+<tr><th colspan="4">Total</th><th class="n">${total}</th><th class="n">${bom.reduce((n, r) => n + Math.ceil(r.n * 1.1), 0)}</th></tr>
 </tbody>
 </table>
 <div class="preview"><svg viewBox="0 0 ${w.toFixed(1)} ${h.toFixed(1)}" xmlns="http://www.w3.org/2000/svg">${circles}${lines}</svg></div>
@@ -407,6 +409,7 @@ ${rows}
 // measure 100 mm, the print dialog scaled the job ("Fit to page" is the
 // usual culprit).
 export function placementGuideHtml(job: Job, colorOf: (s: Stone) => string, title: string): string {
+  title = escapeHtml(title)
   const TILE_W = 190, TILE_H = 245 // mm of design per page, inside margins
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const s of job.stones) {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
-import { DEFAULT_PRESETS, DEFAULT_SIZES, isLegacyPreset, mergeSavedSizes } from './model'
+import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
@@ -16,8 +16,8 @@ import { DESIGN_EXT, ensureWritable, fsSupported, pickOpenHandle, pickSaveHandle
 import type { FSFileHandle } from './filesys'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer, ImageAnalysis } from './image'
-import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
-import { buildPublishPayload, getPublishKey, publishToTsb, setPublishKey, snapshotPublishDesign } from './publish'
+import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toSVG, workOrderHtml } from './export'
+import { buildPublishPayload, getPublishKey, publishToTsb, renderPreviewPng, setPublishKey, snapshotPublishDesign } from './publish'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MOCKUP_W, drawGem, drawMockup, drawMockupEmpty, drawMockupPhoto } from './sim'
@@ -28,8 +28,14 @@ import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import { withWeedingFrame, weedingFrameFits } from './weeding-frame'
-import { makeCutConfirmation } from './cut-confirmation'
+import { makeCutConfirmation, serializeCutJob } from './cut-confirmation'
 import type { CutConfirmation } from './cut-confirmation'
+import { parseProject, readProjectFileText } from './project'
+import type { Elements, VecItem, Project, ProjectContext, CutterProfile, Recipe, TextMeta } from './project'
+import { preflight, validateConditions } from './preflight'
+import { safeStorage } from './storage'
+import { saveProjectVersion, listProjectVersions, readProjectVersion } from './project-history'
+import type { VersionSummary } from './project-history'
 import './App.css'
 
 type Tool = 'select' | 'add' | 'node' | 'pen'
@@ -39,13 +45,6 @@ type StoneMode = 'outline' | 'fill' | 'both'
 // the scale they were generated; sx/sy is the scale the element is at now.
 // Resizing never scales holes: the contours are scaled and the stones are
 // laid out again at the panel's current stone size and spacing.
-interface TextMeta { text: string; fontName: string; fontId: string; weight: 'bold' | 'regular'; height: number; spacing: number; bend: number }
-interface Recipe { contours: Pt[][]; mode: StoneMode; wholeWord: boolean; sx: number; sy: number; textMeta?: TextMeta }
-type Elements = Record<number, Recipe>
-// A vector cut: an imported SVG flattened to mm polylines. `base` is the
-// file's geometry normalised to (0,0); x/y/s place and scale it on the board.
-// These are cut as LINES (pen down along the path), not as stone holes.
-interface VecItem { id: number; name: string; base: Pt[][]; baseW: number; baseH: number; x: number; y: number; s: number }
 const vecPaths = (v: VecItem): Pt[][] => v.base.map((p) => p.map((q) => ({ x: q.x * v.s + v.x, y: q.y * v.s + v.y })))
 const vecBox = (v: VecItem) => ({ minX: v.x, minY: v.y, maxX: v.x + v.baseW * v.s, maxY: v.y + v.baseH * v.s })
 const normaliseContours = (contours: Pt[][]): Pt[][] => {
@@ -64,6 +63,9 @@ const rotatePt = (q: Pt, center: Pt, rad: number): Pt => {
   const dx = q.x - center.x, dy = q.y - center.y
   return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos }
 }
+
+type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 
 const DEFAULT_MARGIN = 5 // mm standoff around design in exports; set per-job in the Cut panel
 
@@ -155,7 +157,7 @@ function Section({ title, defaultOpen = false, children }: {
   children: React.ReactNode
 }) {
   return (
-    <details className="sec" open={defaultOpen}>
+    <details className="sec" data-section={title} open={defaultOpen}>
       <summary>{title}</summary>
       <div className="sec-body">{children}</div>
     </details>
@@ -168,14 +170,13 @@ function Section({ title, defaultOpen = false, children }: {
 // blade, note) is refreshed on saved entries of the same name.
 function loadPresets(): MaterialPreset[] {
   try {
-    const raw = localStorage.getItem('stonecut.presets')
+    const raw = safeStorage.getItem('stonecut.presets')
     if (raw) {
       const saved = JSON.parse(raw) as MaterialPreset[]
       if (Array.isArray(saved) && saved.length) {
         const byName = new Map(DEFAULT_PRESETS.map((d) => [d.name, d]))
         const merged: MaterialPreset[] = saved.map((p): MaterialPreset => {
           const d = byName.get(p.name)
-          if (d && isLegacyPreset(p)) return d
           return d ? { ...d, ...p, group: d.group, blade: d.blade, note: d.note } : { ...p, group: p.group ?? 'My presets' }
         })
         const have = new Set(merged.map((p) => p.name))
@@ -204,32 +205,13 @@ const ZOOM_MAX = 40
 // browser so a refresh, a crash, or a closed tab does not wipe the work.
 // Settings were always saved; the stones were the one thing that was not.
 const DESIGN_KEY = 'stonecut.design'
-type SavedLastText = { el: number; fontName: string; text: string; height: number; spacing: number; bend: number }
-function loadDesign(): { stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements; vectors: VecItem[]; lastText?: SavedLastText } | null {
+let recoveryLoadError: string | null = null
+function loadDesign(): Project | null {
   try {
-    const raw = localStorage.getItem(DESIGN_KEY)
-    if (!raw) return null
-    const d = JSON.parse(raw)
-    if (!Array.isArray(d?.stones) && !Array.isArray(d?.vectors)) return null
-    const stones = ((d.stones ?? []) as Stone[]).filter((s) => typeof s?.x === 'number' && typeof s?.y === 'number' && typeof s?.size === 'string')
-    const sizes = mergeSavedSizes(d.sizes)
-    const elements: Elements = {}
-    if (d.elements && typeof d.elements === 'object')
-      for (const [k, r] of Object.entries(d.elements as Record<string, Recipe>))
-        if (Array.isArray(r?.contours) && typeof r.sx === 'number' && typeof r.sy === 'number')
-          elements[+k] = {
-            contours: r.contours, mode: r.mode ?? 'outline', wholeWord: !!r.wholeWord, sx: r.sx, sy: r.sy,
-            textMeta: r.textMeta && typeof r.textMeta.text === 'string' ? r.textMeta : undefined,
-          }
-    const vectors: VecItem[] = Array.isArray(d.vectors)
-      ? (d.vectors as VecItem[]).filter((v) => Array.isArray(v?.base) && typeof v.x === 'number' && typeof v.s === 'number')
-      : []
-    const lastText: SavedLastText | undefined =
-      d.lastText && typeof d.lastText.el === 'number' && typeof d.lastText.text === 'string'
-        ? { el: d.lastText.el, fontName: String(d.lastText.fontName ?? ''), text: d.lastText.text, height: +d.lastText.height, spacing: +d.lastText.spacing, bend: +d.lastText.bend || 0 }
-        : undefined
-    return { stones, sizes, elements, vectors, lastText }
-  } catch {
+    const raw = safeStorage.getItem(DESIGN_KEY)
+    return raw ? parseProject(JSON.parse(raw)) : null
+  } catch (e) {
+    recoveryLoadError = `Recovery unavailable: ${e instanceof Error ? e.message : e}`
     return null
   }
 }
@@ -302,7 +284,12 @@ function Swatches({ value, onPick }: { value: string; onPick: (c: string) => voi
 }
 
 export default function App() {
-  const savedDesign = useRef(loadDesign())
+  const [initialDesign] = useState(loadDesign)
+  const savedDesign = useRef(initialDesign)
+  const [release, setRelease] = useState('')
+  useEffect(() => { void fetch('./build-info.json').then((r) => r.ok ? r.json() : null).then((d) => { if (typeof d?.commit === 'string') setRelease(d.commit.slice(0, 7)) }).catch(() => {}) }, [])
+  const [recoveryStatus, setRecoveryStatus] = useState(recoveryLoadError ?? 'Recovery ready')
+  const [savedProfile, setSavedProfile] = useState<CutterProfile | null>(initialDesign?.context?.cutter ?? null)
   const [stones, setStones] = useState<Stone[]>(() => savedDesign.current?.stones ?? [])
   const stonesRef = useRef<Stone[]>([])
   // last image commit — while untouched, generation-setting changes REGENERATE
@@ -337,30 +324,10 @@ export default function App() {
   const vecSeq = useRef((savedDesign.current?.vectors ?? []).reduce((m, v) => Math.max(m, v.id), 0) + 1)
   // Selected cut-line objects (several at once: shift-click, marquee).
   const [selVecs, setSelVecs] = useState<Set<number>>(() => new Set())
-  // Save the design shortly after it stops changing (drags fire many updates).
-  useEffect(() => {
-    const t = setTimeout(() => {
-      try {
-        if (stones.length || vectors.length) {
-          // only keep recipes for elements that still have stones
-          const live = new Set(stones.map((st) => st.el))
-          const kept: Elements = {}
-          for (const [k, r] of Object.entries(elements)) if (live.has(+k)) kept[+k] = r
-          const lt = lastTextRef.current
-          const lastText =
-            lt && live.has(lt.el)
-              ? { el: lt.el, fontName: lt.fontName, text: lt.text, height: lt.height, spacing: lt.spacing, bend: lt.bend }
-              : undefined
-          localStorage.setItem(DESIGN_KEY, JSON.stringify({ v: 1, stones, sizes, elements: kept, vectors, lastText }))
-        } else localStorage.removeItem(DESIGN_KEY)
-      } catch (e) {
-        console.error('[stonecut] could not save design', e)
-      }
-    }, 400)
-    return () => clearTimeout(t)
-  }, [stones, sizes, elements, vectors])
   const [curSize, setCurSize] = useState('SS6')
-  const [gap, setGap] = useState(0.8) // min edge-to-edge gap between holes, mm
+  const [gap, setGap] = useState(initialDesign?.context?.gap ?? 0.8) // min edge-to-edge gap between holes, mm
+  const [workspace, setWorkspace] = useState('all')
+  const [panelOpen, setPanelOpen] = useState(false)
   const [tool, setTool] = useState<Tool>('select')
   const [addSize, setAddSize] = useState<'auto' | string>('auto') // stone size for manual adds
   const [outlineDesign, setOutlineDesign] = useState<'single' | 'double' | 'ghost' | 'centerline'>('single')
@@ -369,32 +336,34 @@ export default function App() {
   const [canEcho, setCanEcho] = useState(true)
   const [fillStyle, setFillStyle] = useState<'grid' | 'brick' | 'concentric' | 'radial'>('brick')
   const [fillSize, setFillSize] = useState('SS6')
-  const [fillColor, setFillColor] = useState('#7ec8e3')
-  const [outlineColor, setOutlineColor] = useState('#85d653')
+  const [fillColor, setFillColor] = useState(initialDesign?.context?.fillColor ?? '#7ec8e3')
+  const [outlineColor, setOutlineColor] = useState(initialDesign?.context?.outlineColor ?? '#85d653')
+  const fillColorRef = useRef(fillColor)
+  const outlineColorRef = useRef(outlineColor)
   const [echoUpsize, setEchoUpsize] = useState<number | null>(null)
   const outlineStyle: 'auto' | 'walls' | 'centerline' =
     outlineDesign === 'centerline' ? 'centerline' : strokePolicy
   const [zoom, setZoom] = useState(6) // px per mm
   // artboard: the physical sheet, sized in true inches (1in = 25.4mm)
-  const [boardWIn, setBoardWIn] = useState(() => +(localStorage.getItem('stonecut.boardW') ?? 12))
-  const [boardHIn, setBoardHIn] = useState(() => +(localStorage.getItem('stonecut.boardH') ?? 12))
-  useEffect(() => { localStorage.setItem('stonecut.boardW', String(boardWIn)) }, [boardWIn])
-  useEffect(() => { localStorage.setItem('stonecut.boardH', String(boardHIn)) }, [boardHIn])
+  const [boardWIn, setBoardWIn] = useState(() => initialDesign?.context?.boardWIn ?? +(safeStorage.getItem('stonecut.boardW') ?? 12))
+  const [boardHIn, setBoardHIn] = useState(() => initialDesign?.context?.boardHIn ?? +(safeStorage.getItem('stonecut.boardH') ?? 12))
+  useEffect(() => { safeStorage.setItem('stonecut.boardW', String(boardWIn)) }, [boardWIn])
+  useEffect(() => { safeStorage.setItem('stonecut.boardH', String(boardHIn)) }, [boardHIn])
   // artboard colour = the loaded material's colour, so stone colours are
   // judged against the flock/vinyl they'll sit on. null = the default
   // subtle translucent board.
-  const [boardColor, setBoardColor] = useState<string | null>(() => localStorage.getItem('stonecut.boardColor') || null)
+  const [boardColor, setBoardColor] = useState<string | null>(() => initialDesign?.context?.boardColor ?? (safeStorage.getItem('stonecut.boardColor') || null))
   useEffect(() => {
-    if (boardColor) localStorage.setItem('stonecut.boardColor', boardColor)
-    else localStorage.removeItem('stonecut.boardColor')
+    if (boardColor) safeStorage.setItem('stonecut.boardColor', boardColor)
+    else safeStorage.removeItem('stonecut.boardColor')
   }, [boardColor])
   // sparkle simulation: stones render as faceted gems instead of flat dots
-  const [simView, setSimView] = useState(() => localStorage.getItem('stonecut.sim') === '1')
-  useEffect(() => { localStorage.setItem('stonecut.sim', simView ? '1' : '0') }, [simView])
+  const [simView, setSimView] = useState(() => safeStorage.getItem('stonecut.sim') === '1')
+  useEffect(() => { safeStorage.setItem('stonecut.sim', simView ? '1' : '0') }, [simView])
   // garment mockup modal
   const [mockupOpen, setMockupOpen] = useState(false)
-  const [garmentColor, setGarmentColor] = useState(() => localStorage.getItem('stonecut.garment') || '#1a1a2e')
-  useEffect(() => { localStorage.setItem('stonecut.garment', garmentColor) }, [garmentColor])
+  const [garmentColor, setGarmentColor] = useState(() => initialDesign?.context?.garmentColor ?? (safeStorage.getItem('stonecut.garment') || '#1a1a2e'))
+  useEffect(() => { safeStorage.setItem('stonecut.garment', garmentColor) }, [garmentColor])
   const [chestIn, setChestIn] = useState(20)
   const [dropIn, setDropIn] = useState(3)
   const mockupCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -406,15 +375,15 @@ export default function App() {
   const [mkSearch, setMkSearch] = useState('')
   const [mkResults, setMkResults] = useState<{ ss_id: string; name: string; brand: string }[]>([])
   const [mkStyle, setMkStyle] = useState<{ ssId: string; name: string; brand: string } | null>(() => {
-    try { return JSON.parse(localStorage.getItem('stonecut.mkstyle') ?? 'null') } catch { return null }
+    try { return JSON.parse(safeStorage.getItem('stonecut.mkstyle') ?? 'null') } catch { return null }
   })
   const [mkColors, setMkColors] = useState<SsColor[]>([])
   const [mkColorIdx, setMkColorIdx] = useState(0)
   const [mkView, setMkView] = useState<'front' | 'back'>('front')
   // how much of the photo's width the garment chest spans — S&S flat shots
   // vary by brand, so it's a visible calibration, not a hidden constant
-  const [mkSpan, setMkSpan] = useState(() => +(localStorage.getItem('stonecut.mkspan') ?? 62))
-  useEffect(() => { localStorage.setItem('stonecut.mkspan', String(mkSpan)) }, [mkSpan])
+  const [mkSpan, setMkSpan] = useState(() => +(safeStorage.getItem('stonecut.mkspan') ?? 62))
+  useEffect(() => { safeStorage.setItem('stonecut.mkspan', String(mkSpan)) }, [mkSpan])
   const [mkOff, setMkOff] = useState({ x: 0, y: 0 })
   const mkDrag = useRef<{ x: number; y: number } | null>(null)
   const mkImgRef = useRef<HTMLImageElement | null>(null)
@@ -434,7 +403,7 @@ export default function App() {
   const selectStyle = useCallback(async (s: { ss_id: string; name: string; brand: string }) => {
     const style = { ssId: s.ss_id, name: s.name, brand: s.brand }
     setMkStyle(style)
-    localStorage.setItem('stonecut.mkstyle', JSON.stringify(style))
+    safeStorage.setItem('stonecut.mkstyle', JSON.stringify(style))
     setMkResults([])
     setMkColors([])
     setMkColorIdx(0)
@@ -475,60 +444,60 @@ export default function App() {
   // standoff between the cutter origin and the nearest hole. The CE6000's pinch
   // rollers sit on the material edges and can't be cut under, so 0 only works
   // when ORIGIN is set inboard of them.
-  const [margin, setMargin] = useState(() => +(localStorage.getItem('stonecut.margin') ?? DEFAULT_MARGIN))
-  useEffect(() => { localStorage.setItem('stonecut.margin', String(margin)) }, [margin])
+  const [margin, setMargin] = useState(() => initialDesign?.context?.margin ?? +(safeStorage.getItem('stonecut.margin') ?? DEFAULT_MARGIN))
+  useEffect(() => { safeStorage.setItem('stonecut.margin', String(margin)) }, [margin])
   // 'design' re-zeroes the job to its own bounding box (cut always starts at
   // the machine origin); 'artboard' keeps the stones where they sit on the
   // sheet, so what you positioned on the page is what gets cut.
   const [placement, setPlacement] = useState<'design' | 'artboard'>(
-    () => (localStorage.getItem('stonecut.placement') === 'design' ? 'design' : 'artboard'),
+    () => initialDesign?.context?.placement ?? (safeStorage.getItem('stonecut.placement') === 'design' ? 'design' : 'artboard'),
   )
-  useEffect(() => { localStorage.setItem('stonecut.placement', placement) }, [placement])
+  useEffect(() => { safeStorage.setItem('stonecut.placement', placement) }, [placement])
   // Graphtec carriages home to the right, so 'br' is the common CE6000 setup.
   const [originCorner, setOriginCorner] = useState<OriginCorner>(
-    () => (localStorage.getItem('stonecut.origin') === 'bl' ? 'bl' : 'br'),
+    () => (safeStorage.getItem('stonecut.origin') === 'bl' ? 'bl' : 'br'),
   )
-  useEffect(() => { localStorage.setItem('stonecut.origin', originCorner) }, [originCorner])
+  useEffect(() => { safeStorage.setItem('stonecut.origin', originCorner) }, [originCorner])
   // Must match MENU -> I/F -> STEP SIZE on the machine, or the job is scaled.
   // Default is 0.100 mm (254 steps/in, 10 units/mm) — what Kevin's CE6000 is
   // set to. The old 20 u/mm default cut every hole at double size on it. New
   // storage key so browsers that silently saved the old default start fresh.
-  const [gpStep, setGpStep] = useState(() => +(localStorage.getItem('stonecut.gpstep2') ?? 10) || 10)
-  useEffect(() => { localStorage.setItem('stonecut.gpstep2', String(gpStep)) }, [gpStep])
+  const [gpStep, setGpStep] = useState(() => +(safeStorage.getItem('stonecut.gpstep2') ?? 10) || 10)
+  useEffect(() => { safeStorage.setItem('stonecut.gpstep2', String(gpStep)) }, [gpStep])
   // On by default: the app sends the preset's speed and force ahead of the
   // geometry. The machine only honours them when TOOLS SETTING ->
   // CONDITION PRIORITY is PROGRAM; otherwise the panel conditions still win.
   // New storage key so browsers that saved the old off-default flip to on.
   const [sendConditions, setSendConditions] = useState(
-    () => localStorage.getItem('stonecut.sendcond2') !== '0',
+    () => safeStorage.getItem('stonecut.sendcond2') !== '0',
   )
   // Graphtec's first coordinate is the media-feed axis. The board is drawn
   // with feed running up the screen (model Y), so swapped is the correct
   // default; the toggle stays for a machine whose axes have been rotated.
-  const [swapAxes, setSwapAxes] = useState(() => localStorage.getItem('stonecut.swap') !== '0')
-  useEffect(() => { localStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
+  const [swapAxes, setSwapAxes] = useState(() => safeStorage.getItem('stonecut.swap') !== '0')
+  useEffect(() => { safeStorage.setItem('stonecut.swap', swapAxes ? '1' : '0') }, [swapAxes])
   // Firmware circles: holes as GP-GL W arc commands (one per hole, machine-
   // interpolated) instead of 12-24 segment polygons. OFF until live-tested
   // on the CE6000 — flip it in Cutter setup after a good test cut.
-  const [wCircles, setWCircles] = useState(() => localStorage.getItem('stonecut.wcircles') === '1')
-  useEffect(() => { localStorage.setItem('stonecut.wcircles', wCircles ? '1' : '0') }, [wCircles])
+  const [wCircles, setWCircles] = useState(() => safeStorage.getItem('stonecut.wcircles') === '1')
+  useEffect(() => { safeStorage.setItem('stonecut.wcircles', wCircles ? '1' : '0') }, [wCircles])
   // Overcut: recut this far past each hole's closing point so the blade's
   // swivel tag doesn't hold the chad in. 0 = old behaviour.
   const [overcut, setOvercut] = useState(() => {
-    const v = +(localStorage.getItem('stonecut.overcut') ?? 0.5)
+    const v = +(safeStorage.getItem('stonecut.overcut') ?? 0.5)
     return isFinite(v) && v >= 0 ? v : 0.5
   })
-  useEffect(() => { localStorage.setItem('stonecut.overcut', String(overcut)) }, [overcut])
-  useEffect(() => { localStorage.setItem('stonecut.sendcond2', sendConditions ? '1' : '0') }, [sendConditions])
+  useEffect(() => { safeStorage.setItem('stonecut.overcut', String(overcut)) }, [overcut])
+  useEffect(() => { safeStorage.setItem('stonecut.sendcond2', sendConditions ? '1' : '0') }, [sendConditions])
   const boardWmm = boardWIn * 25.4
   const boardHmm = boardHIn * 25.4
   const [status, setStatus] = useState('Ready')
   // resizable sidebar: drag the strip between the panel and the canvas
   const [panelW, setPanelW] = useState(() => {
-    const v = +(localStorage.getItem('stonecut.panelw') ?? 300)
+    const v = +(safeStorage.getItem('stonecut.panelw') ?? 300)
     return isFinite(v) ? Math.min(560, Math.max(240, v)) : 300
   })
-  useEffect(() => { localStorage.setItem('stonecut.panelw', String(panelW)) }, [panelW])
+  useEffect(() => { safeStorage.setItem('stonecut.panelw', String(panelW)) }, [panelW])
   const panelDrag = useRef(false)
 
   // text panel
@@ -674,18 +643,28 @@ export default function App() {
   // not-yet-chosen) shows just the letter outlines (Kevin, 2026-10-14).
   // Remembered across sessions once chosen.
   const [textOutput, setTextOutputRaw] = useState<'stones' | 'lines' | 'both' | null>(() => {
-    const v = localStorage.getItem('stonecut.textout')
+    const v = safeStorage.getItem('stonecut.textout')
     return v === 'stones' || v === 'lines' || v === 'both' ? v : null
   })
   const setTextOutput = (v: 'stones' | 'lines' | 'both') => {
     setTextOutputRaw(v)
-    localStorage.setItem('stonecut.textout', v)
+    safeStorage.setItem('stonecut.textout', v)
   }
   const wantStones = textOutput === 'stones' || textOutput === 'both'
   const wantLines = textOutput === 'lines' || textOutput === 'both'
 
   // image panel
   const [imageFile, setImageFile] = useState<File | null>(null)
+  const [imageSourceUrl, setImageSourceUrl] = useState<string | null>(null)
+  const [imageMaskUrl, setImageMaskUrl] = useState<string | null>(null)
+  const [imageStoneUrl, setImageStoneUrl] = useState<string | null>(null)
+  const [imageHeightMm, setImageHeightMm] = useState(100)
+  useEffect(() => {
+    setImageMaskUrl(null); setImageStoneUrl(null)
+    if (!imageFile) { setImageSourceUrl(null); return }
+    const url = URL.createObjectURL(imageFile); setImageSourceUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [imageFile])
   // ---- T-Shirt Brothers shape library (art-library API via dev proxy) ----
   interface TemplateItem { name: string; file: string; license: string; source: string }
   interface TemplateCat { slug: string; label: string; items: TemplateItem[] }
@@ -752,6 +731,11 @@ export default function App() {
   const [imgAlphaKey, setImgAlphaKey] = useState(false)
   const [imgLinework, setImgLinework] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ x: number; y: number; size?: string; color?: string }[] | null>(null)
+  useEffect(() => {
+    if (!imagePreview?.length) { setImageStoneUrl(null); return }
+    try { setImageStoneUrl(renderPreviewPng(imagePreview.map((p) => ({ ...p, size: p.size ?? curSize })), sizes, (p) => p.color ?? outlineColor, { maxPx: 200, frame: { widthMm: imgWidth, heightMm: imageHeightMm } }).dataUrl) }
+    catch { setImageStoneUrl(null) }
+  }, [imagePreview, sizes, curSize, outlineColor, imgWidth, imageHeightMm])
   const [imgMode, setImgMode] = useState<StoneMode>('both')
   // Detail smoothing: welds art detail finer than the stone rhythm into its
   // parent shape (fur hatching -> solid mane). Radius is pitch-relative.
@@ -771,10 +755,10 @@ export default function App() {
   const [presetIdx, setPresetIdx] = useState(0)
   // Vector cut lines are usually a different material from the holes (vinyl
   // or HTV, not flock), so they get their own preset. -1 = same as holes.
-  const [linePresetName, setLinePresetName] = useState<string | null>(() => localStorage.getItem('stonecut.linepreset'))
+  const [linePresetName, setLinePresetName] = useState<string | null>(() => safeStorage.getItem('stonecut.linepreset'))
   useEffect(() => {
-    if (linePresetName) localStorage.setItem('stonecut.linepreset', linePresetName)
-    else localStorage.removeItem('stonecut.linepreset')
+    if (linePresetName) safeStorage.setItem('stonecut.linepreset', linePresetName)
+    else safeStorage.removeItem('stonecut.linepreset')
   }, [linePresetName])
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
@@ -1163,7 +1147,7 @@ export default function App() {
       }
     }, 350)
     return () => window.clearTimeout(t)
-  }, [textPreview, wantStones, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase])
+  }, [textPreview, wantStones, curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, fontOpen, pinPreviewBase, textHeight])
 
   // live IMAGE preview: same treatment text gets — settings changes re-stone
   // the artwork automatically, nothing committed until you press Add
@@ -1190,6 +1174,15 @@ export default function App() {
         const minFeat = pitch ** 2 * 0.6
         const closeMm = imgDetail === 'fine' ? 0 : pitch * (imgDetail === 'smooth' ? 0.2 : 0.45)
         const raster = await imageToRaster(imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, previewPx, minFeat, closeMm, imgTextMasked && imgOcr ? imgOcr.rects : undefined)
+        setImageHeightMm(raster.heightMm)
+        const thumb = document.createElement('canvas'); const scale = 200 / Math.max(raster.grid.w, raster.grid.h); thumb.width = Math.max(1, Math.round(raster.grid.w * scale)); thumb.height = Math.max(1, Math.round(raster.grid.h * scale))
+        const ctx = thumb.getContext('2d')!
+        const pixels = ctx.createImageData(thumb.width, thumb.height)
+        for (let y = 0; y < thumb.height; y++) for (let x = 0; x < thumb.width; x++) {
+          const filled = raster.grid.bin[Math.floor(y * raster.grid.h / thumb.height) * raster.grid.w + Math.floor(x * raster.grid.w / thumb.width)]
+          const i = (y * thumb.width + x) * 4; pixels.data[i] = pixels.data[i+1] = pixels.data[i+2] = filled ? 30 : 255; pixels.data[i+3] = 255
+        }
+        ctx.putImageData(pixels, 0, 0); setImageMaskUrl(thumb.toDataURL('image/png'))
         // PHOTO GUARD: a photograph thresholds into thousands of speckle
         // regions and the outline engine walks every one — the tab froze
         // for minutes. Refuse pathological masks with advice instead.
@@ -1259,7 +1252,7 @@ export default function App() {
       if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
       return el
     },
-    [curSize, gap, mutate, sizes, previewOffX],
+    [curSize, mutate, previewOffX, nextEl],
   )
 
   // The contours -> stones stage, shared by text and shapes. Both feed the
@@ -1411,7 +1404,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, previewOffX, nextEl])
 
   // Live regeneration: while the last image commit is untouched, any
   // generation-setting change re-runs it in place (debounced like a preview).
@@ -1640,7 +1633,7 @@ export default function App() {
   useEffect(() => {
     if (didInitialFit.current || !measured.current) return
     didInitialFit.current = true
-    try { localStorage.removeItem('stonecut.view') } catch { /* ignore */ }
+    try { safeStorage.removeItem('stonecut.view') } catch { /* ignore */ }
     fitSheet()
   }, [avail, fitSheet])
   const drag = useRef<{ startX: number; startY: number; moved: boolean; orig: Stone[] } | null>(null)
@@ -1654,8 +1647,8 @@ export default function App() {
   // Inkscape-style object snapping while dragging: the dragged selection's
   // edges and centre pull to other objects' edges/centres and to the board's
   // edges and centre. Pink guide lines show what snapped; Alt drags free.
-  const [snapOn, setSnapOn] = useState(() => localStorage.getItem('stonecut.snapobj') !== '0')
-  useEffect(() => { localStorage.setItem('stonecut.snapobj', snapOn ? '1' : '0') }, [snapOn])
+  const [snapOn, setSnapOn] = useState(() => safeStorage.getItem('stonecut.snapobj') !== '0')
+  useEffect(() => { safeStorage.setItem('stonecut.snapobj', snapOn ? '1' : '0') }, [snapOn])
   const [snapLines, setSnapLines] = useState<{ x?: number; y?: number }>({})
   const snapRef = useRef<{ xs: number[]; ys: number[]; box0: { minX: number; minY: number; maxX: number; maxY: number } } | null>(null)
   // Collect snap targets ONCE at drag start: board + every object not being
@@ -1742,8 +1735,6 @@ export default function App() {
   // changes. Corner handles keep the proportions, edge handles stretch one
   // axis.
   type Box = { minX: number; minY: number; maxX: number; maxY: number }
-  type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
-  const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
   const HANDLE_PX = 9
   const handlePos = (b: Box, h: Handle): Pt => ({
     x: h.includes('w') ? b.minX : h.includes('e') ? b.maxX : (b.minX + b.maxX) / 2,
@@ -1950,7 +1941,7 @@ export default function App() {
     if (!fresh.length) { setStatus('No room to scatter — raise Density or Band, or lower the stone size'); return }
     mutate((prev) => [...prev, ...fresh])
     setStatus(`Scattered ${fresh.length} stones fading ${band} mm off the edge — ⌘Z undoes, double-click grabs the spray`)
-  }, [selection, selVecs, stones, vectors, holeOf, scatterBand, scatterDensity, scatterMix, gap, sizes, curSize, fillSize, mutate])
+  }, [selection, selVecs, stones, vectors, holeOf, scatterBand, scatterDensity, scatterMix, gap, sizes, curSize, fillSize, mutate, nextEl])
 
   // drag-to-rotate handle floating above the selection box
   const ROT_OFF_PX = 24
@@ -2233,7 +2224,7 @@ export default function App() {
       parts.push('1 cut line')
     }
     setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} path — keep clicking for another, V to select`)
-  }, [penOut, stonesAlongPath, curSize, pushUndo])
+  }, [penOut, stonesAlongPath, curSize, pushUndo, nextEl])
 
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
@@ -2652,7 +2643,7 @@ export default function App() {
       }
     }
     setMarquee(null)
-  }, [marquee, stones, vectors, regenElement])
+  }, [stones, vectors, regenElement])
 
   // A drag released over the sidebar or outside the window still ends.
   // Leaving the SVG used to cancel it mid-move; now the move continues until
@@ -2820,9 +2811,13 @@ export default function App() {
   // which is how the exporters know not to re-send conditions
   const linePreset = linePresetIdx >= 0 ? presets[linePresetIdx] : preset
   const updatePresetAt = useCallback((idx: number, patch: Partial<MaterialPreset>) => {
+    patch = { ...patch }
+    if (patch.force !== undefined) patch.force = Math.min(38, Math.max(1, Math.round(patch.force || 1)))
+    if (patch.speed !== undefined) patch.speed = Math.min(64, Math.max(1, Math.round(patch.speed || 1)))
+    if (patch.passes !== undefined) patch.passes = Math.min(20, Math.max(1, Math.round(patch.passes || 1)))
     setPresets((prev) => {
       const next = prev.map((p, i) => (i === idx ? { ...p, ...patch } : p))
-      localStorage.setItem('stonecut.presets', JSON.stringify(next))
+      safeStorage.setItem('stonecut.presets', JSON.stringify(next))
       return next
     })
   }, [])
@@ -2833,7 +2828,7 @@ export default function App() {
     if (!name) return
     setPresets((prev) => {
       const next = [...prev, { ...preset, name }]
-      localStorage.setItem('stonecut.presets', JSON.stringify(next))
+      safeStorage.setItem('stonecut.presets', JSON.stringify(next))
       setPresetIdx(next.length - 1)
       return next
     })
@@ -2878,13 +2873,13 @@ export default function App() {
   // Weeding frame: one rectangle cut around the arrangement so the template
   // peels cleanly off the roll. Export-time only — it wraps whichever layer
   // is being cut, and cuts LAST so the sheet stays anchored.
-  const [frameOn, setFrameOn] = useState(() => localStorage.getItem('stonecut.frame') === '1')
-  useEffect(() => { localStorage.setItem('stonecut.frame', frameOn ? '1' : '0') }, [frameOn])
+  const [frameOn, setFrameOn] = useState(() => initialDesign?.context?.frameOn ?? (safeStorage.getItem('stonecut.frame') === '1'))
+  useEffect(() => { safeStorage.setItem('stonecut.frame', frameOn ? '1' : '0') }, [frameOn])
   const [frameMm, setFrameMm] = useState(() => {
-    const v = +(localStorage.getItem('stonecut.framemm') ?? 5)
+    const v = initialDesign?.context?.frameMm ?? +(safeStorage.getItem('stonecut.framemm') ?? 5)
     return isFinite(v) && v >= 1 ? v : 5
   })
-  useEffect(() => { localStorage.setItem('stonecut.framemm', String(frameMm)) }, [frameMm])
+  useEffect(() => { safeStorage.setItem('stonecut.framemm', String(frameMm)) }, [frameMm])
   const cutColors = useMemo(() => {
     const m = new Map<string, number>()
     for (const st of stones) { const c = colorOfStone(st); m.set(c, (m.get(c) ?? 0) + 1) }
@@ -2934,20 +2929,20 @@ export default function App() {
   const frameWarning = placement === 'artboard'
     ? 'The weeding frame extends beyond the loaded media. Move the design inward, reduce the frame margin, or turn off the frame.'
     : 'The weeding frame extends beyond the job area. Increase the job margin, reduce the frame margin, or turn off the frame.'
+  const cutIssues = useMemo(() => preflight(framedCutJob, hardGapOf(gap)), [framedCutJob, gap])
+  const conditionIssue = useMemo(() => { try { validateConditions(preset); validateConditions(linePreset); return '' } catch (e) { return e instanceof Error ? e.message : String(e) } }, [preset, linePreset])
+  const cutBlocked = frameOutside || cutIssues.length > 0 || !!conditionIssue
   const cutCount = framedCutJob.stones.length + (framedCutJob.paths?.length ?? 0)
   const layerCounts = useMemo(() => {
     let o = 0
     let f = 0
-    for (const st of stones) ((st.layer ?? 'outline') === 'fill' ? f++ : o++)
+    for (const st of stones) { if ((st.layer ?? 'outline') === 'fill') f++; else o++ }
     return { o, f }
   }, [stones])
-  const cutData = useCallback(
-    () =>
-      format === 'gpgl'
-        ? toGPGL(framedCutJob, preset, originCorner, gpStep, sendConditions, swapAxes, { firmwareCircles: wCircles, overcutMm: overcut, linePreset })
-        : toHPGL(framedCutJob, preset, originCorner, { overcutMm: overcut, linePreset }),
-    [format, framedCutJob, preset, linePreset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut],
-  )
+  const cutData = useCallback(() => serializeCutJob(framedCutJob, {
+    format, preset, origin: originCorner, unitsPerMm: gpStep, sendConditions, swapAxes,
+    cutOpts: { firmwareCircles: wCircles, overcutMm: overcut, linePreset },
+  }), [format, framedCutJob, preset, linePreset, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut])
 
   // Cut goes through an in-app confirmation (styled like the rest of the
   // panel, not a browser card). Chrome's own device chooser only appears the
@@ -2959,7 +2954,7 @@ export default function App() {
   const doSend = useCallback(async () => {
     if (sendingRef.current || preparingCutRef.current) return
     if (!cutCount) { setStatus('Nothing to cut'); return }
-    if (frameOutside) { setStatus(frameWarning); return }
+    if (cutBlocked) { setStatus(frameOutside ? frameWarning : conditionIssue || cutIssues.join(' ')); return }
     preparingCutRef.current = true
     try {
       const warnings: string[] = []
@@ -2980,7 +2975,7 @@ export default function App() {
     } finally {
       preparingCutRef.current = false
     }
-  }, [cutCount, frameOutside, frameWarning, offBoard, framedCutJob, gap, linePreset, preset, format, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut, selectionCut, cutLayer])
+  }, [cutCount, cutBlocked, cutIssues, conditionIssue, frameOutside, frameWarning, offBoard, framedCutJob, gap, linePreset, preset, format, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut, selectionCut, cutLayer])
   const doSendNow = useCallback(async () => {
     if (sendingRef.current || !cutConfirm) return
     // Lock synchronously: two clicks before React rerenders cannot send twice.
@@ -3020,6 +3015,8 @@ export default function App() {
   // affected future stones ("fill color changes doesnt work"). No undo entry:
   // dragging the picker fires a change per frame.
   useEffect(() => {
+    if (fillColorRef.current === fillColor) return
+    fillColorRef.current = fillColor
     setStones((prev) => {
       if (!prev.some((st) => (st.layer ?? 'outline') === 'fill' && st.color !== fillColor)) return prev
       const next = prev.map((st) =>
@@ -3032,6 +3029,8 @@ export default function App() {
     })
   }, [fillColor])
   useEffect(() => {
+    if (outlineColorRef.current === outlineColor) return
+    outlineColorRef.current = outlineColor
     setStones((prev) => {
       if (!prev.some((st) => (st.layer ?? 'outline') === 'outline' && st.color !== outlineColor)) return prev
       const next = prev.map((st) =>
@@ -3138,7 +3137,7 @@ export default function App() {
     if (!win) { setStatus('Pop-up blocked — allow pop-ups for this site to print'); return }
     win.document.write(html)
     win.document.close()
-  }, [job, bom, colorOfStone, stones.length, boardWIn, boardHIn, originCorner, preset])
+  }, [job, bom, colorOfStone, stones.length, boardWIn, boardHIn, originCorner, preset, linePreset])
 
   const printPlacementGuide = useCallback(() => {
     const html = placementGuideHtml(job, colorOfStone, `${stones.length} stones · ${new Date().toLocaleDateString()}`)
@@ -3229,7 +3228,7 @@ export default function App() {
       }
       return { stones: newStones.length, vecs: newVecs.length, copies: offsets.length }
     },
-    [selection, selVecs, stones, vectors, pushUndo],
+    [selection, selVecs, stones, vectors, pushUndo, nextEl],
   )
   const duplicateSelection = useCallback(() => {
     const r = materializeCopies([{ x: 5, y: 5 }], true)
@@ -3277,7 +3276,7 @@ export default function App() {
     setSelection(new Set(fresh.map((_, i) => baseLen + i)))
     setSelVecs(new Set(freshVecs.map((v) => v.id)))
     setStatus('Pasted')
-  }, [pushUndo])
+  }, [pushUndo, nextEl])
   // step & repeat: grid of copies pitched at selection size + gap
   const [repCols, setRepCols] = useState(2)
   const [repRows, setRepRows] = useState(2)
@@ -3368,7 +3367,7 @@ export default function App() {
     if (!cv) return
     const cssW = canvasW * zoom
     const cssH = canvasH * zoom
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    const dpr = Math.min(2, window.devicePixelRatio || 1, 8192 / cssW, 8192 / cssH, Math.sqrt(16_000_000 / (cssW * cssH)))
     cv.style.width = `${cssW}px`
     cv.style.height = `${cssH}px`
     cv.width = Math.round(cssW * dpr)
@@ -3566,8 +3565,7 @@ export default function App() {
     // The new rows stack BELOW everything on the board — often outside the
     // current view, which read as "nothing happened". Show the whole design.
     window.setTimeout(fitDesign, 60)
-  }, [font, textOutput, teamNames, textHeight, letterSpacing, textBend, textMode, wantStones, wantLines,
-      contoursToStones, sizes, curSize, stones.length, vectors.length, bbox.maxY, boardHmm, boardHIn, boardWmm, boardWIn, pushUndo, fitDesign])
+  }, [font, textOutput, teamNames, textHeight, letterSpacing, textBend, textMode, wantStones, wantLines, contoursToStones, sizes, curSize, stones.length, vectors.length, bbox.maxY, boardHmm, boardHIn, boardWmm, boardWIn, pushUndo, fitDesign, nextEl])
 
   const addTextOutput = useCallback(() => {
     if (!textOutput) { setStatus('Pick an output first — Rhinestones, Cut lines, or Both'); return }
@@ -3642,6 +3640,7 @@ export default function App() {
   }, [imgWidth, sizes, curSize, gap, applyStrokeStyle, suggestWidth])
 
   const openSection = useCallback((title: string, focusSel?: string) => {
+    setWorkspace('all'); setPanelOpen(true)
     const secs = Array.from(document.querySelectorAll<HTMLDetailsElement>('details.sec'))
     const d = secs.find((el) => el.querySelector('summary')?.textContent?.trim() === title)
     if (!d) return
@@ -3650,7 +3649,7 @@ export default function App() {
     // section — opening the child of a closed parent showed nothing
     for (let p = d.parentElement; p; p = p.parentElement)
       if (p instanceof HTMLDetailsElement) p.open = true
-    d.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    requestAnimationFrame(() => d.scrollIntoView({ block: 'start', behavior: 'smooth' }))
     if (focusSel) window.setTimeout(() => d.querySelector<HTMLElement>(focusSel)?.focus(), 200)
   }, [])
 
@@ -3976,7 +3975,7 @@ export default function App() {
     })
     setSelection(new Set())
     setStatus(`Ungrouped into ${groups.length} letter elements — double-click a letter to select it`)
-  }, [selectedEl, stones, pushUndo])
+  }, [selectedEl, stones, pushUndo, nextEl])
 
   const alignCount = alignObjs.length
 
@@ -4028,33 +4027,55 @@ export default function App() {
   // survives reloads via IndexedDB. Browsers without the API fall back to a
   // download, but files keep the .stonecut name either way.
   const fileHandleRef = useRef<FSFileHandle | null>(null)
+  const fileAdoptedRef = useRef(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyRows, setHistoryRows] = useState<VersionSummary[]>([])
+  const [historySearch, setHistorySearch] = useState('')
   const [fileName, setFileName] = useState<string | null>(null)
   useEffect(() => {
     void recallHandle().then((h) => {
-      if (h) {
+      if (h && !fileAdoptedRef.current) {
         fileHandleRef.current = h
         setFileName(h.name)
       }
     })
   }, [])
   const adoptHandle = useCallback((h: FSFileHandle | null, name: string | null) => {
+    fileAdoptedRef.current = true
     fileHandleRef.current = h
     setFileName(h ? h.name : name)
     void rememberHandle(h)
   }, [])
+  const projectContext = useMemo<ProjectContext>(() => ({
+    boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, frameOn, frameMm,
+    cutter: savedProfile ?? { format, gpStep, originCorner, sendConditions, swapAxes, wCircles, overcut, preset: { ...preset }, linePreset: { ...linePreset } },
+  }), [boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, format, gpStep, originCorner, sendConditions, swapAxes, wCircles, overcut, preset, linePreset, savedProfile, frameOn, frameMm])
   const designJson = useCallback(
-    () => JSON.stringify({ v: 1, stones, sizes, elements, vectors }),
-    [stones, sizes, elements, vectors],
+    () => JSON.stringify({ v: 2, stones, sizes, elements, vectors, context: projectContext, lastText: lastTextRef.current ? { ...lastTextRef.current, font: undefined } : undefined }),
+    [stones, sizes, elements, vectors, projectContext],
   )
+  useEffect(() => {
+    setRecoveryStatus('Saving recovery…')
+    const t = window.setTimeout(() => {
+      try {
+        if (!stones.length && !vectors.length && recoveryLoadError) { setRecoveryStatus(recoveryLoadError); return }
+        localStorage.setItem(DESIGN_KEY, designJson())
+        setRecoveryStatus(`Recovery saved ${new Date().toLocaleTimeString()}`)
+      } catch {
+        setRecoveryStatus('Recovery unavailable — save a design file now')
+      }
+    }, 400)
+    return () => clearTimeout(t)
+  }, [stones.length, vectors.length, designJson])
   const saveDesignAs = useCallback(async () => {
     const suggested = fileName ?? `design${DESIGN_EXT}`
     if (!fsSupported) {
       download(suggested, designJson(), 'application/json')
       return
     }
-    const h = await pickSaveHandle(suggested)
-    if (!h) return // cancelled
     try {
+      const h = await pickSaveHandle(suggested)
+      if (!h) return // cancelled
       await writeHandle(h, designJson())
       adoptHandle(h, h.name)
       setStatus(`Saved ${h.name}`)
@@ -4075,8 +4096,8 @@ export default function App() {
       getPublishKey(),
     )
     if (next == null) return
-    setPublishKey(next)
-    setStatus(next.trim() ? 'TSB publish key saved' : 'TSB publish key cleared')
+    try { setPublishKey(next); setStatus(next.trim() ? 'TSB publish key saved for this session' : 'TSB publish key cleared') }
+    catch (e) { setStatus(`Could not save key: ${e instanceof Error ? e.message : e}`) }
   }, [])
   const publishToShop = useCallback(async () => {
     if (publishing) return
@@ -4127,12 +4148,15 @@ export default function App() {
   // Replace the whole board with a saved design file — shared by
   // File -> Open and dropping a design file on the board.
   const applyDesignData = useCallback((d: unknown, name: string) => {
-    const dd = d as { stones?: Stone[]; vectors?: VecItem[]; sizes?: Record<string, StoneSpec>; elements?: Elements }
-    if (!Array.isArray(dd?.stones) && !Array.isArray(dd?.vectors)) throw new Error('not a StoneCut design file')
+    const dd = parseProject(d)
+    recoveryLoadError = null
+    savedDesign.current = dd
+    lastImageRef.current = null
+    lastTextRef.current = dd.lastText && font && fontName === dd.lastText.fontName ? { ...dd.lastText, font } : null
     pushUndo(stonesRef.current)
     const loaded = (dd.stones ?? []) as Stone[]
     setStones(loaded)
-    if (dd.sizes && typeof dd.sizes === 'object') setSizes(mergeSavedSizes(dd.sizes))
+    setSizes(dd.sizes)
     setElements(dd.elements && typeof dd.elements === 'object' ? dd.elements : {})
     const vecs: VecItem[] = Array.isArray(dd.vectors) ? dd.vectors : []
     setVectors(vecs)
@@ -4140,15 +4164,23 @@ export default function App() {
     // never rewind: undo can bring back stones with ids above this file's max
     elSeq.current = Math.max(elSeq.current, loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1)
     setSelection(new Set())
-    setStatus(`Opened ${name}: ${loaded.length} stones`)
-  }, [pushUndo])
+    if (dd.context) {
+      const c = dd.context
+      setBoardWIn(c.boardWIn); setBoardHIn(c.boardHIn); setPlacement(c.placement); setMargin(c.margin); setGap(c.gap)
+      outlineColorRef.current = c.outlineColor; fillColorRef.current = c.fillColor; setOutlineColor(c.outlineColor); setFillColor(c.fillColor); setBoardColor(c.boardColor); setGarmentColor(c.garmentColor)
+      if (c.frameOn !== undefined) setFrameOn(c.frameOn)
+      if (c.frameMm !== undefined) setFrameMm(c.frameMm)
+      setSavedProfile(c.cutter)
+    } else setSavedProfile(null)
+    setStatus(`Opened ${name}: ${loaded.length} stones${dd.context ? ' · saved cutter profile available under Cut' : ''}`)
+  }, [pushUndo, font, fontName])
   const openDesignFile = useCallback(async () => {
     if (fsSupported) {
-      const h = await pickOpenHandle()
-      if (!h) return // cancelled
       try {
+        const h = await pickOpenHandle()
+        if (!h) return // cancelled
         const f = await h.getFile()
-        applyDesignData(JSON.parse(await f.text()), f.name)
+        applyDesignData(JSON.parse(await readProjectFileText(f)), f.name)
         adoptHandle(h, h.name) // ⌘S now writes back to this file
       } catch (e) {
         setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
@@ -4162,7 +4194,7 @@ export default function App() {
       const f = inp.files?.[0]
       if (!f) return
       try {
-        applyDesignData(JSON.parse(await f.text()), f.name)
+        applyDesignData(JSON.parse(await readProjectFileText(f)), f.name)
         adoptHandle(null, f.name)
       } catch (e) {
         setStatus(`Could not open: ${e instanceof Error ? e.message : e}`)
@@ -4218,7 +4250,7 @@ export default function App() {
     }
     if (/\.(stonecut|json)$/i.test(f.name)) {
       try {
-        applyDesignData(JSON.parse(await f.text()), f.name)
+        applyDesignData(JSON.parse(await readProjectFileText(f)), f.name)
         // a dropped file carries no writable handle — detach so ⌘S asks
         // where to save instead of overwriting the previously open file
         adoptHandle(null, f.name)
@@ -4263,21 +4295,41 @@ export default function App() {
     { label: 'File', items: [
       { label: 'New design', onClick: () => { clearAll(); adoptHandle(null, null) }, disabled: !hasStones && !pending && !vectors.length },
       { label: 'Open design…', onClick: () => { void openDesignFile() } },
+      { label: 'Save named project version…', disabled: !hasStones && !vectors.length, onClick: () => { void (async () => {
+        const name = window.prompt('Save a named version on this computer:', fileName ?? 'StoneCut design')
+        if (!name?.trim()) return
+        try {
+          const preview = stones.length ? renderPreviewPng(stones, sizes, colorOfStone, { maxPx: 180 }).dataUrl : undefined
+          await saveProjectVersion(name, designJson(), stones.length, preview)
+          setStatus(`Saved project version: ${name}`)
+        } catch (e) { setStatus(`Could not save version: ${e instanceof Error ? e.message : e}`) }
+      })() } },
+      { label: 'Browse project versions…', onClick: () => { void listProjectVersions().then((rows) => { setHistoryRows(rows); setHistoryOpen(true) }).catch((e) => setStatus(`Could not read projects: ${e.message}`)) } },
       { label: 'Import vector cut (SVG)…', onClick: importSvg },
       { label: fileName ? `Save — ${fileName}` : 'Save…', shortcut: '⌘S', onClick: () => { void saveDesign() }, disabled: !hasStones && !vectors.length },
       { label: 'Save As…', shortcut: '⌘⇧S', onClick: () => { void saveDesignAs() }, disabled: !hasStones && !vectors.length },
       'sep',
-      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount || frameOutside },
-      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount || frameOutside },
-      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayerSlug}.plt`, cutData()), disabled: !cutCount || frameOutside },
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount || cutBlocked },
+      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount || cutBlocked },
+      { label: 'Export plotter file (.plt)…', onClick: () => { try { download(`stonecut-${cutLayerSlug}.plt`, cutData()) } catch (e) { setStatus(e instanceof Error ? e.message : String(e)) } }, disabled: !cutCount || cutBlocked },
       'sep',
+      { label: 'Download production package (.zip)…', disabled: !hasStones && !vectors.length, onClick: () => { void (async () => {
+        try {
+          const { productionPackage } = await import('./production-package')
+          const complete = frameOn ? withWeedingFrame(job, job, frameMm) : job
+          const archive = await productionPackage(complete, designJson(), fileName ?? 'StoneCut design', colorOfStone)
+          const url = URL.createObjectURL(new Blob([archive as BlobPart], { type: 'application/zip' }))
+          const link = document.createElement('a'); link.href = url; link.download = 'stonecut-production.zip'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+          setStatus('Production package downloaded — whole design, per-color templates, preview, counts and guides')
+        } catch (e) { setStatus(`Package failed: ${e instanceof Error ? e.message : e}`) }
+      })() } },
       { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
       { label: 'Print 1:1 placement guide…', onClick: printPlacementGuide, disabled: !hasStones && !vectors.length },
       'sep',
       { label: publishing ? 'Publishing to TShirt Brothers…' : '💎 Publish to TShirt Brothers…', onClick: () => { void publishToShop() }, disabled: !hasStones || publishing },
       { label: 'TSB publish key…', onClick: editPublishKey },
       'sep',
-      { label: sending ? 'Sending to Graphtec…' : '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount || frameOutside || sending },
+      { label: sending ? 'Sending to Graphtec…' : '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount || cutBlocked || sending },
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
@@ -4379,8 +4431,20 @@ export default function App() {
   ]
 
   return (
-    <div className="app">
+    <div className={`app${panelOpen ? ' panel-open' : ''}`} data-workspace={workspace}>
       <MenuBar brand="StoneCut" menus={menus} />
+      <div className="recovery-strip" role="status">{recoveryStatus}{release && ` · build ${release}`} <button onClick={() => download(`stonecut-backup${DESIGN_EXT}`, designJson(), 'application/json')}>Download backup</button></div>
+      {historyOpen && <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="Project versions" style={{maxWidth:620,maxHeight:'90vh',overflowY:'auto'}}>
+        <h3>Project versions on this computer</h3>
+        <input aria-label="Search saved projects" placeholder="Search projects" value={historySearch} onChange={(e)=>setHistorySearch(e.target.value)} />
+        {historyRows.filter((r)=>r.name.toLowerCase().includes(historySearch.toLowerCase())).map((row)=><div className="project-version" key={row.id}>
+          {row.preview && <img src={row.preview} alt="Saved design preview" width="64" height="64" />}
+          <span><b>{row.name}</b><br />{new Date(row.createdAt).toLocaleString()} · {row.stones} stones</span>
+          <button onClick={()=>{void readProjectVersion(row.id).then((v)=>{applyDesignData(JSON.parse(v.data),v.name);adoptHandle(null,v.name.endsWith(DESIGN_EXT)?v.name:v.name+DESIGN_EXT);setHistoryOpen(false)}).catch((e)=>setStatus(`Could not open version: ${e.message}`))}}>Open</button>
+        </div>)}
+        {!historyRows.length && <p>No saved versions yet. Use File → Save named project version.</p>}
+        <button onClick={()=>setHistoryOpen(false)}>Close</button>
+      </div></div>}
       {cutConfirm && (
         <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setCutConfirm(null) }}>
           <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 560, maxHeight: '94vh', overflowY: 'auto' }}>
@@ -4533,6 +4597,11 @@ export default function App() {
           <button onClick={() => setShowShortcuts(false)}>Close</button>
         </div>
       )}
+      <nav className="workspace-bar" aria-label="Workspace">
+        <button className="panel-toggle" aria-expanded={panelOpen} onClick={() => setPanelOpen((v) => !v)}>Tools</button>
+        {['all', 'design', 'prepare', 'produce'].map((mode) => <button key={mode} className={workspace === mode ? 'active' : ''} aria-pressed={workspace === mode} onClick={() => { setWorkspace(mode); setPanelOpen(true) }}>{mode === 'all' ? 'All tools' : mode[0].toUpperCase() + mode.slice(1)}</button>)}
+        <span>{selectionCut ? 'Cut: selected objects' : `Cut: ${cutLayer === 'all' ? 'whole design' : cutLayer}`} · dimensions shown in inches and mm</span>
+      </nav>
       <div className="app-body">
       <aside className="panel" style={{ width: panelW, minWidth: panelW }}>
         <div className="statusbar">
@@ -4976,6 +5045,11 @@ export default function App() {
         </Section>
 
         <Section title="Image">
+          {imageSourceUrl && !mcLayers && <div className="image-compare">
+            <figure><img src={imageSourceUrl} alt="Original artwork" /><figcaption>Original</figcaption></figure>
+            {imageMaskUrl && <figure><img src={imageMaskUrl} alt="Threshold and cleanup mask" /><figcaption>Mask</figcaption></figure>}
+            {imageStoneUrl && <figure><img src={imageStoneUrl} alt="Generated stone layout" /><figcaption>Stones</figcaption></figure>}
+          </div>}
           <div className="grid2">
             <label>Width (mm)
               <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
@@ -5203,28 +5277,28 @@ export default function App() {
           </label>
           <div className="iconrow">
             {([
-              ['left', 'Align left', <AlignIcon kind="left" />],
-              ['hcenter', 'Align horizontal centers', <AlignIcon kind="hcenter" />],
-              ['right', 'Align right', <AlignIcon kind="right" />],
-              ['top', 'Align top', <AlignIcon kind="top" />],
-              ['vcenter', 'Align vertical centers', <AlignIcon kind="vcenter" />],
-              ['bottom', 'Align bottom', <AlignIcon kind="bottom" />],
+              ['left', 'Align left', <AlignIcon key="left" kind="left" />],
+              ['hcenter', 'Align horizontal centers', <AlignIcon key="hcenter" kind="hcenter" />],
+              ['right', 'Align right', <AlignIcon key="right" kind="right" />],
+              ['top', 'Align top', <AlignIcon key="top" kind="top" />],
+              ['vcenter', 'Align vertical centers', <AlignIcon key="vcenter" kind="vcenter" />],
+              ['bottom', 'Align bottom', <AlignIcon key="bottom" kind="bottom" />],
             ] as [AlignEdge, string, React.ReactNode][]).map(([k, title, icon]) => (
               <button key={k} className="iconbtn" title={title} disabled={!alignCount} onClick={() => alignSelected(k)}>{icon}</button>
             ))}
           </div>
           <div className="iconrow">
-            <button className="iconbtn" title="Distribute horizontal centers" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'centers')}><AlignIcon kind="dist-h" /></button>
-            <button className="iconbtn" title="Distribute vertical centers" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'centers')}><AlignIcon kind="dist-v" /></button>
-            <button className="iconbtn" title="Equal horizontal spacing" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'spacing')}><AlignIcon kind="space-h" /></button>
-            <button className="iconbtn" title="Equal vertical spacing" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'spacing')}><AlignIcon kind="space-v" /></button>
+            <button className="iconbtn" title="Distribute horizontal centers" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'centers')}><AlignIcon key="dist-h" kind="dist-h" /></button>
+            <button className="iconbtn" title="Distribute vertical centers" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'centers')}><AlignIcon key="dist-v" kind="dist-v" /></button>
+            <button className="iconbtn" title="Equal horizontal spacing" disabled={alignCount < 3} onClick={() => distributeSelected('x', 'spacing')}><AlignIcon key="space-h" kind="space-h" /></button>
+            <button className="iconbtn" title="Equal vertical spacing" disabled={alignCount < 3} onClick={() => distributeSelected('y', 'spacing')}><AlignIcon key="space-v" kind="space-v" /></button>
           </div>
           <p className="hint" style={{ marginTop: 10 }}>Pathfinder — shape modes on the selected cut-line objects. The result replaces them; Undo brings them back.</p>
           <div className="iconrow">
-            <button className="iconbtn" title="Unite" disabled={!selVecs.size} onClick={() => pathfinder('union')}><AlignIcon kind="unite" /></button>
-            <button className="iconbtn" title="Minus front (back object keeps, front objects cut away)" disabled={selVecs.size < 2} onClick={() => pathfinder('difference')}><AlignIcon kind="minus" /></button>
-            <button className="iconbtn" title="Intersect" disabled={selVecs.size < 2} onClick={() => pathfinder('intersection')}><AlignIcon kind="intersect" /></button>
-            <button className="iconbtn" title="Exclude (overlap removed)" disabled={selVecs.size < 2} onClick={() => pathfinder('xor')}><AlignIcon kind="exclude" /></button>
+            <button className="iconbtn" title="Unite" disabled={!selVecs.size} onClick={() => pathfinder('union')}><AlignIcon key="unite" kind="unite" /></button>
+            <button className="iconbtn" title="Minus front (back object keeps, front objects cut away)" disabled={selVecs.size < 2} onClick={() => pathfinder('difference')}><AlignIcon key="minus" kind="minus" /></button>
+            <button className="iconbtn" title="Intersect" disabled={selVecs.size < 2} onClick={() => pathfinder('intersection')}><AlignIcon key="intersect" kind="intersect" /></button>
+            <button className="iconbtn" title="Exclude (overlap removed)" disabled={selVecs.size < 2} onClick={() => pathfinder('xor')}><AlignIcon key="exclude" kind="exclude" /></button>
           </div>
           <div className="iconlabels"><span>Unite</span><span>Minus front</span><span>Intersect</span><span>Exclude</span></div>
           <p className="hint" style={{ marginTop: 10 }}>Offset — grow or shrink the selected cut-line objects' boundaries (an echo outline, a template clearance ring).</p>
@@ -5367,7 +5441,7 @@ export default function App() {
                 <tr>
                   <th colSpan={2}>Total</th>
                   <th style={{ textAlign: 'right' }}>{stones.length}</th>
-                  <th style={{ textAlign: 'right' }}>{Math.ceil(stones.length * 1.1)}</th>
+                  <th style={{ textAlign: 'right' }}>{bom.reduce((n, r) => n + Math.ceil(r.n * 1.1), 0)}</th>
                 </tr>
               </tbody>
             </table>
@@ -5556,16 +5630,26 @@ export default function App() {
           )}
           {offBoard && (
             <p className="hint" style={{ color: '#f0b95e' }}>
-              Part of the design sits outside the {boardWIn}″ × {boardHIn}″ artboard — the cutter
-              will clip whatever falls off the sheet. Move it back inside, or enlarge the artboard.
+              Part of the design sits outside the {boardWIn}″ × {boardHIn}″ artboard. Move it back inside or enlarge the loaded media area before cutting.
             </p>
           )}
-          {frameOutside && <p className="modal-warn" role="alert">{frameWarning}</p>}
+          {cutBlocked && <p className="modal-warn" role="alert">{frameOutside ? frameWarning : conditionIssue || cutIssues.join(' ')}</p>}
           <div className="toolrow">
-            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml')}>SVG (Cricut)</button>
-            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf')}>DXF (laser)</button>
+            <button disabled={!cutCount || cutBlocked} onClick={() => { try { download(`stonecut-${cutLayerSlug}.plt`, cutData()) } catch (e) { setStatus(e instanceof Error ? e.message : String(e)) } }}>Download .plt</button>
+            <button disabled={!cutCount || cutBlocked} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount || cutBlocked} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf')}>DXF (laser)</button>
           </div>
+          {savedProfile && <details className="saved-profile"><summary>Saved cutter profile — review before use</summary>
+            <p>{savedProfile.format.toUpperCase()} · {(1 / savedProfile.gpStep).toFixed(3)} mm step · {savedProfile.originCorner === 'br' ? 'lower-right' : 'lower-left'} origin · {savedProfile.preset.name}, force {savedProfile.preset.force}, speed {savedProfile.preset.speed}, {savedProfile.preset.passes} passes</p>
+            <button onClick={() => {
+              setFormat(savedProfile.format); setGpStep(savedProfile.gpStep); setOriginCorner(savedProfile.originCorner)
+              setSendConditions(savedProfile.sendConditions); setSwapAxes(savedProfile.swapAxes); setWCircles(savedProfile.wCircles); setOvercut(savedProfile.overcut)
+              const next = [...presets.filter((p) => p.name !== savedProfile.preset.name && p.name !== savedProfile.linePreset.name), savedProfile.preset]
+              if (savedProfile.linePreset.name !== savedProfile.preset.name) next.push(savedProfile.linePreset)
+              setPresets(next); setPresetIdx(next.findIndex((p) => p.name === savedProfile.preset.name)); setLinePresetName(savedProfile.linePreset.name)
+              setSavedProfile(null); setStatus('Saved cutter profile loaded — verify the machine matches before sending')
+            }}>Use saved cutter profile</button>
+          </details>}
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
           <details className="sec sub">
@@ -5651,7 +5735,7 @@ export default function App() {
           </details>
         </Section>
         <div className="cutbar">
-          <button className="primary" disabled={!cutCount || frameOutside || sending} onClick={doSend}>{sending ? 'Sending…' : '⚡ Cut on Graphtec'}</button>
+          <button className="primary" disabled={!cutCount || cutBlocked || sending} onClick={doSend}>{sending ? 'Sending…' : '⚡ Cut on Graphtec'}</button>
           <div className="cutbar-meta">
             {cutCount ? [framedCutJob.stones.length ? `${framedCutJob.stones.length} stones` : '', framedCutJob.paths?.length ? `${framedCutJob.paths.length} cut line${framedCutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
@@ -5688,8 +5772,8 @@ export default function App() {
           <button className="zbtn" disabled={!stones.length} title="Zoom to the design (F)" onClick={fitDesign}>Fit design</button>
           <button className="zbtn" title="Show the whole sheet (⌘0)" onClick={fitSheet}>Fit sheet</button>
           <button className="zbtn" title="Actual size" onClick={() => zoomAbout(PX_PER_MM_100)}>1:1</button>
-          <button className={`zbtn${simView ? ' active' : ''}`} title="Sparkle simulation — stones render as gems" onClick={() => setSimView((o) => !o)}>✨</button>
-          <button className="zbtn" disabled={!stones.length && !vectors.length} title="Garment mockup" onClick={() => setMockupOpen(true)}>👕</button>
+          <button aria-label="Toggle sparkle preview" className={`zbtn${simView ? ' active' : ''}`} title="Sparkle simulation — stones render as gems" onClick={() => setSimView((o) => !o)}>✨</button>
+          <button aria-label="Open garment mockup" className="zbtn" disabled={!stones.length && !vectors.length} title="Garment mockup" onClick={() => setMockupOpen(true)}>👕</button>
           <span style={{ marginLeft: 12 }}>Plotter</span>
           <select
             value={PLOTTERS.find((p) => p.cutIn === boardWIn)?.id ?? 'custom'}
@@ -5705,7 +5789,7 @@ export default function App() {
             min={1}
             max={60}
             step={0.25}
-            key={`bw-${boardWIn}`}
+            aria-label="Loaded media width in inches" key={`bw-${boardWIn}`}
             defaultValue={boardWIn}
             // commit on blur/Enter, NOT per keystroke: backspacing "22"
             // passed through "2" and "" and the artboard collapsed to 1"
@@ -5721,14 +5805,14 @@ export default function App() {
             min={1}
             max={60}
             step={0.5}
-            key={`bh-${boardHIn}`}
+            aria-label="Loaded media height in inches" key={`bh-${boardHIn}`}
             defaultValue={boardHIn}
             onBlur={(e) => setBoardHIn(Math.min(60, Math.max(1, +e.target.value || boardHIn)))}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
             style={{ width: 54 }}
           />
           <input
-            type="color"
+            type="color" aria-label="Material color"
             value={boardColor ?? '#1a1f2b'}
             onChange={(e) => setBoardColor(e.target.value)}
             style={{ width: 30, padding: 0, height: 22 }}
@@ -5744,6 +5828,15 @@ export default function App() {
             Clear all
           </button>
         </div>
+        {!stones.length && !vectors.length && !pending && <div className="start-card">
+          <h2>Start your next design</h2><p>Create lettering, convert artwork, or reopen a project.</p>
+          <div className="start-actions">
+            <button onClick={() => openSection('Text', 'input')}>Create text</button>
+            <button onClick={() => openSection('Image', 'input[type=file]')}>Import artwork</button>
+            <button onClick={() => { void openDesignFile() }}>Open project</button>
+            <button onClick={() => openSection('Templates')}>Use a template</button>
+          </div><p className="hint">Direct cutter control requires a compatible desktop browser or the StoneCut desktop app.</p>
+        </div>}
         {/* stones render on a bitmap: one paint instead of thousands of SVG
             DOM circles, which made scrolling large designs crawl. The SVG
             on top keeps the grid, the preview path, and mouse events. */}

@@ -69,31 +69,52 @@ command mode, and axis mapping.
 - If WebUSB can't claim the cutter (another driver has it), download the
   `.plt` and send it any other way — the file is the same bytes.
 
-## Deploy (rhinestones.tshirtbrothers.com)
+## Production releases
 
-The site is a static build served by nginx on the TSB DigitalOcean droplet
-(hostname `KPJ-SITES`) from `/var/www/stonecut/html`. There is no CI deploy;
-`deploy.sh` does it on the droplet:
+The verified web deployment is **https://rhinestones.tshirtbrothers.com/**.
+`stonecut.com` is not assumed to be the same deployment. See
+`docs/RELIABILITY.md` for scope and validation limits.
 
-1. Push to `main`.
-2. Open the droplet in DigitalOcean → Access → Launch Droplet Console (log in
-   as root). SSH from a machine without the droplet's key is refused.
-3. Run, with `<commit>` the hash you just pushed (the `main` raw URL is
-   cached for a few minutes and can hand you the previous script):
+GitHub Actions in this repository runs locked dependency installation,
+`npm test`, lint, production build, and shell/desktop syntax checks on pushes
+and pull requests, then retains the built artifact.
 
-   ```
-   curl -fsSL https://raw.githubusercontent.com/kevinskey/stonecut/<commit>/deploy.sh | bash
-   ```
+The production deployment runner uses the existing TSB droplet credentials in
+the `kevinskey/tshirtbrothers` deployment branch. Each release pins an exact
+StoneCut commit; it runs StoneCut's checked-in `deploy.sh`, which builds with
+`npm ci`, runs tests, verifies the nginx vhost/document root, installs a new
+release, and checks live HTML/assets and `build-info.json`. Subsequent releases
+switch an atomic symlink. A failing health check restores the previous release.
+It does not change nginx configuration or communicate with a cutter.
 
-   It clones/updates the repo on the droplet, builds, finds the nginx root
-   for the host, and swaps the build in. The previous build stays at
-   `/var/www/stonecut/html.prev`; roll back by swapping the two directories.
-4. Check: `curl -s https://rhinestones.tshirtbrothers.com/ | grep -o 'index-[A-Za-z0-9_-]*\.js'`
-   should match the bundle name the script printed.
+To run the same deployment on the droplet (never on your workstation):
 
-Run `deploy.sh` only on the droplet. Run with sudo on a Mac it will clone
-into `/var/www` there and leave root-owned files in `~/.npm`
-(`sudo chown -R $(id -u):$(id -g) ~/.npm` fixes that).
+```
+sudo STONECUT_REF=<full-commit-sha> bash deploy.sh
+```
+
+The live pointer is `/var/www/stonecut/html`, releases live under
+`/var/www/stonecut/releases`, and the preceding target is recorded in
+`/var/www/stonecut/previous-release`. Old builds are retained for rollback.
+After reviewing that path, rollback can switch `html` to that target with a
+new symlink and `mv -Tf`; do not delete release directories while in use.
+
+## Project recovery and production packages
+
+Design files now include artwork, sizes, editable recipes, vectors, media,
+colors, spacing, and a saved cutter/material profile. Legacy v1 files remain
+readable. Saved cutter settings are shown for review under Cut; opening a
+file does not silently apply them. The recovery strip reports storage errors
+and offers a downloadable backup. File → Save named project version stores
+searchable versions with previews **on the current computer/site**, not in
+an online account. Export files before moving domains or computers.
+
+File → Download production package creates a ZIP with the whole design,
+per-color SVG templates sharing one coordinate frame, a preview, bill of
+materials, work order, placement guide, and editable project. Final geometry
+must fit the job area and satisfy the spacing floor before cutting/export.
+Publishing uses the complete rhinestone design, independently of cut selection.
+Publish keys are retained for the browser session rather than indefinitely.
 
 ## For the Cricut
 

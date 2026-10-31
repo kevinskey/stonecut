@@ -1,85 +1,84 @@
 #!/usr/bin/env bash
-# Deploy StoneCut on the TSB droplet. Run as root (re-execs with sudo):
-#   curl -fsSL https://raw.githubusercontent.com/kevinskey/stonecut/main/deploy.sh | bash
-# Clones/updates this repo, builds it, finds the nginx root that serves
-# rhinestones.tshirtbrothers.com, and swaps the build in. The previous build
-# is kept next to it as <root>.prev so a bad deploy is one `mv` to undo.
+# Run on the production droplet. STONECUT_REF may be a full commit SHA or main.
+# Builds a locked, tested release; future symlink switches are atomic.
 set -euo pipefail
-if [ "$(id -u)" -ne 0 ]; then exec sudo -E bash -s < <(cat "$0" 2>/dev/null || curl -fsSL https://raw.githubusercontent.com/kevinskey/stonecut/main/deploy.sh); fi
-
-SRC=/var/www/stonecut-src
+[ "$(id -u)" = 0 ] || { echo 'Run this deployment with sudo on the droplet.'; exit 1; }
 REF="${STONECUT_REF:-main}"
 HOST=rhinestones.tshirtbrothers.com
-
-if [ -d "$SRC/.git" ]; then
-  git -C "$SRC" fetch -q origin
-else
-  git clone -q https://github.com/kevinskey/stonecut.git "$SRC"
-fi
-git -C "$SRC" reset -q --hard "origin/$REF"
-cd "$SRC"
-echo "==> building stonecut $(git rev-parse --short HEAD) ($REF)"
-npm install --no-audit --no-fund
-if ! npm run build; then
-  # npm bug #4828: a macOS lockfile can leave Linux native binaries out of
-  # node_modules. Clean reinstall is the documented recovery.
-  echo "==> build failed; clean reinstall and retry"
-  rm -rf node_modules package-lock.json
-  npm install --no-audit --no-fund
-  npm run build
-fi
-[ -f dist/index.html ] || { echo "!! no dist/index.html after build"; exit 1; }
-
-# nginx config files hold several server blocks; parse by block so the main
-# tshirtbrothers root is never mistaken for the StoneCut one. `nginx -T`
-# dumps the whole effective config wherever the vhost file actually lives.
-find_root() {
-  awk -v host="$HOST" '
-    /server[[:space:]]*\{/ && depth == 0 { inblk = 1; blk = "" }
-    inblk {
-      blk = blk "\n" $0
-      line = $0
-      o = gsub(/\{/, "{", line); c = gsub(/\}/, "}", line)
-      depth += o - c
-      if (depth == 0) {
-        if (index(blk, host) && match(blk, /[\n \t]root[ \t]+[^;]+;/)) {
-          r = substr(blk, RSTART, RLENGTH)
-          sub(/^[\n \t]*root[ \t]+/, "", r); sub(/;$/, "", r)
-          print r; exit
-        }
-        inblk = 0
-      }
-    }'
+BASE=/var/www/stonecut
+DOCROOT="$BASE/html"
+nginx -T 2>/dev/null | python3 -c '
+import re,sys
+text=sys.stdin.read()
+for m in re.finditer(r"\bserver\s*\{",text):
+ depth=1;i=m.end();start=i
+ while i<len(text) and depth:
+  depth+=(text[i]=="{")-(text[i]=="}");i+=1
+ block=text[start:i-1]
+ names=re.findall(r"\bserver_name\s+([^;]+);",block)
+ roots=re.findall(r"\broot\s+([^;]+);",block)
+ if any("rhinestones.tshirtbrothers.com" in n.split() for n in names) and "/var/www/stonecut/html" in [r.strip() for r in roots]:sys.exit(0)
+sys.exit("Refusing deployment: StoneCut vhost/document root not verified")'
+[ -d "$DOCROOT" ] || { echo 'Document root is missing'; exit 1; }
+OLD=$(readlink -f "$DOCROOT")
+case "$OLD" in "$DOCROOT"|"$BASE"/releases/*) ;; *) echo 'Unexpected document-root target'; exit 1;; esac
+WORK=$(mktemp -d /var/tmp/stonecut-build.XXXXXX)
+SWAPPED=0
+LEGACY_BACKUP=''
+cleanup() {
+ result=$?
+ if [ "$result" -ne 0 ] && [ "$SWAPPED" = 1 ]; then
+  ln -s "$OLD" "$DOCROOT.rollback-$$"
+  mv -Tf "$DOCROOT.rollback-$$" "$DOCROOT"
+  echo 'Restored previous release after failed verification'
+ fi
+ rm -rf "$WORK"
+ exit "$result"
 }
-DOCROOT="$(nginx -T 2>/dev/null | find_root || true)"
-if [ -z "$DOCROOT" ]; then
-  for f in $(grep -rl "$HOST" /etc/nginx 2>/dev/null || true); do
-    DOCROOT="$(find_root < "$f")"
-    [ -n "$DOCROOT" ] && break
-  done
+trap cleanup EXIT
+git clone --quiet https://github.com/kevinskey/stonecut.git "$WORK/source"
+cd "$WORK/source"
+if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then git checkout --quiet --detach "$REF"; else
+ [ "$REF" = main ] || { echo 'Use main or a full commit SHA'; exit 1; }
+ git checkout --quiet --detach origin/main
 fi
-if [ -z "$DOCROOT" ]; then
-  # fallback: a deployed StoneCut index.html, anywhere nginx is likely to
-  # serve from, that is not our own clone
-  CANDIDATES="$(grep -rli --include=index.html '<title>stonecut</title>' /var/www /srv /home /opt /usr/share/nginx 2>/dev/null | grep -v "^$SRC/" || true)"
-  [ -n "$CANDIDATES" ] && echo "==> index.html candidates:" && echo "$CANDIDATES"
-  DOCROOT="$(echo "$CANDIDATES" | head -1 | xargs -r dirname || true)"
+SHA=$(git rev-parse HEAD)
+echo "Building StoneCut $SHA"
+npm ci --ignore-scripts --no-audit --no-fund
+npm test
+npm run build
+RELEASE="$BASE/releases/$SHA"
+[ ! -e "$RELEASE" ] || { echo 'Release directory already exists; refusing to overwrite it'; exit 1; }
+mkdir -p "$BASE/releases"
+cp -a dist "$RELEASE"
+printf '{"commit":"%s"}\n' "$SHA" > "$RELEASE/build-info.json"
+# Cached tabs may still request the preceding build's immutable assets.
+if [ -d "$OLD/assets" ]; then cp -an "$OLD/assets/." "$RELEASE/assets/"; fi
+ln -s "$RELEASE" "$DOCROOT.next-$$"
+if [ ! -L "$DOCROOT" ]; then
+ LEGACY_BACKUP="$BASE/html.before-releases-$(date -u +%Y%m%dT%H%M%SZ)"
+ mv "$DOCROOT" "$LEGACY_BACKUP"
+ OLD="$LEGACY_BACKUP"
+ if ! mv -T "$DOCROOT.next-$$" "$DOCROOT"; then mv "$OLD" "$DOCROOT"; exit 1; fi
+else
+ mv -Tf "$DOCROOT.next-$$" "$DOCROOT"
 fi
-if [ -z "$DOCROOT" ]; then
-  echo "!! could not find the nginx root for $HOST. Diagnostics:"
-  echo "--- nginx -T mentions of the host:"; nginx -T 2>/dev/null | grep -n -i "rhinestones\|server_name\|root " | head -40
-  echo "--- /etc/nginx layout:"; ls -la /etc/nginx /etc/nginx/sites-enabled /etc/nginx/conf.d 2>&1 | head -40
-  echo "--- /var/www:"; ls -la /var/www 2>&1
-  exit 1
-fi
-case "$DOCROOT" in
-  ""|/|/var/www|/var/www/tshirtbrothers|/var/www/tshirtbrothers/*|"$SRC"|"$SRC"/*)
-    echo "!! refusing to deploy: nginx root for $HOST resolved to '$DOCROOT'"; exit 1 ;;
-esac
-[ -d "$DOCROOT" ] || { echo "!! nginx root '$DOCROOT' is not a directory"; exit 1; }
-
-echo "==> deploying to $DOCROOT (previous build kept at $DOCROOT.prev)"
-STAGE="$DOCROOT.next"; PREV="$DOCROOT.prev"
-rm -rf "$STAGE"; cp -a dist "$STAGE"
-rm -rf "$PREV"; mv "$DOCROOT" "$PREV"; mv "$STAGE" "$DOCROOT"
-echo "==> DEPLOYED. live bundle: $(grep -o 'index-[A-Za-z0-9_-]*\.js' "$DOCROOT/index.html" | head -1)"
+SWAPPED=1
+CURL=(curl --fail --silent --show-error --retry 2 --max-time 30 --resolve "$HOST:443:127.0.0.1")
+"${CURL[@]}" "https://$HOST/build-info.json" | python3 -c 'import json,sys;assert json.load(sys.stdin)["commit"]==sys.argv[1]' "$SHA"
+"${CURL[@]}" "https://$HOST/" > "$WORK/live.html"
+cmp dist/index.html "$WORK/live.html"
+python3 - <<'PY' > "$WORK/assets.txt"
+import re,urllib.parse
+text=open('dist/index.html').read()
+for asset in re.findall(r'(?:src|href)="([^\"]+)"',text):
+ if asset.endswith(('.js','.css')):print(urllib.parse.urljoin('https://rhinestones.tshirtbrothers.com/',asset))
+PY
+while IFS= read -r url; do
+ asset="${url#https://$HOST/}"
+ "${CURL[@]}" "$url" > "$WORK/asset"
+ cmp "dist/$asset" "$WORK/asset"
+done < "$WORK/assets.txt"
+printf '%s\n' "$OLD" > "$BASE/previous-release"
+echo "STONECUT_DEPLOYED=$SHA"
+echo "PREVIOUS_BUILD=$OLD"

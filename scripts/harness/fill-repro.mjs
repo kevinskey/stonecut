@@ -19,7 +19,7 @@ for (const [name, fn, size] of [
   ['ring-band-6mm', (d) => d <= 20 && d >= 14, 48],
   ['ring-band-8mm', (d) => d <= 20 && d >= 12, 48],
 ]) {
-  const { grid, W, c } = makeGrid(fn, size)
+  const { grid, W } = makeGrid(fn, size)
   const contours = marchingSquares(grid.bin, W, W).map((ct) => ct.map((p) => ({ x: p.x / pxPerMm, y: p.y / pxPerMm })))
   const idx = new SpacingIndex(pitch)
   const outline = outlineOrSpine(contours, grid, hole, gap, idx, 'auto', false, pitch, true)

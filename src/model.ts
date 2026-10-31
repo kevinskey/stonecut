@@ -29,7 +29,7 @@ export const DEFAULT_SIZES: Record<string, StoneSpec> = {
 // be defaults. Apply today's defaults only to sizes absent from the project;
 // reopening an existing design must not silently resize its template holes.
 export function mergeSavedSizes(saved: unknown): Record<string, StoneSpec> {
-  const out: Record<string, StoneSpec> = { ...DEFAULT_SIZES }
+  const out: Record<string, StoneSpec> = Object.fromEntries(Object.entries(DEFAULT_SIZES).map(([k,v]) => [k, { ...v }]))
   if (!saved || typeof saved !== 'object') return out
   for (const [k, v] of Object.entries(saved as Record<string, Partial<StoneSpec>>)) {
     if (!v || typeof v.holeMm !== 'number') continue

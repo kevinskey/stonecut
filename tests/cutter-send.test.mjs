@@ -119,3 +119,13 @@ test('HP-GL confirmation describes its transmitted conditions, excluding inactiv
   assert.match(rows['Holes material'], /force 32, speed 8/)
   assert.match(confirmation.data, /FS32;/)
 })
+
+test('a held browser-origin lock prevents a second tab from opening the cutter', async () => {
+  const { calls } = fakeUsb()
+  navigator.locks = { request: async (_name, _options, callback) => callback(null) }
+  await assert.rejects(sendToCutter('job'), /Another StoneCut tab/)
+  assert.deepEqual(calls, [])
+  navigator.locks.request = async (_name, _options, callback) => callback({ name: 'stonecut-usb-send' })
+  await sendToCutter('job')
+  assert.ok(calls.includes('open'))
+})

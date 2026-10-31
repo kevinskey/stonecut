@@ -16,7 +16,8 @@ function usbApi(): USBLike {
 export async function grantedCutter(): Promise<{ name: string } | null> {
   try {
     const list = await usbApi().getDevices()
-    const d = list.find((x) => x.vendorId === GRAPHTEC)
+    const matches = list.filter((x) => x.vendorId === GRAPHTEC)
+    const d = matches.length === 1 ? matches[0] : undefined
     return d ? { name: d.productName || 'Graphtec cutter' } : null
   } catch {
     return null
@@ -26,18 +27,27 @@ export async function grantedCutter(): Promise<{ name: string } | null> {
 // Synchronous lock covers normal jobs AND diagnostics, including the chooser.
 let sending = false
 
-export async function sendToCutter(
-  data: string,
-  onProgress?: (sent: number, total: number) => void,
-): Promise<void> {
+export async function sendToCutter(data: string, onProgress?: (sent: number, total: number) => void): Promise<void> {
   if (sending) throw new Error('A job is already being sent to the cutter.')
   sending = true
+  try {
+    const locks = navigator.locks
+    if (locks?.request) await locks.request('stonecut-usb-send', { ifAvailable: true }, async (lock) => {
+      if (!lock) throw new Error('Another StoneCut tab is sending to the cutter.')
+      await transmit(data, onProgress)
+    })
+    else await transmit(data, onProgress)
+  } finally { sending = false }
+}
+
+async function transmit(data: string, onProgress?: (sent: number, total: number) => void): Promise<void> {
   let device: USBDeviceLike | undefined
   let opened = false
   let claimed: number | undefined
   try {
     const usb = usbApi()
-    const granted = (await usb.getDevices().catch(() => [] as USBDeviceLike[])).find((x) => x.vendorId === GRAPHTEC)
+    const matches = (await usb.getDevices().catch(() => [] as USBDeviceLike[])).filter((x) => x.vendorId === GRAPHTEC)
+    const granted = matches.length === 1 ? matches[0] : undefined
     device = granted ?? (await usb.requestDevice({ filters: [{ vendorId: GRAPHTEC }] }))
     await device.open()
     opened = true
@@ -64,7 +74,6 @@ export async function sendToCutter(
     // Cleanup failures must not hide the original transfer error.
     if (device && claimed !== undefined) await device.releaseInterface(claimed).catch(() => {})
     if (device && opened) await device.close().catch(() => {})
-    sending = false
   }
 }
 

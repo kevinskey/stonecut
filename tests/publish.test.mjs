@@ -84,3 +84,21 @@ test('oversized template holes remain inside the shared frame', () => {
 test('empty designs cannot produce a publish snapshot', () => {
   assert.throws(() => snapshotPublishDesign([], sizes, colorOf), /no stones/)
 })
+
+test('production ZIP carries whole-design geometry, per-color templates, editable project and guides', async () => {
+  const { productionPackage } = await import('../src/production-package.ts')
+  const { unzipSync, strFromU8 } = await import('fflate')
+  const snapshot = snapshotPublishDesign(stones, sizes, colorOf)
+  const data = '{"v":2,"stones":[]}'
+  const zip = await productionPackage(snapshot, data, 'Test order', (s) => s.color)
+  const files = unzipSync(zip)
+  for (const name of ['design.stonecut','preview.png','manifest.json','work-order.html','placement-guide.html','templates/all.svg','templates/color-1.svg','templates/color-2.svg']) assert.ok(files[name], name)
+  assert.equal(strFromU8(files['design.stonecut']), data)
+  const manifest = JSON.parse(strFromU8(files['manifest.json']))
+  assert.equal(manifest.units, 'mm')
+  assert.equal(manifest.stoneBom.reduce((n,r)=>n+r.n,0),3)
+  assert.equal((strFromU8(files['templates/all.svg']).match(/<circle/g)||[]).length,3)
+  const first = strFromU8(files['templates/color-1.svg'])
+  assert.equal((first.match(/<circle/g)||[]).length,2)
+  assert.match(first, new RegExp(`width="${snapshot.widthMm}mm"`))
+})

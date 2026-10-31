@@ -30,13 +30,22 @@ export function MenuBar({ brand, menus }: { brand?: string; menus: Menu[] }) {
           <button
             type="button"
             className="menu-title"
+            aria-haspopup="menu" aria-expanded={open === i}
+            onKeyDown={(e) => { if (['Enter', ' ', 'ArrowDown'].includes(e.key)) { e.preventDefault(); setOpen(i); window.setTimeout(() => ref.current?.querySelector<HTMLButtonElement>('.menu-list button:not(:disabled)')?.focus(), 0) } }}
             onMouseDown={(e) => { e.preventDefault(); setOpen(open === i ? null : i) }}
             onMouseEnter={() => { if (open != null && open !== i) setOpen(i) }}
           >
             {m.label}
           </button>
           {open === i && (
-            <div className="menu-list" role="menu">
+            <div className="menu-list" role="menu" aria-label={m.label} onKeyDown={(e) => {
+              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+              e.preventDefault()
+              const items = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+              const index = items.indexOf(document.activeElement as HTMLButtonElement)
+              const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (index + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+              items[next]?.focus()
+            }}>
               {m.items.map((it, k) =>
                 it === 'sep' ? (
                   <div key={k} className="menu-sep" />
