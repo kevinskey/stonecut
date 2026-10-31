@@ -25,22 +25,15 @@ export const DEFAULT_SIZES: Record<string, StoneSpec> = {
   SS30: { stoneMm: 6.4, holeMm: 7.0 },
 }
 
-// Hole sizes a design was saved with that were just the default of the day,
-// not something the operator typed. Saved designs carry their own size table,
-// so without this an old default would outlive its fix in every design.
-const LEGACY_HOLES: Record<string, number[]> = { SS6: [2.5, 2.8] }
-
-// Merge a saved size table over the defaults, lifting entries that still hold
-// a superseded default up to the current one.
+// Saved dimensions are production geometry, including values that used to
+// be defaults. Apply today's defaults only to sizes absent from the project;
+// reopening an existing design must not silently resize its template holes.
 export function mergeSavedSizes(saved: unknown): Record<string, StoneSpec> {
   const out: Record<string, StoneSpec> = { ...DEFAULT_SIZES }
   if (!saved || typeof saved !== 'object') return out
   for (const [k, v] of Object.entries(saved as Record<string, Partial<StoneSpec>>)) {
     if (!v || typeof v.holeMm !== 'number') continue
-    const legacy = LEGACY_HOLES[k]?.includes(v.holeMm) && DEFAULT_SIZES[k]
-    out[k] = legacy
-      ? { ...DEFAULT_SIZES[k], ...v, holeMm: DEFAULT_SIZES[k].holeMm }
-      : { ...(DEFAULT_SIZES[k] ?? { stoneMm: v.holeMm - 0.5 }), ...v } as StoneSpec
+    out[k] = { ...(DEFAULT_SIZES[k] ?? { stoneMm: v.holeMm - 0.5 }), ...v } as StoneSpec
   }
   return out
 }
