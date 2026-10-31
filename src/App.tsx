@@ -695,7 +695,8 @@ export default function App() {
       setImgAlphaKey(a.alphaKey)
       setImgLinework(a.linework)
       applyStrokeStyle(a)
-      setStatus(`${t.name} — ${a.note}`)
+      setStatus(`${t.name} — ${a.note} · set Width, then Add`)
+      openSection('Image')
     } catch {
       setStatus(`Could not load ${t.name}`)
     }
@@ -4605,7 +4606,23 @@ export default function App() {
       <aside className="panel" style={{ width: panelW, minWidth: panelW }}>
         <div className="statusbar">
           {pending > 0 && (
-            <div><b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b></div>
+            <div className="pending-bar">
+              <b className="pending">{pending} stone{pending === 1 ? '' : 's'} previewed — not added yet</b>
+              {/* The Width field and Add button live far down in the Image
+                  section; at Kevin's zoom they were off-screen, which read as
+                  "can't resize, can't add". Pin them up here with the notice. */}
+              <div className="toolrow" style={{ alignItems: 'end', gap: 6, marginTop: 4 }}>
+                {pendingImage > 0 && (
+                  <label style={{ flex: 'none', width: 96 }}>Width (mm)
+                    <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
+                  </label>
+                )}
+                <button className="primary urgent" onClick={() => { if (pendingText) addTextOutput(); if (pendingImage) void generateImage() }}>
+                  Add {pending} stone{pending === 1 ? '' : 's'}
+                </button>
+                <button style={{ width: 'auto', flex: 'none' }} onClick={discardPreviews}>Discard</button>
+              </div>
+            </div>
           )}
           <div>
             {status} · {stones.length} stones{stones.length > 0 && ` · ${((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}×${((bbox.maxY - bbox.minY) / 25.4).toFixed(2)} in`}
@@ -5041,6 +5058,17 @@ export default function App() {
               />
             ))}
           </div>
+          {imageFile && (
+            <div className="toolrow" style={{ alignItems: 'end', gap: 6, marginTop: 8 }}>
+              <label style={{ flex: 'none', width: 110 }}>Width (mm)
+                <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />
+              </label>
+              <button className={pendingImage ? 'primary urgent' : ''} onClick={generateImage}>
+                {pendingImage ? `Add ${pendingImage} stones` : 'Add image stones'}
+              </button>
+            </div>
+          )}
+          <p className="hint" style={{ marginTop: 6 }}>Threshold, style and detail are in the Image section.</p>
         </Section>
 
         <Section title="Image">
