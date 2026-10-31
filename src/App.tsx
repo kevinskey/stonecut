@@ -28,6 +28,8 @@ import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
 import { withWeedingFrame, weedingFrameFits } from './weeding-frame'
+import { makeCutConfirmation } from './cut-confirmation'
+import type { CutConfirmation } from './cut-confirmation'
 import './App.css'
 
 type Tool = 'select' | 'add' | 'node' | 'pen'
@@ -2950,26 +2952,68 @@ export default function App() {
   // Cut goes through an in-app confirmation (styled like the rest of the
   // panel, not a browser card). Chrome's own device chooser only appears the
   // first time; after that the granted cutter is reopened silently.
-  const [cutConfirm, setCutConfirm] = useState<{ device: string | null } | null>(null)
+  const [cutConfirm, setCutConfirm] = useState<CutConfirmation | null>(null)
+  const [sending, setSending] = useState(false)
+  const sendingRef = useRef(false)
+  const preparingCutRef = useRef(false)
   const doSend = useCallback(async () => {
+    if (sendingRef.current || preparingCutRef.current) return
     if (!cutCount) { setStatus('Nothing to cut'); return }
     if (frameOutside) { setStatus(frameWarning); return }
-    const d = await grantedCutter()
-    setCutConfirm({ device: d?.name ?? null })
-  }, [cutCount, frameOutside, frameWarning])
+    preparingCutRef.current = true
+    try {
+      const warnings: string[] = []
+      if (offBoard) warnings.push('Part of the design is off the board and may be clipped.')
+      const audit = findOverlaps(framedCutJob.stones, (s) => framedCutJob.sizes[s.size]?.holeMm ?? 3, hardGapOf(gap))
+      if (audit.involved.length) warnings.push(`${audit.involved.length} cut stones sit closer than the spacing floor. Fix in Production → Check spacing, or cut anyway.`)
+      if (framedCutJob.stones.length && framedCutJob.paths?.length && linePreset !== preset) warnings.push('Holes and lines use different material presets but will cut on the same loaded sheet. Cancel and separate the jobs if they belong on different sheets.')
+      const snapshot = makeCutConfirmation(framedCutJob, {
+        format, preset, origin: originCorner, unitsPerMm: gpStep, sendConditions, swapAxes,
+        cutOpts: { firmwareCircles: wCircles, overcutMm: overcut, linePreset },
+        scope: selectionCut ? 'Selected objects' : cutLayer === 'all' ? 'Whole design' : cutLayer,
+        warnings,
+      })
+      const d = await grantedCutter()
+      setCutConfirm({ ...snapshot, device: d?.name ?? null })
+    } catch (e) {
+      setStatus(`Could not prepare job: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      preparingCutRef.current = false
+    }
+  }, [cutCount, frameOutside, frameWarning, offBoard, framedCutJob, gap, linePreset, preset, format, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut, selectionCut, cutLayer])
   const doSendNow = useCallback(async () => {
+    if (sendingRef.current || !cutConfirm) return
+    // Lock synchronously: two clicks before React rerenders cannot send twice.
+    sendingRef.current = true
+    setSending(true)
+    const data = cutConfirm.data
     setCutConfirm(null)
-    if (frameOutside) { setStatus(frameWarning); return }
     try {
       setStatus('Connecting to cutter…')
-      await sendToCutter(cutData(), (sent, total) =>
-        setStatus(`Cutting… ${Math.round((sent / total) * 100)}%`),
+      await sendToCutter(data, (sent, total) =>
+        setStatus(`Sending… ${Math.round((sent / total) * 100)}%`),
       )
-      setStatus('Job sent ✓')
+      setStatus('Job transmitted ✓ — check the cutter for completion')
     } catch (e) {
-      setStatus(`Send failed: ${e instanceof Error ? e.message : e}`)
+      setStatus(`Send failed: ${e instanceof Error ? e.message : e}. Check the cutter before resending.`)
+    } finally {
+      sendingRef.current = false
+      setSending(false)
     }
-  }, [cutData, frameOutside, frameWarning])
+  }, [cutConfirm])
+  const requestTestCut = useCallback(() => {
+    if (sendingRef.current || preparingCutRef.current) return
+    setCutConfirm({
+      title: 'Send diagnostic L',
+      data: gpglTestShape(gpStep, 2, swapAxes),
+      rows: [['Shape', '10 × 20 mm asymmetric L'], ['Offset', '2 mm from origin'],
+        ['Command mode', 'GP-GL'], ['Step size', `${(1 / gpStep).toFixed(3)} mm — must match the cutter`],
+        ['Swap axes', swapAxes ? 'On' : 'Off'], ['Force / speed', 'Current cutter panel settings']],
+      warnings: ['This diagnostic makes a physical cut. Set the cutter to GP-GL and check the loaded material.'],
+      origin: originCorner,
+      device: null,
+    })
+  }, [gpStep, swapAxes, originCorner])
 
   // The fill colour picker recolours the EXISTING fill layer live — colour
   // was baked into each stone at generation, so the picker otherwise only
@@ -4233,7 +4277,7 @@ export default function App() {
       { label: publishing ? 'Publishing to TShirt Brothers…' : '💎 Publish to TShirt Brothers…', onClick: () => { void publishToShop() }, disabled: !hasStones || publishing },
       { label: 'TSB publish key…', onClick: editPublishKey },
       'sep',
-      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount || frameOutside },
+      { label: sending ? 'Sending to Graphtec…' : '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount || frameOutside || sending },
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
@@ -4339,38 +4383,17 @@ export default function App() {
       <MenuBar brand="StoneCut" menus={menus} />
       {cutConfirm && (
         <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setCutConfirm(null) }}>
-          <div className="modal" role="dialog" aria-modal="true">
-            <h3>⚡ Cut on Graphtec</h3>
+          <div className="modal" role="dialog" aria-modal="true" style={{ maxWidth: 560, maxHeight: '94vh', overflowY: 'auto' }}>
+            <h3>⚡ {cutConfirm.title}</h3>
             <table className="modal-facts"><tbody>
-              <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Not connected yet — Chrome will ask which cutter to use, this once'}</td></tr>
-              <tr><td>Stones</td><td>{framedCutJob.stones.length}{selectionCut ? ' (selected)' : cutLayer !== 'all' && cutLayer !== 'lines' ? ` (${cutLayer} layer)` : ''}</td></tr>
-              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>Cut lines</td><td>{framedCutJob.paths!.length} path{framedCutJob.paths!.length === 1 ? '' : 's'}{selectionCut && selVecs.size ? ' (selected)' : ''}{frameOn ? ' (incl. weeding frame)' : ''}</td></tr>}
-              <tr><td>Size</td><td>{((bbox.maxX - bbox.minX) / 25.4).toFixed(2)}″ × {((bbox.maxY - bbox.minY) / 25.4).toFixed(2)}″</td></tr>
-              {fromOrigin && placement === 'artboard' && (
-                <tr><td>From origin</td><td>{fromOrigin.across.toFixed(2)}″ across, {fromOrigin.feed.toFixed(2)}″ up</td></tr>
-              )}
-              {framedCutJob.stones.length > 0 && <tr><td>{framedCutJob.paths?.length ? 'Holes material' : 'Material'}</td><td>{presetLabel(preset)}{sendConditions ? '' : ' (panel settings)'}</td></tr>}
-              {(framedCutJob.paths?.length ?? 0) > 0 && <tr><td>{framedCutJob.stones.length ? 'Lines material' : 'Material'}</td><td>{presetLabel(linePreset)}{sendConditions ? '' : ' (panel settings)'}</td></tr>}
+              <tr><td>Cutter</td><td>{cutConfirm.device ?? 'Chrome will select an available Graphtec when sending'}</td></tr>
+              {cutConfirm.rows.map(([label, value]) => <tr key={label}><td>{label}</td><td>{value}</td></tr>)}
             </tbody></table>
-            {framedCutJob.stones.length > 0 && (framedCutJob.paths?.length ?? 0) > 0 && linePreset !== preset && (
-              <p className="modal-warn">
-                Holes and cut lines use different materials, but this one job cuts both on the sheet that is loaded now.
-                If they belong on different sheets, cancel and cut the holes and the lines as two jobs
-                (highlight one, or pick a layer).
-              </p>
-            )}
-            {frameOutside && <p className="modal-warn">{frameWarning}</p>}
-            {offBoard && <p className="modal-warn">Part of the design is off the board and will be clipped.</p>}
-            {spacingAudit.involved.length > 0 && (
-              <p className="modal-warn">
-                {spacingAudit.involved.length} stones sit closer than the spacing floor — the template may tear between holes.
-                Fix in Production → Check spacing, or cut anyway.
-              </p>
-            )}
-            <p className="hint">Blade at the front-right corner of the material, ORIGIN pressed on the cutter.</p>
+            {cutConfirm.warnings.map((warning) => <p className="modal-warn" key={warning}>{warning}</p>)}
+            <p className="hint">Blade at the front-{cutConfirm.origin === 'br' ? 'right' : 'left'} corner of the material, ORIGIN pressed on the cutter.</p>
             <div className="modal-actions">
               <button onClick={() => setCutConfirm(null)}>Cancel</button>
-              <button className="primary" disabled={frameOutside} autoFocus onClick={() => { void doSendNow() }}>⚡ Cut now</button>
+              <button className="primary" disabled={sending} autoFocus onClick={() => { void doSendNow() }}>⚡ Send confirmed job</button>
             </div>
           </div>
         </div>
@@ -5621,22 +5644,14 @@ export default function App() {
             and whether the job is mirrored, at a cost of about an inch of material.
           </p>
           <div className="toolrow">
-            <button onClick={async () => {
-              try {
-                setStatus('Sending 10 mm test square…')
-                await sendToCutter(gpglTestShape(gpStep, 2, swapAxes))
-                setStatus('Test square sent ✓')
-              } catch (e) {
-                setStatus(`Test square failed: ${e instanceof Error ? e.message : e}`)
-              }
-            }}>Send test square</button>
+            <button disabled={sending} onClick={requestTestCut}>Send diagnostic L…</button>
             <button onClick={() => download('stonecut-testshape.plt', gpglTestShape(gpStep, 2, swapAxes))}>Download it</button>
           </div>
             </div>
           </details>
         </Section>
         <div className="cutbar">
-          <button className="primary" disabled={!cutCount || frameOutside} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <button className="primary" disabled={!cutCount || frameOutside || sending} onClick={doSend}>{sending ? 'Sending…' : '⚡ Cut on Graphtec'}</button>
           <div className="cutbar-meta">
             {cutCount ? [framedCutJob.stones.length ? `${framedCutJob.stones.length} stones` : '', framedCutJob.paths?.length ? `${framedCutJob.paths.length} cut line${framedCutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}

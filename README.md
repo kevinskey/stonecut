@@ -40,8 +40,12 @@ keeps its own.
 ## CE6000 notes
 
 Confirmed working setup (2026-10-04, CE6000, Sticky Flock at force 30 /
-speed 10). All of these are under Cut → Cutter setup and are the defaults
-for a fresh browser:
+speed 10). This is a recorded working setup, not a substitute for checking the current
+machine. The application currently starts a fresh browser at **0.100 mm
+(10 units/mm)**; the recorded setup below used **0.050 mm (20 units/mm)**.
+Set Cut → Cutter setup to match MENU → I/F → STEP SIZE on your cutter before
+sending. The cut confirmation displays the selected step size, origin,
+command mode, and axis mapping.
 
 | Setting | Value |
 | --- | --- |
