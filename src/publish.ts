@@ -12,6 +12,8 @@
 
 import type { Stone, StoneSpec } from './model'
 import { drawGem, drawGlint } from './sim'
+import { stoneBom, toSVG } from './export'
+import type { Job } from './export'
 
 const KEY_STORAGE = 'stonecut_tsb_key'
 const API_STORAGE = 'stonecut_tsb_api'
@@ -31,6 +33,48 @@ export interface BomRow { size: string; color: string; n: number; stoneMm: numbe
 const stoneRadiusMm = (sizes: Record<string, StoneSpec>, s: Stone) =>
   (sizes[s.size]?.stoneMm || (sizes[s.size]?.holeMm ?? 3) * 0.85) / 2
 
+// Publishing always uses all committed rhinestones, never the transient cut
+// selection, cut layer, board placement, or weeding frame. Resolve colors and
+// copy geometry once so preview, counts, and template describe one revision.
+export function snapshotPublishDesign(
+  stones: Stone[],
+  sizes: Record<string, StoneSpec>,
+  colorOf: (s: Stone) => string,
+): Job {
+  if (!stones.length) throw new Error('nothing to publish — the design has no stones')
+  const copiedSizes = Object.fromEntries(Object.entries(sizes).map(([k, v]) => [k, { ...v }]))
+  const copied = stones.map((s) => ({ ...s, color: colorOf(s) }))
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const s of copied) {
+    // Include both the visible gem and the larger production hole.
+    const r = Math.max(stoneRadiusMm(copiedSizes, s), (copiedSizes[s.size]?.holeMm ?? 3) / 2)
+    minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
+    maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
+  }
+  const margin = 4
+  return {
+    stones: copied.map((s) => ({ ...s, x: s.x - minX + margin, y: s.y - minY + margin })),
+    sizes: copiedSizes,
+    widthMm: maxX - minX + margin * 2,
+    heightMm: maxY - minY + margin * 2,
+  }
+}
+
+export function buildPublishPayload(name: string, snapshot: Job) {
+  const colorOf = (s: Stone) => s.color!
+  const preview = renderPreviewPng(snapshot.stones, snapshot.sizes, colorOf, { frame: snapshot })
+  return {
+    name,
+    previewBase64: preview.dataUrl,
+    svg: toSVG(snapshot),
+    widthMm: snapshot.widthMm,
+    heightMm: snapshot.heightMm,
+    coverage: coverageOf(snapshot.stones, snapshot.sizes, snapshot.widthMm, snapshot.heightMm),
+    stoneBom: stoneBom(snapshot.stones, snapshot.sizes, colorOf),
+    tags: ['bling', 'spiritwear'],
+  }
+}
+
 /* Render the stones to a transparent PNG, cropped to the design's own bounds
  * with a small margin. Deliberately independent of the editor's zoom/pan:
  * the published preview must look the same no matter how the board happened
@@ -39,7 +83,7 @@ export function renderPreviewPng(
   stones: Stone[],
   sizes: Record<string, StoneSpec>,
   colorOf: (s: Stone) => string,
-  opts: { pxPerMm?: number; marginMm?: number; maxPx?: number } = {},
+  opts: { pxPerMm?: number; marginMm?: number; maxPx?: number; frame?: Pick<Job, 'widthMm' | 'heightMm'> } = {},
 ): { dataUrl: string; widthMm: number; heightMm: number } {
   if (stones.length === 0) throw new Error('nothing to publish — the design has no stones')
 
@@ -55,8 +99,10 @@ export function renderPreviewPng(
     maxX = Math.max(maxX, s.x + r)
     maxY = Math.max(maxY, s.y + r)
   }
-  const widthMm = maxX - minX + marginMm * 2
-  const heightMm = maxY - minY + marginMm * 2
+  const widthMm = opts.frame?.widthMm ?? maxX - minX + marginMm * 2
+  const heightMm = opts.frame?.heightMm ?? maxY - minY + marginMm * 2
+  // A publish snapshot is already translated into its shared SVG/PNG frame.
+  if (opts.frame) { minX = marginMm; minY = marginMm }
 
   // Cap the long edge so a 14in design doesn't produce a 20MB base64 body.
   const maxPx = opts.maxPx ?? 1600

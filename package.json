@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "app:dev": "electron .",
     "app:build": "npm run build && electron-builder --mac",
-    "app:mas": "npm run build && electron-builder --mac mas"
+    "app:mas": "npm run build && electron-builder --mac mas",
+    "test:publish": "node --import tsx --test tests/publish.test.mjs"
   },
   "dependencies": {
     "opentype.js": "^2.0.0",
