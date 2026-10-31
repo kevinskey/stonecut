@@ -4,6 +4,14 @@ import { defineConfig } from 'vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  base: './',
+  build: { rolldownOptions: { output: { codeSplitting: { groups: [{ name(id: string) {
+    if (id.includes('fflate')) return 'zip-engine'
+    if (id.includes('opentype.js')) return 'font-engine'
+    if (id.includes('polygon-clipping')) return 'polygon-engine'
+    if (id.includes('node_modules')) return 'vendor'
+    return null
+  } }] } } } },
   server: {
     proxy: {
       // T-Shirt Brothers art library — the API allows CORS but the Spaces
