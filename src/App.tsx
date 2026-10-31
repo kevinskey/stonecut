@@ -17,7 +17,7 @@ import type { FSFileHandle } from './filesys'
 import { analyzeImage, imageToColorLayers, imageToCutContours, imageToRaster } from './image'
 import type { ColorLayer, ImageAnalysis } from './image'
 import { download, gpglTestShape, placementGuideHtml, stoneBom, toDXF, toGPGL, toHPGL, toSVG, workOrderHtml } from './export'
-import { coverageOf, getPublishKey, publishToTsb, renderPreviewPng, setPublishKey } from './publish'
+import { buildPublishPayload, getPublishKey, publishToTsb, setPublishKey, snapshotPublishDesign } from './publish'
 import type { OriginCorner } from './export'
 import { SHAPE_NAMES, shapeToContours } from './shapes'
 import { MOCKUP_W, drawGem, drawMockup, drawMockupEmpty, drawMockupPhoto } from './sim'
@@ -4062,26 +4062,14 @@ export default function App() {
       return
     }
     const suggested = (fileName || '').replace(/\.[a-zA-Z0-9]+$/, '') || 'Rhinestone design'
-    const name = window.prompt('Publish to TShirt Brothers as:', suggested)
+    const name = window.prompt(`Publish whole rhinestone design (${stones.length} stones) to TShirt Brothers as:\nCut selections, vector lines, and weeding frames are not included.`, suggested)
     if (name == null || !name.trim()) return
 
     setPublishing(true)
     setStatus('Publishing to TShirt Brothers…')
     try {
-      const preview = renderPreviewPng(stones, sizes, colorOfStone)
-      const coverage = coverageOf(stones, sizes, preview.widthMm, preview.heightMm)
-      const result = await publishToTsb({
-        name: name.trim(),
-        previewBase64: preview.dataUrl,
-        // Cut file for the template, same geometry the Cricut/plotter export
-        // uses — so production never has to re-derive it from the preview.
-        svg: cutCount ? toSVG(framedCutJob) : undefined,
-        widthMm: preview.widthMm,
-        heightMm: preview.heightMm,
-        coverage,
-        stoneBom: bom,
-        tags: ['bling', 'spiritwear'],
-      })
+      const snapshot = snapshotPublishDesign(stones, sizes, colorOfStone)
+      const result = await publishToTsb(buildPublishPayload(name.trim(), snapshot))
       setStatus(
         `Published to TShirt Brothers — ${result.design.stone_count} stones, art library #${result.artLibraryId}. ` +
           'Feature it on /bling from the TSB admin.',
@@ -4091,7 +4079,7 @@ export default function App() {
     } finally {
       setPublishing(false)
     }
-  }, [publishing, stones, sizes, colorOfStone, bom, framedCutJob, cutCount, fileName, editPublishKey])
+  }, [publishing, stones, sizes, colorOfStone, fileName, editPublishKey])
   const saveDesign = useCallback(async () => {
     const h = fileHandleRef.current
     if (!h || !fsSupported) {
