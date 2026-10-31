@@ -12,7 +12,8 @@
     "app:dev": "electron .",
     "app:build": "npm run build && electron-builder --mac",
     "app:mas": "npm run build && electron-builder --mac mas",
-    "test:publish": "node --import tsx --test tests/publish.test.mjs"
+    "test:publish": "node --import tsx --test tests/publish.test.mjs",
+    "test:frame": "node --import tsx --test tests/weeding-frame.test.mjs"
   },
   "dependencies": {
     "opentype.js": "^2.0.0",

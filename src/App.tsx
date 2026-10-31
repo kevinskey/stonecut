@@ -27,6 +27,7 @@ import { MenuBar } from './MenuBar'
 import type { Menu } from './MenuBar'
 import type { ShapeKind } from './shapes'
 import { sendToCutter } from './usb'
+import { withWeedingFrame, weedingFrameFits } from './weeding-frame'
 import './App.css'
 
 type Tool = 'select' | 'add' | 'node' | 'pen'
@@ -2923,36 +2924,14 @@ export default function App() {
   )
   // filenames: 'color:#dc2034' -> 'color-dc2034'
   const cutLayerSlug = selectionCut ? 'selection' : cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
-  const framedCutJob = useMemo(() => {
-    if (!frameOn) return cutJob
-    // frame bbox comes from the FULL job, never the filtered layer — a
-    // per-colour bbox would give every template a different frame and the
-    // stack couldn't register by its edges
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-    for (const s of job.stones) {
-      const r = (job.sizes[s.size]?.holeMm ?? 3) / 2
-      minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
-      maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
-    }
-    for (const p of job.paths ?? []) for (const q of p) {
-      minX = Math.min(minX, q.x); minY = Math.min(minY, q.y)
-      maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y)
-    }
-    if (!isFinite(minX)) return cutJob
-    const m = Math.max(1, frameMm)
-    const x0 = minX - m, y0 = minY - m, x1 = maxX + m, y1 = maxY + m
-    const frame = [
-      { x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }, { x: x0, y: y0 },
-    ]
-    return {
-      ...cutJob,
-      // the frame may poke past the sheet datum in from-origin mode — grow
-      // the job frame so the exporters' Y-flip datum still covers it
-      widthMm: Math.max(cutJob.widthMm, x1 + m),
-      heightMm: Math.max(cutJob.heightMm, y1 + m),
-      paths: [...(cutJob.paths ?? []), frame],
-    }
-  }, [cutJob, job, frameOn, frameMm])
+  const framedCutJob = useMemo(
+    () => frameOn ? withWeedingFrame(cutJob, job, frameMm) : cutJob,
+    [cutJob, job, frameOn, frameMm],
+  )
+  const frameOutside = frameOn && framedCutJob !== cutJob && !weedingFrameFits(framedCutJob)
+  const frameWarning = placement === 'artboard'
+    ? 'The weeding frame extends beyond the loaded media. Move the design inward, reduce the frame margin, or turn off the frame.'
+    : 'The weeding frame extends beyond the job area. Increase the job margin, reduce the frame margin, or turn off the frame.'
   const cutCount = framedCutJob.stones.length + (framedCutJob.paths?.length ?? 0)
   const layerCounts = useMemo(() => {
     let o = 0
@@ -2974,11 +2953,13 @@ export default function App() {
   const [cutConfirm, setCutConfirm] = useState<{ device: string | null } | null>(null)
   const doSend = useCallback(async () => {
     if (!cutCount) { setStatus('Nothing to cut'); return }
+    if (frameOutside) { setStatus(frameWarning); return }
     const d = await grantedCutter()
     setCutConfirm({ device: d?.name ?? null })
-  }, [cutCount])
+  }, [cutCount, frameOutside, frameWarning])
   const doSendNow = useCallback(async () => {
     setCutConfirm(null)
+    if (frameOutside) { setStatus(frameWarning); return }
     try {
       setStatus('Connecting to cutter…')
       await sendToCutter(cutData(), (sent, total) =>
@@ -2988,7 +2969,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Send failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [cutData])
+  }, [cutData, frameOutside, frameWarning])
 
   // The fill colour picker recolours the EXISTING fill layer live — colour
   // was baked into each stone at generation, so the picker otherwise only
@@ -4242,9 +4223,9 @@ export default function App() {
       { label: fileName ? `Save — ${fileName}` : 'Save…', shortcut: '⌘S', onClick: () => { void saveDesign() }, disabled: !hasStones && !vectors.length },
       { label: 'Save As…', shortcut: '⌘⇧S', onClick: () => { void saveDesignAs() }, disabled: !hasStones && !vectors.length },
       'sep',
-      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount },
-      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount },
-      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayerSlug}.plt`, cutData()), disabled: !cutCount },
+      { label: 'Export SVG (Cricut)…', onClick: () => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml'), disabled: !cutCount || frameOutside },
+      { label: 'Export DXF (laser / other cutters)…', onClick: () => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf'), disabled: !cutCount || frameOutside },
+      { label: 'Export plotter file (.plt)…', onClick: () => download(`stonecut-${cutLayerSlug}.plt`, cutData()), disabled: !cutCount || frameOutside },
       'sep',
       { label: 'Print work order…', onClick: printWorkOrder, disabled: !hasStones && !vectors.length },
       { label: 'Print 1:1 placement guide…', onClick: printPlacementGuide, disabled: !hasStones && !vectors.length },
@@ -4252,7 +4233,7 @@ export default function App() {
       { label: publishing ? 'Publishing to TShirt Brothers…' : '💎 Publish to TShirt Brothers…', onClick: () => { void publishToShop() }, disabled: !hasStones || publishing },
       { label: 'TSB publish key…', onClick: editPublishKey },
       'sep',
-      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount },
+      { label: '⚡ Cut on Graphtec', onClick: () => { void doSend() }, disabled: !cutCount || frameOutside },
     ] },
     { label: 'Edit', items: [
       { label: 'Undo', shortcut: '⌘Z', onClick: undo },
@@ -4378,6 +4359,7 @@ export default function App() {
                 (highlight one, or pick a layer).
               </p>
             )}
+            {frameOutside && <p className="modal-warn">{frameWarning}</p>}
             {offBoard && <p className="modal-warn">Part of the design is off the board and will be clipped.</p>}
             {spacingAudit.involved.length > 0 && (
               <p className="modal-warn">
@@ -4388,7 +4370,7 @@ export default function App() {
             <p className="hint">Blade at the front-right corner of the material, ORIGIN pressed on the cutter.</p>
             <div className="modal-actions">
               <button onClick={() => setCutConfirm(null)}>Cancel</button>
-              <button className="primary" autoFocus onClick={() => { void doSendNow() }}>⚡ Cut now</button>
+              <button className="primary" disabled={frameOutside} autoFocus onClick={() => { void doSendNow() }}>⚡ Cut now</button>
             </div>
           </div>
         </div>
@@ -5555,10 +5537,11 @@ export default function App() {
               will clip whatever falls off the sheet. Move it back inside, or enlarge the artboard.
             </p>
           )}
+          {frameOutside && <p className="modal-warn" role="alert">{frameWarning}</p>}
           <div className="toolrow">
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.plt`, cutData())}>Download .plt</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml')}>SVG (Cricut)</button>
-            <button disabled={!cutCount} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf')}>DXF (laser)</button>
+            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.plt`, cutData())}>Download .plt</button>
+            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.svg`, toSVG(framedCutJob), 'image/svg+xml')}>SVG (Cricut)</button>
+            <button disabled={!cutCount || frameOutside} onClick={() => download(`stonecut-${cutLayerSlug}.dxf`, toDXF(framedCutJob), 'application/dxf')}>DXF (laser)</button>
           </div>
           {/* Machine-level settings change once per cutter, not per job, so they
               stay folded: the Cut button must never be a screen away. */}
@@ -5653,7 +5636,7 @@ export default function App() {
           </details>
         </Section>
         <div className="cutbar">
-          <button className="primary" disabled={!cutCount} onClick={doSend}>⚡ Cut on Graphtec</button>
+          <button className="primary" disabled={!cutCount || frameOutside} onClick={doSend}>⚡ Cut on Graphtec</button>
           <div className="cutbar-meta">
             {cutCount ? [framedCutJob.stones.length ? `${framedCutJob.stones.length} stones` : '', framedCutJob.paths?.length ? `${framedCutJob.paths.length} cut line${framedCutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
