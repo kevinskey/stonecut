@@ -5790,6 +5790,14 @@ export default function App() {
             {cutCount ? [framedCutJob.stones.length ? `${framedCutJob.stones.length} stones` : '', framedCutJob.paths?.length ? `${framedCutJob.paths.length} cut line${framedCutJob.paths.length === 1 ? '' : 's'}` : ''].filter(Boolean).join(' + ') : 'add a design to cut'}
             {fromOrigin && placement === 'artboard' && ` · ${fromOrigin.across.toFixed(2)}″ across, ${fromOrigin.feed.toFixed(2)}″ up from origin`}
           </div>
+          {/* The reason a cut is blocked used to live only inside the Cut
+              section; with it collapsed the pinned button just looked dead. */}
+          {cutCount > 0 && cutBlocked && (
+            <p className="modal-warn" role="alert" style={{ margin: '6px 0 0' }}>
+              {frameOutside ? frameWarning : conditionIssue || cutIssues.join(' ')}
+              {!frameOutside && !conditionIssue && offBoard && ' Part of the design is off the media — Edit → Select all, then drag it back on, or delete the stray stones. To cut only the vinyl lines, click them on the board first.'}
+            </p>
+          )}
         </div>
       </aside>
       <div
