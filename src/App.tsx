@@ -2010,21 +2010,40 @@ export default function App() {
   // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
   // side(s) opposite `handle` stay where `box` had them.
   const regenElement = useCallback(
-    (el: number, sx: number, sy: number, box: Box, handle: Handle, select = true, L?: Layer) => {
+    (el: number, sx: number, sy: number, box: Box, handle: Handle, select = true, L?: Layer, fit = false) => {
       const r = elementsRef.current[el]
       if (!r) return
       // re-stone with the layer the design lives on, not whichever is active
       const lay = L ?? layerFor(stonesRef.current.find((st) => st.el === el) ?? { lay: activeLayerId })
-      const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * sx, y: q.y * sy })))
-      const pts = contoursToStones(scaled, r.mode, r.wholeWord, lay)
-      if (!pts.length) { setStatus('Too small to hold stones at this size'); return }
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-      for (const q of pts) {
-        const rad = (sizes[q.size ?? lay.size]?.holeMm ?? 3) / 2
-        minX = Math.min(minX, q.x - rad); minY = Math.min(minY, q.y - rad)
-        maxX = Math.max(maxX, q.x + rad); maxY = Math.max(maxY, q.y + rad)
+      const stoneUp = (kx: number, ky: number) => {
+        const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * kx, y: q.y * ky })))
+        const pts = contoursToStones(scaled, r.mode, r.wholeWord, lay)
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        for (const q of pts) {
+          const rad = (sizes[q.size ?? lay.size]?.holeMm ?? 3) / 2
+          minX = Math.min(minX, q.x - rad); minY = Math.min(minY, q.y - rad)
+          maxX = Math.max(maxX, q.x + rad); maxY = Math.max(maxY, q.y + rad)
+        }
+        let cMinX = Infinity, cMinY = Infinity, cMaxX = -Infinity, cMaxY = -Infinity
+        for (const c of scaled) for (const q of c) { cMinX = Math.min(cMinX, q.x); cMinY = Math.min(cMinY, q.y); cMaxX = Math.max(cMaxX, q.x); cMaxY = Math.max(cMaxY, q.y) }
+        return { pts, minX, minY, maxX, maxY, w: maxX - minX, h: maxY - minY, cw: cMaxX - cMinX, ch: cMaxY - cMinY }
       }
-      const w = maxX - minX, h = maxY - minY
+      let g = stoneUp(sx, sy)
+      if (!g.pts.length) { setStatus('Too small to hold stones at this size'); return }
+      if (fit) {
+        // A setting change (ghost / double outline, spacing…) must not grow
+        // or shrink the design on the board: the stones float outside the
+        // shape by a fixed margin, so shrink the shape until the stones'
+        // footprint matches the box they were in. One pass is exact
+        // because the margin does not scale with the shape.
+        const bw = box.maxX - box.minX, bh = box.maxY - box.minY
+        const kx = (bw - (g.w - g.cw)) / g.cw, ky = (bh - (g.h - g.ch)) / g.ch
+        if (isFinite(kx) && isFinite(ky) && kx > 0.05 && ky > 0.05 && (Math.abs(kx - 1) > 0.005 || Math.abs(ky - 1) > 0.005)) {
+          const g2 = stoneUp(sx * kx, sy * ky)
+          if (g2.pts.length) { g = g2; sx *= kx; sy *= ky }
+        }
+      }
+      const { pts, minX, minY, w, h } = g
       const left = handle.includes('w') ? box.maxX - w : handle.includes('e') ? box.minX : (box.minX + box.maxX) / 2 - w / 2
       const top = handle.includes('n') ? box.maxY - h : handle.includes('s') ? box.minY : (box.minY + box.maxY) / 2 - h / 2
       const base = stonesRef.current.filter((st) => st.el !== el)
@@ -2250,7 +2269,7 @@ export default function App() {
       // the recipe keeps the text's mode in sync with the panel
       elementsRef.current[last!.el] = { ...r, mode: textMode }
       setElements((prev) => ({ ...prev, [last!.el]: { ...prev[last!.el], mode: textMode } }))
-      regenElement(last!.el, r.sx, r.sy, { minX, minY, maxX, maxY }, 'nw', false)
+      regenElement(last!.el, r.sx, r.sy, { minX, minY, maxX, maxY }, 'nw', false, undefined, true)
     }, 250)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2272,8 +2291,8 @@ export default function App() {
     shapeSigRef.current = ''
     if (!meta || !rec) return
     setShapeKind(meta.kind as ShapeKind)
-    setShapeW(Math.round(meta.w * rec.sx))
-    setShapeH(Math.round(meta.h * rec.sy))
+    setShapeW(meta.w)
+    setShapeH(meta.h)
     setShapeMode(rec.mode)
     const d = document.querySelector<HTMLDetailsElement>('details.sec[data-section="Shapes"]')
     if (d) d.open = true
@@ -2286,7 +2305,7 @@ export default function App() {
     const meta = rec?.shapeMeta
     if (!rec || !meta) return
     const sig = JSON.stringify([gap, outlineStyle, outlineDesign, uniformRhythm, fillStyle, sizes])
-    const geomChanged = meta.kind !== shapeKind || Math.round(meta.w * rec.sx) !== shapeW || Math.round(meta.h * rec.sy) !== shapeH
+    const geomChanged = meta.kind !== shapeKind || meta.w !== shapeW || meta.h !== shapeH
     const metaChanged = geomChanged || rec.mode !== shapeMode
     if (shapeSigRef.current === '') {
       // just selected: the panel is still catching up with the element's
@@ -2305,7 +2324,7 @@ export default function App() {
       elementsRef.current = { ...elementsRef.current, [el]: next }
       setElements((prev) => ({ ...prev, [el]: next }))
       pushUndo(stonesRef.current)
-      regenElement(el, sx, sy, box, 'nw', true)
+      regenElement(el, sx, sy, box, 'nw', true, undefined, !geomChanged)
       shapeSigRef.current = sig
     }, 250)
     return () => window.clearTimeout(t)
