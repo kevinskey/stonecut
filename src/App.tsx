@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
+import { layerOf, makeLayer, nextLayerId, nextLayerName, resolveLayers } from './layers'
+import type { Layer } from './layers'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
 import { arcContours, loadFontFile, parseFontBuffer, textToContours } from './text'
@@ -324,7 +326,6 @@ export default function App() {
   const vecSeq = useRef((savedDesign.current?.vectors ?? []).reduce((m, v) => Math.max(m, v.id), 0) + 1)
   // Selected cut-line objects (several at once: shift-click, marquee).
   const [selVecs, setSelVecs] = useState<Set<number>>(() => new Set())
-  const [curSize, setCurSize] = useState('SS6')
   const [gap, setGap] = useState(initialDesign?.context?.gap ?? 0.8) // min edge-to-edge gap between holes, mm
   const [workspace, setWorkspace] = useState('all')
   const [panelOpen, setPanelOpen] = useState(false)
@@ -335,11 +336,33 @@ export default function App() {
   const [uniformRhythm, setUniformRhythm] = useState(true)
   const [canEcho, setCanEcho] = useState(true)
   const [fillStyle, setFillStyle] = useState<'grid' | 'brick' | 'concentric' | 'radial'>('brick')
-  const [fillSize, setFillSize] = useState('SS6')
-  const [fillColor, setFillColor] = useState(initialDesign?.context?.fillColor ?? '#7ec8e3')
-  const [outlineColor, setOutlineColor] = useState(initialDesign?.context?.outlineColor ?? '#85d653')
-  const fillColorRef = useRef(fillColor)
-  const outlineColorRef = useRef(outlineColor)
+  // LAYERS — see src/layers.ts. The active layer is what new text / shapes /
+  // images / lines land on, and its stone size, fill size and colours are
+  // what the Stones and Fill panels (and the live preview) work with.
+  const [layers, setLayers] = useState<Layer[]>(() => {
+    const d = savedDesign.current
+    return resolveLayers(d?.layers, d?.stones ?? [], d?.vectors ?? [], d?.sizes ?? DEFAULT_SIZES, d?.context ?? {})
+  })
+  const layersRef = useRef<Layer[]>(layers)
+  layersRef.current = layers
+  const [activeLayerId, setActiveLayerId] = useState<number>(() => {
+    const want = savedDesign.current?.context?.activeLayer
+    return want != null && layersRef.current.some((l) => l.id === want) ? want : layersRef.current[0].id
+  })
+  const [renamingLayer, setRenamingLayer] = useState<number | null>(null)
+  const activeLayer = layers.find((l) => l.id === activeLayerId) ?? layers[0]
+  useEffect(() => { if (!layers.some((l) => l.id === activeLayerId)) setActiveLayerId(layers[0].id) }, [layers, activeLayerId])
+  const layerMap = useMemo(() => new Map(layers.map((l) => [l.id, l])), [layers])
+  // the layer an object belongs to (strays fall back to the active layer)
+  const layerFor = useCallback((s: { lay?: number }) => layerMap.get(layerOf(s)) ?? activeLayer, [layerMap, activeLayer])
+  // drawn and cut? hidden layers vanish from the board and from the machine
+  const layerShown = useCallback((s: { lay?: number }) => layerMap.get(layerOf(s))?.visible ?? true, [layerMap])
+  // pickable? hidden or locked layers can't be selected, erased or dragged
+  const layerOpen = useCallback((s: { lay?: number }) => { const l = layerMap.get(layerOf(s)); return !l || (l.visible && !l.locked) }, [layerMap])
+  const curSize = activeLayer.size
+  const fillSize = activeLayer.fillSize
+  const outlineColor = activeLayer.color
+  const fillColor = activeLayer.fillColor
   const [echoUpsize, setEchoUpsize] = useState<number | null>(null)
   const outlineStyle: 'auto' | 'walls' | 'centerline' =
     outlineDesign === 'centerline' ? 'centerline' : strokePolicy
@@ -763,11 +786,11 @@ export default function App() {
   }, [linePresetName])
   const [format, setFormat] = useState<'gpgl' | 'hpgl'>('gpgl')
 
-  type Snapshot = { stones: Stone[]; elements: Elements; vectors: VecItem[] }
+  type Snapshot = { stones: Stone[]; elements: Elements; vectors: VecItem[]; layers: Layer[] }
   const undoStack = useRef<Snapshot[]>([])
   const redoStack = useRef<Snapshot[]>([])
   const pushUndo = useCallback((prev: Stone[]) => {
-    undoStack.current.push({ stones: prev, elements: elementsRef.current, vectors: vectorsRef.current })
+    undoStack.current.push({ stones: prev, elements: elementsRef.current, vectors: vectorsRef.current, layers: layersRef.current })
     if (undoStack.current.length > 50) undoStack.current.shift()
     redoStack.current = [] // a new edit forks history; the redo branch dies
   }, [])
@@ -776,19 +799,20 @@ export default function App() {
     setStones(s.stones)
     setElements(s.elements)
     setVectors(s.vectors)
+    setLayers(s.layers)
     setSelection(new Set())
     setSelVecs(new Set())
   }, [])
   const undo = useCallback(() => {
     const prev = undoStack.current.pop()
     if (!prev) return
-    redoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current })
+    redoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current, layers: layersRef.current })
     applySnapshot(prev)
   }, [applySnapshot])
   const redo = useCallback(() => {
     const next = redoStack.current.pop()
     if (!next) return
-    undoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current })
+    undoStack.current.push({ stones: stonesRef.current, elements: elementsRef.current, vectors: vectorsRef.current, layers: layersRef.current })
     applySnapshot(next)
   }, [applySnapshot])
   const mutateVectors = useCallback(
@@ -1248,19 +1272,19 @@ export default function App() {
       // each commit is its own ELEMENT: a free-moving layer that may overlap
       // other elements — nothing culls across elements anymore
       const el = nextEl()
-      const fresh: Stone[] = pts.map((p) => ({ x: p.x + previewOffX, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el }))
+      const fresh: Stone[] = pts.map((p) => ({ x: p.x + previewOffX, y: p.y + offsetY, size: p.size ?? curSize, color: p.color, layer: p.layer ?? 'outline', el, lay: activeLayerId }))
       mutate((prev) => [...prev, ...fresh])
       if (recipe) setElements((prev) => ({ ...prev, [el]: { ...recipe, contours: normaliseContours(recipe.contours), sx: 1, sy: 1 } }))
       return el
     },
-    [curSize, mutate, previewOffX, nextEl],
+    [curSize, activeLayerId, mutate, previewOffX, nextEl],
   )
 
   // The contours -> stones stage, shared by text and shapes. Both feed the
   // same outline/fill machinery; only where the contours come from differs.
   const contoursToStones = useCallback(
-    (contours: Pt[][], mode: StoneMode, wholeWord = true) => {
-    const hole = sizes[curSize]?.holeMm ?? 3
+    (contours: Pt[][], mode: StoneMode, wholeWord = true, L: Layer = activeLayer) => {
+    const hole = sizes[L.size]?.holeMm ?? 3
     const hardGap = hardGapOf(gap)
     const rhythm = hole + gap
     const idx = new SpacingIndex(hole + hardGap)
@@ -1278,7 +1302,7 @@ export default function App() {
     }
     pts.push(...outline.map((p) => ({ ...p, layer: 'outline' as const })))
     if (mode !== 'outline') {
-      const fHole = sizes[fillSize]?.holeMm ?? 2.5
+      const fHole = sizes[L.fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
     // The lattice steps on the FILL stone's own pitch, not the outline's.
           // Inheriting the outline rhythm spaces small fill stones as if they
@@ -1294,11 +1318,11 @@ export default function App() {
       const f = wholeWord
         ? fillByGlyph(contours, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
         : fillStones(grid, fHole, fGap, fInset, fIdx, outline, fRhythm, fillStyle, hole)
-      pts.push(...f.map((p) => ({ ...p, size: fillSize, color: fillColor, layer: 'fill' as const })))
+      pts.push(...f.map((p) => ({ ...p, size: L.fillSize, color: L.fillColor, layer: 'fill' as const })))
     }
       return pts
     },
-    [curSize, gap, sizes, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor],
+    [activeLayer, gap, sizes, uniformRhythm, outlineDesign, outlineStyle, fillStyle],
   )
 
   const generateText = useCallback(() => {
@@ -1404,6 +1428,8 @@ export default function App() {
         ? last.offsetY
         : previewBaseY ?? (stones.length ? bbox.maxY + 10 : 10)
       const el = replacing && last.el != null ? last.el : nextEl()
+      // a regenerated image stays on the layer it was first added to
+      const imgLay = replacing && last.el != null ? layerOf(stones.find((st) => st.el === last.el) ?? { lay: activeLayerId }) : activeLayerId
       const fresh: Stone[] = pts.map((p) => ({
         x: p.x + previewOffX,
         y: p.y + offsetY,
@@ -1411,6 +1437,7 @@ export default function App() {
         color: p.color,
         layer: p.layer ?? 'outline',
         el,
+        lay: imgLay,
       }))
       // elements are free layers: no culling across elements on commit
       const kept = [...base, ...fresh]
@@ -1428,7 +1455,7 @@ export default function App() {
     } catch (e) {
       setStatus(`Image failed: ${e instanceof Error ? e.message : e}`)
     }
-  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, previewOffX, nextEl])
+  }, [imageFile, imgWidth, imgThreshold, imgInvert, imgAlphaKey, imgLinework, imgDetail, imgTextMasked, imgOcr, imgMode, sizes, curSize, activeLayerId, gap, stones, bbox.maxY, previewBaseY, pushUndo, uniformRhythm, outlineDesign, outlineStyle, fillStyle, fillSize, fillColor, previewOffX, nextEl])
 
   // Live regeneration: while the last image commit is untouched, any
   // generation-setting change re-runs it in place (debounced like a preview).
@@ -1744,12 +1771,13 @@ export default function App() {
       let best = -1
       let bestD = Infinity
       for (let i = 0; i < stones.length; i++) {
+        if (!layerOpen(stones[i])) continue
         const d = Math.hypot(stones[i].x - p.x, stones[i].y - p.y)
         if (d <= holeOf(stones[i]) / 2 + slopMm && d < bestD) { bestD = d; best = i }
       }
       return best
     },
-    [stones, holeOf],
+    [stones, holeOf, layerOpen],
   )
   // ---------- resize a whole design ----------
   // Handles appear when the selection is exactly one complete element that
@@ -1960,12 +1988,12 @@ export default function App() {
       const r = (sizes[size]?.holeMm ?? 3) / 2
       if (!idx.canPlace(p, r)) continue
       idx.add(p, r)
-      fresh.push({ x: p.x, y: p.y, size, layer: 'outline', el })
+      fresh.push({ x: p.x, y: p.y, size, layer: 'outline', el, lay: activeLayerId })
     }
     if (!fresh.length) { setStatus('No room to scatter — raise Density or Band, or lower the stone size'); return }
     mutate((prev) => [...prev, ...fresh])
     setStatus(`Scattered ${fresh.length} stones fading ${band} mm off the edge — ⌘Z undoes, double-click grabs the spray`)
-  }, [selection, selVecs, stones, vectors, holeOf, scatterBand, scatterDensity, scatterMix, gap, sizes, curSize, fillSize, mutate, nextEl])
+  }, [selection, selVecs, stones, vectors, holeOf, scatterBand, scatterDensity, scatterMix, gap, sizes, curSize, fillSize, activeLayerId, mutate, nextEl])
 
   // drag-to-rotate handle floating above the selection box
   const ROT_OFF_PX = 24
@@ -1982,15 +2010,17 @@ export default function App() {
   // Re-stone element `el` at recipe scale (sx, sy) and place the result so the
   // side(s) opposite `handle` stay where `box` had them.
   const regenElement = useCallback(
-    (el: number, sx: number, sy: number, box: Box, handle: Handle, select = true) => {
+    (el: number, sx: number, sy: number, box: Box, handle: Handle, select = true, L?: Layer) => {
       const r = elementsRef.current[el]
       if (!r) return
+      // re-stone with the layer the design lives on, not whichever is active
+      const lay = L ?? layerFor(stonesRef.current.find((st) => st.el === el) ?? { lay: activeLayerId })
       const scaled = r.contours.map((c) => c.map((q) => ({ x: q.x * sx, y: q.y * sy })))
-      const pts = contoursToStones(scaled, r.mode, r.wholeWord)
+      const pts = contoursToStones(scaled, r.mode, r.wholeWord, lay)
       if (!pts.length) { setStatus('Too small to hold stones at this size'); return }
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const q of pts) {
-        const rad = (sizes[q.size ?? curSize]?.holeMm ?? 3) / 2
+        const rad = (sizes[q.size ?? lay.size]?.holeMm ?? 3) / 2
         minX = Math.min(minX, q.x - rad); minY = Math.min(minY, q.y - rad)
         maxX = Math.max(maxX, q.x + rad); maxY = Math.max(maxY, q.y + rad)
       }
@@ -1998,7 +2028,7 @@ export default function App() {
       const left = handle.includes('w') ? box.maxX - w : handle.includes('e') ? box.minX : (box.minX + box.maxX) / 2 - w / 2
       const top = handle.includes('n') ? box.maxY - h : handle.includes('s') ? box.minY : (box.minY + box.maxY) / 2 - h / 2
       const base = stonesRef.current.filter((st) => st.el !== el)
-      const fresh: Stone[] = pts.map((q) => ({ x: q.x - minX + left, y: q.y - minY + top, size: q.size ?? curSize, color: q.color, layer: q.layer ?? 'outline', el }))
+      const fresh: Stone[] = pts.map((q) => ({ x: q.x - minX + left, y: q.y - minY + top, size: q.size ?? lay.size, color: q.color, layer: q.layer ?? 'outline', el, lay: lay.id }))
       const next = [...base, ...fresh]
       stonesRef.current = next
       setStones(next)
@@ -2006,8 +2036,118 @@ export default function App() {
       setElements((prev) => ({ ...prev, [el]: { ...prev[el], sx, sy } }))
       setStatus(`${fresh.length} stones at ${w.toFixed(0)} × ${h.toFixed(0)} mm`)
     },
-    [contoursToStones, sizes, curSize],
+    [contoursToStones, sizes, layerFor, activeLayerId],
   )
+  // ---------- layers ----------
+  const updateLayer = useCallback((id: number, patch: Partial<Layer>) => {
+    setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)))
+  }, [])
+  const elBoxOf = useCallback((el: number): Box | null => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const st of stonesRef.current) {
+      if (st.el !== el) continue
+      const r = (sizes[st.size]?.holeMm ?? 3) / 2
+      minX = Math.min(minX, st.x - r); minY = Math.min(minY, st.y - r)
+      maxX = Math.max(maxX, st.x + r); maxY = Math.max(maxY, st.y + r)
+    }
+    return isFinite(minX) ? { minX, minY, maxX, maxY } : null
+  }, [sizes])
+  // Changing a layer's stone size re-stones every design on it from its
+  // recipe (same footprint, new count) and swaps the hole size on anything
+  // without a recipe (hand-placed, pen and scatter stones). One undo step.
+  const setLayerSize = useCallback((id: number, which: 'size' | 'fillSize', value: string) => {
+    const cur = layersRef.current.find((l) => l.id === id)
+    if (!cur || cur[which] === value || !sizes[value]) return
+    pushUndo(stonesRef.current)
+    const nl: Layer = { ...cur, [which]: value }
+    layersRef.current = layersRef.current.map((l) => (l.id === id ? nl : l))
+    setLayers(layersRef.current)
+    const els = new Set<number>()
+    for (const st of stonesRef.current) if (layerOf(st) === id && st.el != null && elementsRef.current[st.el]) els.add(st.el)
+    for (const el of els) {
+      const r = elementsRef.current[el]
+      const box = elBoxOf(el)
+      if (box) regenElement(el, r.sx, r.sy, box, 'nw', false, nl)
+    }
+    const sub = which === 'size' ? 'outline' : 'fill'
+    const next = stonesRef.current.map((st) => (layerOf(st) === id && (st.layer ?? 'outline') === sub && !(st.el != null && els.has(st.el)) ? { ...st, size: value } : st))
+    stonesRef.current = next
+    setStones(next)
+    setSelection(new Set())
+    setStatus(`${nl.name}: ${sub} stones are now ${value}${els.size ? ` — ${els.size} design${els.size === 1 ? '' : 's'} re-stoned` : ''} · ⌘Z undoes`)
+  }, [sizes, pushUndo, regenElement, elBoxOf])
+  // Colour changes recolour the layer's existing stones live (no undo entry:
+  // the picker fires a change per frame), as the old global pickers did.
+  const setLayerColor = useCallback((id: number, which: 'color' | 'fillColor', value: string) => {
+    updateLayer(id, { [which]: value })
+    const sub = which === 'color' ? 'outline' : 'fill'
+    setStones((prev) => {
+      if (!prev.some((st) => layerOf(st) === id && (st.layer ?? 'outline') === sub && st.color !== value)) return prev
+      const next = prev.map((st) => (layerOf(st) === id && (st.layer ?? 'outline') === sub ? { ...st, color: value } : st))
+      // recolouring must not break the regenerate-in-place link
+      if (lastImageRef.current && lastImageRef.current.after === prev) lastImageRef.current = { ...lastImageRef.current, after: next }
+      return next
+    })
+  }, [updateLayer])
+  const addLayer = useCallback(() => {
+    const from = layersRef.current.find((l) => l.id === activeLayerId) ?? layersRef.current[0]
+    const id = nextLayerId(layersRef.current)
+    setLayers((prev) => [...prev, makeLayer(id, nextLayerName(prev), from)])
+    setActiveLayerId(id)
+    setSelection(new Set())
+    setSelVecs(new Set())
+    setStatus('New layer — pick its stone size, then add text, shapes or lines to it')
+  }, [activeLayerId])
+  const deleteLayer = useCallback((id: number) => {
+    if (layersRef.current.length < 2) return
+    const name = layersRef.current.find((l) => l.id === id)?.name ?? 'layer'
+    pushUndo(stonesRef.current)
+    const keep = stonesRef.current.filter((st) => layerOf(st) !== id)
+    stonesRef.current = keep
+    setStones(keep)
+    setVectors((prev) => prev.filter((v) => layerOf(v) !== id))
+    setLayers((prev) => prev.filter((l) => l.id !== id))
+    setSelection(new Set())
+    setSelVecs(new Set())
+    setStatus(`Deleted ${name} and everything on it — ⌘Z brings it back`)
+  }, [pushUndo])
+  // Move the selection to another layer: it takes that layer's sizes and
+  // colours. Designs moved whole re-stone from their recipe so the spacing
+  // is right for the new size; partial picks and loose stones just change.
+  const moveSelectionToLayer = useCallback((id: number) => {
+    const L = layersRef.current.find((l) => l.id === id)
+    if (!L || (!selection.size && !selVecs.size)) return
+    pushUndo(stonesRef.current)
+    const counts = new Map<number, number>()
+    const picked = new Map<number, number>()
+    for (const st of stonesRef.current) if (st.el != null) counts.set(st.el, (counts.get(st.el) ?? 0) + 1)
+    for (const i of selection) { const el = stonesRef.current[i]?.el; if (el != null) picked.set(el, (picked.get(el) ?? 0) + 1) }
+    const whole = [...picked].filter(([el, n]) => n === counts.get(el) && elementsRef.current[el]).map(([el]) => [el, elBoxOf(el)] as const)
+    const next = stonesRef.current.map((st, i) => {
+      if (!selection.has(i)) return st
+      const fill = (st.layer ?? 'outline') === 'fill'
+      return { ...st, lay: id, size: fill ? L.fillSize : L.size, color: fill ? L.fillColor : L.color }
+    })
+    stonesRef.current = next
+    setStones(next)
+    for (const [el, box] of whole) { const r = elementsRef.current[el]; if (box) regenElement(el, r.sx, r.sy, box, 'nw', false, L) }
+    if (selVecs.size) setVectors((prev) => prev.map((v) => (selVecs.has(v.id) ? { ...v, lay: id } : v)))
+    setSelection(new Set())
+    setActiveLayerId(id)
+    const what = [selection.size ? `${selection.size} stones` : '', selVecs.size ? `${selVecs.size} cut line${selVecs.size === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ')
+    setStatus(`Moved ${what} to ${L.name} (${L.size}${L.fillSize !== L.size ? ` / fill ${L.fillSize}` : ''})`)
+  }, [selection, selVecs, pushUndo, regenElement, elBoxOf])
+  // Clicking an object jumps to its layer, so the panels always describe
+  // what is selected and the next thing added lands beside it.
+  useEffect(() => {
+    const ids = new Set<number>()
+    for (const i of selection) { const st = stonesRef.current[i]; if (st) ids.add(layerOf(st)) }
+    for (const id of selVecs) { const v = vectorsRef.current.find((x) => x.id === id); if (v) ids.add(layerOf(v)) }
+    if (ids.size !== 1) return
+    const [id] = ids
+    if (id !== activeLayerId && layersRef.current.some((l) => l.id === id)) setActiveLayerId(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection, selVecs])
   // ---------------------------------------------------------------------
   // EDITABLE TEXT. A committed text design remembers its recipe (textMeta);
   // selecting it loads the words/font/size back into the Text panel, and
@@ -2058,7 +2198,8 @@ export default function App() {
     const t = window.setTimeout(() => {
       if (!stonesRef.current.some((st) => st.el === el)) return
       const { contours } = textPreview
-      const pts = contoursToStones(contours, rec.mode, true)
+      const lay = layerFor(stonesRef.current.find((st) => st.el === el) ?? { lay: activeLayerId })
+      const pts = contoursToStones(contours, rec.mode, true, lay)
       if (!pts.length) { setStatus('Too small to hold stones at this size'); return }
       // hold the element's top-left anchor on the board
       let oMinX = Infinity, oMinY = Infinity
@@ -2067,7 +2208,7 @@ export default function App() {
       for (const q of pts) { nMinX = Math.min(nMinX, q.x); nMinY = Math.min(nMinY, q.y) }
       pushUndo(stonesRef.current)
       const base = stonesRef.current.filter((st) => st.el !== el)
-      const fresh: Stone[] = pts.map((q) => ({ x: q.x - nMinX + oMinX, y: q.y - nMinY + oMinY, size: q.size ?? curSize, color: q.color, layer: q.layer ?? 'outline', el }))
+      const fresh: Stone[] = pts.map((q) => ({ x: q.x - nMinX + oMinX, y: q.y - nMinY + oMinY, size: q.size ?? lay.size, color: q.color, layer: q.layer ?? 'outline', el, lay: lay.id }))
       const next = [...base, ...fresh]
       stonesRef.current = next
       setStones(next)
@@ -2079,12 +2220,16 @@ export default function App() {
       setStatus(`Re-stoned “${text}” — ${fresh.length} stones`)
     }, 350)
     return () => window.clearTimeout(t)
-  }, [selectedEl, textPreview, text, textHeight, letterSpacing, textBend, font, fontName, weight, selFont, contoursToStones, curSize, pushUndo])
+  }, [selectedEl, textPreview, text, textHeight, letterSpacing, textBend, font, fontName, weight, selFont, contoursToStones, layerFor, activeLayerId, pushUndo])
   // Stone / fill setting changes: if the last text commit is still on the
   // board with its text unchanged, re-stone THAT design in place (same
   // size, new stones). Otherwise the change applies to the live preview.
   // Before this, every size change popped a second copy of the text below
   // the one already added, which read as "it creates a new graphic".
+  // Stone size and colour are layer properties now: setLayerSize /
+  // setLayerColor re-stone or recolour EVERYTHING on the layer, so they are
+  // deliberately not watched here (switching the active layer must not
+  // re-stone the last text at the other layer's size).
   const settingsTick = useRef(0)
   useEffect(() => {
     if (settingsTick.current++ === 0) return // mount
@@ -2109,7 +2254,7 @@ export default function App() {
     }, 250)
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [curSize, gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, fillSize, fillColor, strokePolicy])
+  }, [gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, strokePolicy])
 
   // Typed size from the sidebar: uniform, anchored top-left.
   const resizeSelectedTo = useCallback(
@@ -2226,7 +2371,7 @@ export default function App() {
     if (penOut !== 'line') {
       const placed = stonesAlongPath(pts, close)
       const el = nextEl()
-      const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el }))]
+      const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el, lay: activeLayerId }))]
       stonesRef.current = next
       setStones(next)
       parts.push(`${placed.length} stones`)
@@ -2248,7 +2393,7 @@ export default function App() {
       parts.push('1 cut line')
     }
     setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} path — keep clicking for another, V to select`)
-  }, [penOut, stonesAlongPath, curSize, pushUndo, nextEl])
+  }, [penOut, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
 
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
@@ -2304,6 +2449,7 @@ export default function App() {
         let bestV: number | null = null
         let bestD = slopN + 0.3
         for (const vv of vectors) {
+          if (!layerOpen(vv)) continue
           const d = distToPaths(vecPaths(vv), p)
           if (d < bestD) { bestD = d; bestV = vv.id }
         }
@@ -2359,6 +2505,7 @@ export default function App() {
             let bf = -1
             let bfD = 15
             for (let i = 0; i < stones.length; i++) {
+              if (!layerOpen(stones[i])) continue // never blend into a hidden/locked layer
               const d = Math.hypot(stones[i].x - p.x, stones[i].y - p.y)
               if ((stones[i].layer ?? 'outline') === 'fill') {
                 if (d < bfD) { bfD = d; bf = i }
@@ -2374,10 +2521,10 @@ export default function App() {
               el = stones[best].el
               if (addSize === 'auto') size = stones[best].size
             }
-            mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer, el }])
+            mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer, el, lay: best >= 0 ? layerOf(stones[best]) : activeLayerId }])
             return
           }
-          mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer }])
+          mutate((prev) => [...prev, { x: p.x, y: p.y, size, color, layer, lay: activeLayerId }])
         }
         else mutate((prev) => prev.filter((_, i) => i !== hit)) // click existing stone in add mode = remove
         return
@@ -2387,6 +2534,7 @@ export default function App() {
         let bestV: number | null = null
         let bestD = slop + 0.3
         for (const v of vectors) {
+          if (!layerOpen(v)) continue
           const d = distToPaths(vecPaths(v), p)
           if (d < bestD) { bestD = d; bestV = v.id }
         }
@@ -2439,7 +2587,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen, previewLive, previewStones, imagePreview, textPreview, previewOffX, previewOffsetY, previewBaseY],
+    [toMm, stones, vectors, selVecs, tool, curSize, activeLayerId, layerOpen, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen, previewLive, previewStones, imagePreview, textPreview, previewOffX, previewOffsetY, previewBaseY],
   )
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
 
@@ -2652,7 +2800,7 @@ export default function App() {
         setSelection((prev) => {
           const next = mq.additive ? new Set(prev) : new Set<number>()
           stones.forEach((st, i) => {
-            if (st.x >= x0 && st.x <= x1 && st.y >= y0 && st.y <= y1) next.add(i)
+            if (layerOpen(st) && st.x >= x0 && st.x <= x1 && st.y >= y0 && st.y <= y1) next.add(i)
           })
           return next
         })
@@ -2660,14 +2808,14 @@ export default function App() {
           const next = mq.additive ? new Set(prev) : new Set<number>()
           for (const v of vectors) {
             const b = vecBox(v)
-            if (b.minX >= x0 && b.maxX <= x1 && b.minY >= y0 && b.maxY <= y1) next.add(v.id)
+            if (layerOpen(v) && b.minX >= x0 && b.maxX <= x1 && b.minY >= y0 && b.maxY <= y1) next.add(v.id)
           }
           return next
         })
       }
     }
     setMarquee(null)
-  }, [stones, vectors, regenElement])
+  }, [stones, vectors, regenElement, layerOpen])
 
   // A drag released over the sidebar or outside the window still ends.
   // Leaving the SVG used to cancel it mid-move; now the move continues until
@@ -2813,7 +2961,7 @@ export default function App() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
         e.preventDefault()
-        setSelection(new Set(stones.map((_, i) => i)))
+        setSelection(new Set(stones.flatMap((st, i) => (layerOpen(st) ? [i] : []))))
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomAbout(zoomRef.current * 1.25) }
       if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomAbout(zoomRef.current / 1.25) }
@@ -2826,7 +2974,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen, pending, discardPreviews])
+  }, [selection, stones, layerOpen, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen, pending, discardPreviews])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -2882,8 +3030,8 @@ export default function App() {
 
   // display colour of a stone, exactly as the canvas paints it
   const colorOfStone = useCallback(
-    (st: Stone) => st.color ?? ((st.layer ?? 'outline') === 'fill' ? fillColor : outlineColor),
-    [fillColor, outlineColor],
+    (st: Stone) => st.color ?? ((st.layer ?? 'outline') === 'fill' ? layerFor(st).fillColor : layerFor(st).color),
+    [layerFor],
   )
 
   // ---------- cut / export ----------
@@ -2918,31 +3066,34 @@ export default function App() {
   useEffect(() => {
     if (cutLayer.startsWith('color:') && !cutColors.some(([c]) => `color:${c}` === cutLayer)) setCutLayer('all')
     if (cutLayer.startsWith('size:') && !cutSizes.some(([s]) => `size:${s}` === cutLayer)) setCutLayer('all')
-  }, [cutLayer, cutColors, cutSizes])
+    if (cutLayer.startsWith('layer:') && !layers.some((l) => `layer:${l.id}` === cutLayer)) setCutLayer('all')
+  }, [cutLayer, cutColors, cutSizes, layers])
   // Anything highlighted on the board is what cuts; with nothing selected the
   // Layer picker decides. The selection's own vector lines come along, so a
   // highlighted vector cuts on its own and a highlighted design cuts without
   // the vinyl shapes sitting next to it.
   const selectionCut = selection.size > 0 || selVecs.size > 0
-  const cutJob = useMemo(
-    () =>
-      selectionCut
-        ? {
-            ...job,
-            stones: job.stones.filter((_, i) => selection.has(i)),
-            paths: (job.paths ?? []).filter((_, i) => selVecs.has(job.pathOwner[i])),
-          }
-        : cutLayer === 'all'
-        ? job
-        : cutLayer === 'lines'
-          ? { ...job, stones: [] }
-          : cutLayer.startsWith('color:')
-            ? { ...job, stones: job.stones.filter((st) => colorOfStone(st) === cutLayer.slice(6)), paths: [] }
-            : cutLayer.startsWith('size:')
-              ? { ...job, stones: job.stones.filter((st) => st.size === cutLayer.slice(5)), paths: [] }
-              : { ...job, stones: job.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] },
-    [job, cutLayer, colorOfStone, selectionCut, selection, selVecs],
-  )
+  const vectorById = useMemo(() => new Map(vectors.map((v) => [v.id, v])), [vectors])
+  const cutJob = useMemo(() => {
+    if (selectionCut)
+      return {
+        ...job,
+        stones: job.stones.filter((_, i) => selection.has(i)),
+        paths: (job.paths ?? []).filter((_, i) => selVecs.has(job.pathOwner[i])),
+      }
+    // hidden layers never cut: what the board shows is what the machine gets
+    const pathsWhere = (keep: (owner: VecItem | undefined) => boolean) => (job.paths ?? []).filter((_, i) => keep(vectorById.get(job.pathOwner[i])))
+    const shown = { ...job, stones: job.stones.filter(layerShown), paths: pathsWhere((v) => !v || layerShown(v)) }
+    if (cutLayer === 'all') return shown
+    if (cutLayer === 'lines') return { ...shown, stones: [] }
+    if (cutLayer.startsWith('layer:')) {
+      const id = +cutLayer.slice(6)
+      return { ...shown, stones: shown.stones.filter((st) => layerOf(st) === id), paths: pathsWhere((v) => !!v && layerShown(v) && layerOf(v) === id) }
+    }
+    if (cutLayer.startsWith('color:')) return { ...shown, stones: shown.stones.filter((st) => colorOfStone(st) === cutLayer.slice(6)), paths: [] }
+    if (cutLayer.startsWith('size:')) return { ...shown, stones: shown.stones.filter((st) => st.size === cutLayer.slice(5)), paths: [] }
+    return { ...shown, stones: shown.stones.filter((st) => (st.layer ?? 'outline') === cutLayer), paths: [] }
+  }, [job, cutLayer, colorOfStone, selectionCut, selection, selVecs, layerShown, vectorById])
   // filenames: 'color:#dc2034' -> 'color-dc2034'
   const cutLayerSlug = selectionCut ? 'selection' : cutLayer.replace(/[:#]/g, '-').replace(/--+/g, '-')
   const framedCutJob = useMemo(
@@ -2963,6 +3114,21 @@ export default function App() {
     for (const st of stones) { if ((st.layer ?? 'outline') === 'fill') f++; else o++ }
     return { o, f }
   }, [stones])
+  // what the whole-design cut actually sends once hidden layers are skipped
+  const shownCounts = useMemo(() => {
+    let st = 0, hidden = 0, lines = 0
+    for (const s of stones) { if (layerShown(s)) st++; else hidden++ }
+    for (const v of vectors) if (layerShown(v)) lines += v.base.length
+    return { stones: st, hidden, lines }
+  }, [stones, vectors, layerShown])
+  // what sits on each layer, for the Layers panel and the Cut picker
+  const layerTotals = useMemo(() => {
+    const m = new Map<number, { stones: number; lines: number }>()
+    const bump = (id: number, k: 'stones' | 'lines') => { const e = m.get(id) ?? { stones: 0, lines: 0 }; e[k]++; m.set(id, e) }
+    for (const st of stones) bump(layerOf(st), 'stones')
+    for (const v of vectors) bump(layerOf(v), 'lines')
+    return m
+  }, [stones, vectors])
   const cutData = useCallback(() => serializeCutJob(framedCutJob, {
     format, preset, origin: originCorner, unitsPerMm: gpStep, sendConditions, swapAxes,
     cutOpts: { firmwareCircles: wCircles, overcutMm: overcut, linePreset },
@@ -3034,38 +3200,8 @@ export default function App() {
     })
   }, [gpStep, swapAxes, originCorner])
 
-  // The fill colour picker recolours the EXISTING fill layer live — colour
-  // was baked into each stone at generation, so the picker otherwise only
-  // affected future stones ("fill color changes doesnt work"). No undo entry:
-  // dragging the picker fires a change per frame.
-  useEffect(() => {
-    if (fillColorRef.current === fillColor) return
-    fillColorRef.current = fillColor
-    setStones((prev) => {
-      if (!prev.some((st) => (st.layer ?? 'outline') === 'fill' && st.color !== fillColor)) return prev
-      const next = prev.map((st) =>
-        (st.layer ?? 'outline') === 'fill' ? { ...st, color: fillColor } : st,
-      )
-      // recolouring must not break the regenerate-in-place link
-      if (lastImageRef.current && lastImageRef.current.after === prev)
-        lastImageRef.current = { ...lastImageRef.current, after: next }
-      return next
-    })
-  }, [fillColor])
-  useEffect(() => {
-    if (outlineColorRef.current === outlineColor) return
-    outlineColorRef.current = outlineColor
-    setStones((prev) => {
-      if (!prev.some((st) => (st.layer ?? 'outline') === 'outline' && st.color !== outlineColor)) return prev
-      const next = prev.map((st) =>
-        (st.layer ?? 'outline') === 'outline' ? { ...st, color: outlineColor } : st,
-      )
-      // recolouring must not break the regenerate-in-place link
-      if (lastImageRef.current && lastImageRef.current.after === prev)
-        lastImageRef.current = { ...lastImageRef.current, after: next }
-      return next
-    })
-  }, [outlineColor])
+  // Colour pickers live on the Layers panel now: setLayerColor recolours
+  // the layer's existing stones live (see the layers block above).
 
   // Scale stones about their centroid — the selection if there is one, the
   // whole design otherwise. Positions scale; stone sizes don't (they're
@@ -3419,7 +3555,8 @@ export default function App() {
       for (const p of previewStones ?? [])
         dot((p.x + previewOffX) * zoom, (p.y + previewOffsetY) * zoom, ((sizes[p.size ?? curSize]?.holeMm ?? 3) / 2) * zoom, p.color ?? '#8fb0ff', 0.55)
     stones.forEach((s, i) => {
-      const color = s.color ?? ((s.layer ?? 'outline') === 'fill' ? fillColor : outlineColor)
+      if (!layerShown(s)) return
+      const color = s.color ?? ((s.layer ?? 'outline') === 'fill' ? layerFor(s).fillColor : layerFor(s).color)
       const x = s.x * zoom, y = s.y * zoom, r = (holeOf(s) / 2) * zoom
       if (simView) {
         drawGem(ctx, x, y, r, color)
@@ -3435,7 +3572,7 @@ export default function App() {
       }
     })
     ctx.globalAlpha = 1
-  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, previewOffX, sizes, curSize, holeOf, stoneColor, fillColor, outlineColor, simView])
+  }, [stones, selection, imagePreview, previewStones, previewLive, zoom, canvasW, canvasH, previewOffsetY, previewOffX, sizes, curSize, holeOf, stoneColor, layerFor, layerShown, simView])
 
   const previewPath = useMemo(() => {
     if (!textPreview) return ''
@@ -4071,12 +4208,12 @@ export default function App() {
     void rememberHandle(h)
   }, [])
   const projectContext = useMemo<ProjectContext>(() => ({
-    boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, frameOn, frameMm,
+    boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, frameOn, frameMm, activeLayer: activeLayerId,
     cutter: savedProfile ?? { format, gpStep, originCorner, sendConditions, swapAxes, wCircles, overcut, preset: { ...preset }, linePreset: { ...linePreset } },
-  }), [boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, format, gpStep, originCorner, sendConditions, swapAxes, wCircles, overcut, preset, linePreset, savedProfile, frameOn, frameMm])
+  }), [boardWIn, boardHIn, placement, margin, gap, outlineColor, fillColor, boardColor, garmentColor, format, gpStep, originCorner, sendConditions, swapAxes, wCircles, overcut, preset, linePreset, savedProfile, frameOn, frameMm, activeLayerId])
   const designJson = useCallback(
-    () => JSON.stringify({ v: 2, stones, sizes, elements, vectors, context: projectContext, lastText: lastTextRef.current ? { ...lastTextRef.current, font: undefined } : undefined }),
-    [stones, sizes, elements, vectors, projectContext],
+    () => JSON.stringify({ v: 2, stones, sizes, elements, vectors, layers, context: projectContext, lastText: lastTextRef.current ? { ...lastTextRef.current, font: undefined } : undefined }),
+    [stones, sizes, elements, vectors, layers, projectContext],
   )
   useEffect(() => {
     setRecoveryStatus('Saving recovery…')
@@ -4184,6 +4321,10 @@ export default function App() {
     setElements(dd.elements && typeof dd.elements === 'object' ? dd.elements : {})
     const vecs: VecItem[] = Array.isArray(dd.vectors) ? dd.vectors : []
     setVectors(vecs)
+    const lays = resolveLayers(dd.layers, loaded, vecs, dd.sizes, dd.context ?? {})
+    setLayers(lays)
+    const wantLayer = dd.context?.activeLayer
+    setActiveLayerId(wantLayer != null && lays.some((l) => l.id === wantLayer) ? wantLayer : lays[0].id)
     vecSeq.current = vecs.reduce((m, v) => Math.max(m, v.id), 0) + 1
     // never rewind: undo can bring back stones with ids above this file's max
     elSeq.current = Math.max(elSeq.current, loaded.reduce((m, st) => Math.max(m, st.el ?? 0), 0) + 1)
@@ -4191,7 +4332,7 @@ export default function App() {
     if (dd.context) {
       const c = dd.context
       setBoardWIn(c.boardWIn); setBoardHIn(c.boardHIn); setPlacement(c.placement); setMargin(c.margin); setGap(c.gap)
-      outlineColorRef.current = c.outlineColor; fillColorRef.current = c.fillColor; setOutlineColor(c.outlineColor); setFillColor(c.fillColor); setBoardColor(c.boardColor); setGarmentColor(c.garmentColor)
+      setBoardColor(c.boardColor); setGarmentColor(c.garmentColor)
       if (c.frameOn !== undefined) setFrameOn(c.frameOn)
       if (c.frameMm !== undefined) setFrameMm(c.frameMm)
       setSavedProfile(c.cutter)
@@ -4312,7 +4453,7 @@ export default function App() {
   // undo/redo live up next to pushUndo now
   const hasSel = selection.size > 0
   const hasStones = stones.length > 0
-  const sectionItems = ['Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Production', 'Material', 'Cut']
+  const sectionItems = ['Layers', 'Text', 'Stones', 'Fill', 'Shapes', 'Templates', 'Image', 'Vector cut', 'Align & Pathfinder', 'Edit', 'Production', 'Material', 'Cut']
   const menus: Menu[] = [
     { label: 'File', items: [
       { label: 'New design', onClick: () => { clearAll(); adoptHandle(null, null) }, disabled: !hasStones && !pending && !vectors.length },
@@ -4654,6 +4795,65 @@ export default function App() {
         </div>
 
 
+        <Section title="Layers" defaultOpen>
+          <p className="hint">
+            Each layer has its own stone size, fill stone and colors, so one project can mix SS10 lettering with an SS16 border.
+            New text, shapes, images and cut lines go on the highlighted layer. Click a layer to work on it — clicking an object on the board jumps to its layer.
+          </p>
+          <div className="layers">
+            {layers.map((l) => {
+              const t = layerTotals.get(l.id)
+              const active = l.id === activeLayerId
+              return (
+                <div key={l.id} className={`layer${active ? ' active' : ''}${l.visible ? '' : ' hidden'}`} onClick={() => setActiveLayerId(l.id)}>
+                  <div className="layer-head">
+                    <button className={`laybtn${l.visible ? '' : ' off'}`} title={l.visible ? 'Hide layer (hidden layers are not drawn or cut)' : 'Show layer'}
+                      onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { visible: !l.visible }) }}>{l.visible ? '👁' : '◌'}</button>
+                    <button className={`laybtn${l.locked ? ' on' : ''}`} title={l.locked ? 'Unlock layer' : 'Lock layer (still cuts, but can’t be selected or edited)'}
+                      onClick={(e) => { e.stopPropagation(); updateLayer(l.id, { locked: !l.locked }) }}>{l.locked ? '🔒' : '🔓'}</button>
+                    {renamingLayer === l.id ? (
+                      <input className="layer-name" autoFocus defaultValue={l.name} onClick={(e) => e.stopPropagation()}
+                        onBlur={(e) => { updateLayer(l.id, { name: e.target.value.trim().slice(0, 64) || l.name }); setRenamingLayer(null) }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') (e.target as HTMLInputElement).blur() }} />
+                    ) : (
+                      <span className="layer-name" title="Double-click to rename" onDoubleClick={() => setRenamingLayer(l.id)}>{l.name}</span>
+                    )}
+                    <span className="layer-count">{t?.stones ?? 0} stones{t?.lines ? ` · ${t.lines} line${t.lines === 1 ? '' : 's'}` : ''}</span>
+                  </div>
+                  <div className="layer-ctl">
+                    <label>Stones
+                      <span className="pick">
+                        <input type="color" value={l.color} title="Outline stone color" onChange={(e) => setLayerColor(l.id, 'color', e.target.value)} />
+                        <select value={l.size} onChange={(e) => setLayerSize(l.id, 'size', e.target.value)}>
+                          {sizeKeys.map((k) => <option key={k} value={k} title={`hole ${sizes[k].holeMm} mm`}>{k}</option>)}
+                        </select>
+                      </span>
+                    </label>
+                    <label>Fill
+                      <span className="pick">
+                        <input type="color" value={l.fillColor} title="Fill stone color" onChange={(e) => setLayerColor(l.id, 'fillColor', e.target.value)} />
+                        <select value={l.fillSize} onChange={(e) => setLayerSize(l.id, 'fillSize', e.target.value)}>
+                          {sizeKeys.map((k) => <option key={k} value={k} title={`hole ${sizes[k].holeMm} mm`}>{k}</option>)}
+                        </select>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div className="toolrow">
+            <button onClick={addLayer}>+ New layer</button>
+            <button disabled={layers.length < 2} title="Deletes the layer and everything on it (⌘Z undoes)" onClick={() => deleteLayer(activeLayerId)}>Delete “{activeLayer.name}”</button>
+          </div>
+          <div className="sizeinfo">
+            <b>{activeLayer.name}</b> · stone color swatches
+            <Swatches value={activeLayer.color} onPick={(c) => setLayerColor(activeLayerId, 'color', c)} />
+            <div style={{ marginTop: 6 }}>fill color swatches</div>
+            <Swatches value={activeLayer.fillColor} onPick={(c) => setLayerColor(activeLayerId, 'fillColor', c)} />
+          </div>
+        </Section>
+
         <Section title="Text">
           {/* Output comes FIRST: no stone holes appear until the user says
               rhinestones; cut-lines-only shows just the letter outlines. */}
@@ -4870,21 +5070,12 @@ export default function App() {
           </details>
         </Section>
         <Section title="Stones">
-          <div className="grid2">
-            <label>Size
-              <select value={curSize} onChange={(e) => setCurSize(e.target.value)}>
-                {sizeKeys.map((k) => (
-                  <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>
-                ))}
-              </select>
-            </label>
-            <label>Color
-              <input type="color" value={outlineColor} onChange={(e) => setOutlineColor(e.target.value)} />
-            </label>
+          <div className="sizeinfo">
+            <b>{activeLayer.name}</b> · outline stone <b>{curSize}</b> · hole {sizes[curSize]?.holeMm} mm
+            <span> — size and color are set per layer in the Layers panel</span>
           </div>
-          <Swatches value={outlineColor} onPick={setOutlineColor} />
           <div className="grid2">
-            <label>Hole ⌀ (mm)
+            <label>{curSize} hole ⌀ (mm)
               <input type="number" step={0.1} min={1} max={12} value={sizes[curSize].holeMm}
                 onChange={(e) => setSizes((prev) => ({ ...prev, [curSize]: { ...prev[curSize], holeMm: +e.target.value } }))} />
             </label>
@@ -4937,19 +5128,10 @@ export default function App() {
           )}
         </Section>
         <Section title="Fill">
-          <div className="grid2">
-            <label>Fill stone
-              <select value={fillSize} onChange={(e) => setFillSize(e.target.value)}>
-                {Object.keys(sizes).map((k) => (
-                  <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
-                ))}
-              </select>
-            </label>
-            <label>Color
-              <input type="color" value={fillColor} onChange={(e) => setFillColor(e.target.value)} />
-            </label>
+          <div className="sizeinfo">
+            <b>{activeLayer.name}</b> · fill stone <b>{fillSize}</b> · hole {sizes[fillSize]?.holeMm} mm
+            <span> — set per layer in the Layers panel</span>
           </div>
-          <Swatches value={fillColor} onPick={setFillColor} />
           <div className="sizeinfo">
             Even spacing: stepped on the fill stone ·{' '}
             <b>{((sizes[fillSize]?.holeMm ?? 2.5) + hardGapOf(gap)).toFixed(1)} mm</b>
@@ -5004,8 +5186,8 @@ export default function App() {
             </select>
           </label>
           <p className="hint">
-            Uses the same stone size, spacing, outline and fill settings as text — set those in
-            the Stones and Fill panels. Shapes land in the middle of the view, selected and ready to drag.
+            Stones come in the active layer’s sizes and colors, with the spacing, outline and fill
+            settings from the Stones and Fill panels. Shapes land in the middle of the view, selected and ready to drag.
           </p>
           <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
           <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
@@ -5379,7 +5561,7 @@ export default function App() {
                 ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
                 : tool === 'node'
                   ? 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'
-                  : 'Click along the line you want — stones bead along it at the panel’s stone size and spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels.'}
+                  : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels.'}
           </p>
           {tool === 'pen' && (
             <label>Pen output
@@ -5406,17 +5588,20 @@ export default function App() {
           )}
           <label>New stone size
             <select value={addSize} onChange={(e) => setAddSize(e.target.value)}>
-              <option value="auto">Auto — match nearest stone</option>
+              <option value="auto">Auto — match the nearest stone, else the layer’s ({curSize})</option>
               {Object.keys(sizes).map((k) => (
                 <option key={k} value={k}>{k} · {sizes[k].holeMm} mm</option>
               ))}
             </select>
           </label>
-          <div className="toolrow">
-            <button disabled={!selection.size} onClick={() => {
-              mutate((prev) => prev.map((s, i) => (selection.has(i) ? { ...s, size: curSize } : s)))
-            }}>Set selected → {curSize}</button>
-          </div>
+          <label>Move selection to layer
+            <select value="" disabled={!selection.size && !selVecs.size} onChange={(e) => { if (e.target.value) moveSelectionToLayer(+e.target.value) }}>
+              <option value="">{selection.size || selVecs.size ? 'Choose a layer — it takes that layer’s sizes and colors' : 'Select something on the board first'}</option>
+              {layers.map((l) => (
+                <option key={l.id} value={l.id}>{l.name} · {l.size}{l.fillSize !== l.size ? ` / fill ${l.fillSize}` : ''}</option>
+              ))}
+            </select>
+          </label>
           <div className="toolrow">
             <button
               disabled={!stones.some((st) => (st.layer ?? 'outline') === 'fill')}
@@ -5591,9 +5776,13 @@ export default function App() {
           )}
           <label>Layer
             <select value={cutLayer} disabled={selectionCut} onChange={(e) => setCutLayer(e.target.value)}>
-              <option value="all">Everything ({stones.length} stones{vectors.length ? ` + ${job.paths?.length ?? 0} cut lines` : ''})</option>
+              <option value="all">Everything ({shownCounts.stones} stones{shownCounts.lines ? ` + ${shownCounts.lines} cut lines` : ''}{shownCounts.hidden ? ` · ${shownCounts.hidden} on hidden layers skipped` : ''})</option>
               <option value="outline">Outline stones only ({layerCounts.o})</option>
               <option value="fill">Fill stones only ({layerCounts.f})</option>
+              {layers.length > 1 && layers.map((l) => {
+                const t = layerTotals.get(l.id)
+                return <option key={`l${l.id}`} value={`layer:${l.id}`}>Layer “{l.name}” only ({t?.stones ?? 0} stones{t?.lines ? ` + ${t.lines} lines` : ''})</option>
+              })}
               {cutColors.length > 1 && cutColors.map(([c, nn]) => (
                 <option key={`c${c}`} value={`color:${c}`}>Color {c} only ({nn})</option>
               ))}
@@ -5980,7 +6169,7 @@ export default function App() {
               {snapLines.y != null && <line x1={0} y1={snapLines.y * zoom} x2={canvasW * zoom} y2={snapLines.y * zoom} stroke="#ff5f9e" strokeWidth={1} strokeDasharray="5 4" />}
             </g>
           )}
-          {vectors.map((v) => (
+          {vectors.filter(layerShown).map((v) => (
             <path
               key={v.id}
               d={vecD(v.base)}

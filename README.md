@@ -13,7 +13,8 @@ npm run dev     # http://localhost:5173 — use Chrome or Edge (WebUSB)
 
 ## Workflow
 
-1. **Stones** — pick a size (SS6–SS34). Hole diameter is editable per size
+1. **Layers** — each layer has its own stone size, fill stone and colors (SS6–SS34), so one project can mix SS10 lettering with an SS16 border. New text, shapes, images and cut lines go on the active layer; changing a layer's size re-stones everything on it. Layers can be hidden (not drawn or cut) or locked, and the Cut picker can cut one layer at a time.
+1. **Stones** — hole diameter is editable per size
    (hole = stone + clearance so stones brush in). Min gap is the smallest
    edge-to-edge distance between holes; overlapping stones are auto-removed.
 2. **Text** — upload any .ttf/.otf, type text, set height in mm, choose

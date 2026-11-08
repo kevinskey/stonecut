@@ -495,8 +495,8 @@ details.sec summary { color: #b0bbd0; }
 .start-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .start-actions button { min-height: 42px; }
 .saved-profile { padding: 10px; background: #202737; border: 1px solid #52617b; border-radius: 8px; }
-.app[data-workspace="design"] .panel > details.sec:not([data-section="Text"]):not([data-section="Stones"]):not([data-section="Fill"]):not([data-section="Shapes"]):not([data-section="Templates"]):not([data-section="Image"]):not([data-section="Vector cut"]),
-.app[data-workspace="prepare"] .panel > details.sec:not([data-section="Edit"]):not([data-section="Align & Pathfinder"]):not([data-section="Production"]),
+.app[data-workspace="design"] .panel > details.sec:not([data-section="Layers"]):not([data-section="Text"]):not([data-section="Stones"]):not([data-section="Fill"]):not([data-section="Shapes"]):not([data-section="Templates"]):not([data-section="Image"]):not([data-section="Vector cut"]),
+.app[data-workspace="prepare"] .panel > details.sec:not([data-section="Layers"]):not([data-section="Edit"]):not([data-section="Align & Pathfinder"]):not([data-section="Production"]),
 .app[data-workspace="produce"] .panel > details.sec:not([data-section="Production"]):not([data-section="Material"]):not([data-section="Cut"]) { display: none; }
 @media (max-width: 760px) {
   .app { height: 100dvh; }
@@ -524,3 +524,30 @@ details.sec summary { color: #b0bbd0; }
 .statusbar .pending-bar { display: flex; flex-direction: column; gap: 2px; }
 .statusbar .pending-bar label { font-size: 11px; }
 .statusbar .pending-bar input { padding: 4px 6px; }
+
+/* Layers panel */
+.layers { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 8px; }
+.layer {
+  padding: 6px 8px 4px;
+  border: 1px solid #2b3240;
+  border-radius: 8px;
+  background: #1d2230;
+  cursor: pointer;
+}
+.layer.active { border-color: #3b5bd9; background: #1b2340; box-shadow: inset 3px 0 0 #3b5bd9; }
+.layer.hidden { opacity: 0.55; }
+.layer-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.laybtn {
+  width: 26px; height: 24px; padding: 0; flex: none; margin: 0;
+  font-size: 13px; line-height: 1; border-radius: 6px;
+}
+.laybtn.off, .laybtn.on { color: #f0b95e; border-color: #4a3f22; }
+.layer-name { flex: 1; min-width: 0; font-weight: 600; color: #e8edf7; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer.active .layer-name { color: #fff; }
+input.layer-name { margin: 0; padding: 3px 6px; font-weight: 600; }
+.layer-count { flex: none; font-size: 11px; color: #8b96ab; }
+.layer-ctl { display: flex; gap: 8px; margin-top: 4px; }
+.layer-ctl > label { flex: 1; min-width: 0; margin-bottom: 4px; }
+.layer-ctl .pick { display: flex; align-items: center; gap: 4px; margin-top: 3px; }
+.layer-ctl .pick input[type="color"] { width: 28px; height: 28px; padding: 0; border: 1px solid #313949; border-radius: 6px; background: #10131a; flex: none; }
+.layer-ctl .pick select { margin-top: 0; min-width: 0; }

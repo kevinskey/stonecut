@@ -5,6 +5,7 @@ export interface Stone {
   color?: string // display/design color (multi-color templates)
   layer?: 'outline' | 'fill' // cut separation — templates are cut per layer
   el?: number // element id — each committed design is a free-moving unit
+  lay?: number // layer id (src/layers.ts); absent = layer 1, projects saved before layers
 }
 
 export interface StoneSpec {
