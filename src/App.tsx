@@ -3521,6 +3521,17 @@ export default function App() {
             <button onClick={addLayer}>+ New layer for a different size</button>
           </>
         )}
+        <div className="chiprow" style={{ marginTop: 8, marginBottom: 0, alignItems: 'center' }}>
+          <span className="dim" style={{ margin: '0 4px 0 0' }}>Spacing {gap} mm</span>
+          {[['Dense', 0.5], ['Standard', 0.8], ['Open', 3], ['Scatter', 8]].map(([name, v]) => (
+            <button key={name as string} className={`chip ${gap === v ? 'active' : ''}`} onClick={() => setGap(v as number)}>{name}</button>
+          ))}
+        </div>
+        {gap >= 3 && (
+          <div className="dim" style={{ color: '#e8d5a0' }}>
+            {gap >= 8 ? 'Scatter' : 'Open'} spacing leaves {gap} mm between stones, so outlines come out as dots. Use Standard for a solid line.
+          </div>
+        )}
       </div>
     )
   }
