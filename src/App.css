@@ -329,6 +329,7 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   top: 0;
   left: 0;
   z-index: 2;
+  user-select: none;
   display: flex;
   gap: 10px;
   align-items: center;
