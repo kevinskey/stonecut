@@ -23,6 +23,7 @@ export const DEFAULT_SIZES: Record<string, StoneSpec> = {
   SS16: { stoneMm: 4.0, holeMm: 4.6 },
   SS20: { stoneMm: 4.8, holeMm: 5.4 },
   SS30: { stoneMm: 6.4, holeMm: 7.0 },
+  SS34: { stoneMm: 7.2, holeMm: 7.8 },
 }
 
 // Saved dimensions are production geometry, including values that used to

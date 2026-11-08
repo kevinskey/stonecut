@@ -13,7 +13,7 @@ npm run dev     # http://localhost:5173 — use Chrome or Edge (WebUSB)
 
 ## Workflow
 
-1. **Stones** — pick a size (SS6–SS30). Hole diameter is editable per size
+1. **Stones** — pick a size (SS6–SS34). Hole diameter is editable per size
    (hole = stone + clearance so stones brush in). Min gap is the smallest
    edge-to-edge distance between holes; overlapping stones are auto-removed.
 2. **Text** — upload any .ttf/.otf, type text, set height in mm, choose
