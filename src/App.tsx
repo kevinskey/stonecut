@@ -1304,10 +1304,13 @@ export default function App() {
     if (mode !== 'outline') {
       const fHole = sizes[L.fillSize]?.holeMm ?? 2.5
       const fGap = hardGapOf(gap)
-    // The lattice steps on the FILL stone's own pitch, not the outline's.
-          // Inheriting the outline rhythm spaces small fill stones as if they
-          // were the big outline ones, which reads as padding on both axes.
-          const fRhythm = fHole + fGap
+      // The lattice steps on the FILL stone's own pitch, not the outline's.
+      // Inheriting the outline rhythm spaces small fill stones as if they
+      // were the big outline ones, which reads as padding on both axes.
+      // The DESIGN spacing applies to the fill too: fGap is only the legal
+      // floor (capped at 1.2 mm), so stepping on fHole + fGap made Open and
+      // Scatter fill exactly like Standard — "no difference" on the board.
+      const fRhythm = fHole + gap
         // A fill stone only has to sit inside the shape; its clearance from
           // the outline is already enforced per-pair by fIdx below. Insetting a
           // whole rhythm as well padded the fill twice and left a dead band
@@ -3640,7 +3643,7 @@ export default function App() {
         </div>
         {gap >= 3 && (
           <div className="dim" style={{ color: '#e8d5a0' }}>
-            {gap >= 8 ? 'Scatter' : 'Open'} spacing leaves {gap} mm between stones, so outlines come out as dots. Use Standard for a solid line.
+            {gap >= 8 ? 'Scatter' : 'Open'} spacing leaves {gap} mm between stones: outlines come out as dots and fills spread out. Use Standard for solid work.
           </div>
         )}
       </div>
