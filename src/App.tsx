@@ -3492,6 +3492,38 @@ export default function App() {
   }, [duplicateSelection, copySelection, pasteClipboard])
 
   const sizeKeys = Object.keys(sizes)
+  // Stone size inline where things get added (Text, Shapes, Image). It is
+  // the ACTIVE LAYER's size — the same control as the Layers panel, within
+  // reach — so a change re-stones whatever is already on that layer.
+  const layerSizeRow = (showFill: boolean) => {
+    const t = layerTotals.get(activeLayerId)
+    const busy = (t?.stones ?? 0) + (t?.lines ?? 0) > 0
+    return (
+      <div className="sizeinfo layerrow">
+        <div>Adding to layer <b>{activeLayer.name}</b>{busy ? <span> · {t?.stones ?? 0} stones already on it</span> : <span> · empty</span>}</div>
+        <div className="grid2">
+          <label>Stone size
+            <select value={activeLayer.size} onChange={(e) => setLayerSize(activeLayerId, 'size', e.target.value)}>
+              {sizeKeys.map((k) => <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>)}
+            </select>
+          </label>
+          {showFill && (
+            <label>Fill stone
+              <select value={activeLayer.fillSize} onChange={(e) => setLayerSize(activeLayerId, 'fillSize', e.target.value)}>
+                {sizeKeys.map((k) => <option key={k} value={k}>{k} · hole {sizes[k].holeMm} mm</option>)}
+              </select>
+            </label>
+          )}
+        </div>
+        {busy && (
+          <>
+            <div className="dim">Changing the size re-stones everything on this layer.</div>
+            <button onClick={addLayer}>+ New layer for a different size</button>
+          </>
+        )}
+      </div>
+    )
+  }
   // memoised: a fresh object every render made the stone-canvas effect
   // repaint ALL stones on every unrelated state change
   const stoneColor = useMemo(() => {
@@ -5041,6 +5073,7 @@ export default function App() {
               <span> · {Math.round(textPreview.widthMm)} × {textHeight} mm in {fontName}{previewStones ? ` · ${previewStones.length} stones` : ''}</span>
             </div>
           )}
+          {textOutput !== 'lines' && layerSizeRow(textMode !== 'outline')}
           {/* The commit button lives HERE too — the Stones section's copy was
               below the fold of a collapsed panel and nobody found it. */}
           <button className={`primary${pendingText ? ' urgent' : ''}`} disabled={!textOutput || !textPreview} onClick={addTextOutput}>
@@ -5185,9 +5218,10 @@ export default function App() {
               <option value="both">Outline + fill</option>
             </select>
           </label>
+          {layerSizeRow(shapeMode !== 'outline')}
           <p className="hint">
-            Stones come in the active layer’s sizes and colors, with the spacing, outline and fill
-            settings from the Stones and Fill panels. Shapes land in the middle of the view, selected and ready to drag.
+            Spacing, outline and fill style come from the Stones and Fill panels. Shapes land in the
+            middle of the view, selected and ready to drag.
           </p>
           <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
           <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
@@ -5282,6 +5316,7 @@ export default function App() {
             {imageMaskUrl && <figure><img src={imageMaskUrl} alt="Threshold and cleanup mask" /><figcaption>Mask</figcaption></figure>}
             {imageStoneUrl && <figure><img src={imageStoneUrl} alt="Generated stone layout" /><figcaption>Stones</figcaption></figure>}
           </div>}
+          {layerSizeRow(imgMode !== 'outline')}
           <div className="grid2">
             <label>Width (mm)
               <input type="number" min={20} max={600} value={imgWidth} onChange={(e) => setImgWidth(+e.target.value)} />

@@ -551,3 +551,9 @@ input.layer-name { margin: 0; padding: 3px 6px; font-weight: 600; }
 .layer-ctl .pick { display: flex; align-items: center; gap: 4px; margin-top: 3px; }
 .layer-ctl .pick input[type="color"] { width: 28px; height: 28px; padding: 0; border: 1px solid #313949; border-radius: 6px; background: #10131a; flex: none; }
 .layer-ctl .pick select { margin-top: 0; min-width: 0; }
+
+/* inline "adding to layer" size row (Text / Shapes / Image) */
+.layerrow .grid2 { margin-top: 6px; }
+.layerrow .grid2 > label { margin-bottom: 2px; }
+.layerrow .dim { font-size: 11px; color: #8b96ab; margin: 2px 0 4px; }
+.layerrow > button { width: 100%; margin-top: 0; }
