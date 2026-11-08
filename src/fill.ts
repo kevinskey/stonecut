@@ -1388,8 +1388,11 @@ export function outlineOrSpine(
       // stamp radius is CAPPED: every width comparison in this function
       // saturates near ~needW, so stamping a 50mm blob's true inscribed disk
       // (hundreds of px) only burned time — widths clamp at the cap and the
-      // classifications are identical
-      const dvc = Math.min(dv, 7 * pxPerMm)
+      // classifications are identical. The cap scales with the pitch: the
+      // widest comparison is needW * 1.6, which passes 14mm for SS34 or
+      // Open/Scatter spacing, and a fixed cap there made every wide shape
+      // look stroke-like.
+      const dvc = Math.min(dv, Math.max(7, (needW * 1.6) / 2 + 1) * pxPerMm)
       const rr = dvc * dvc
       const val = (2 * dvc) / pxPerMm
       const r0 = Math.ceil(dvc)
@@ -3458,6 +3461,8 @@ export function fillStones(
   // the shape into lattice territory (wide) and centered-row territory
   // (stroke-like) — mixing the two in one channel is what made fill rows
   // weave between on-grid and centered stones.
+  const strokeCut = pitch * 3
+  const strokeCapPx = Math.max(7, (strokeCut * 1.15) / 2 + 1) * pxPerMm
   const strokeW = new Float32Array(w * h)
   for (let y = 1; y < h - 1; y++)
     for (let x = 1; x < w - 1; x++) {
@@ -3471,9 +3476,12 @@ export function fillStones(
           dv >= dt[i2 + w - 1] && dv >= dt[i2 + w + 1])
       )
         continue
-      // capped like the outline's wide[]: the row/lattice/dot thresholds all
-      // sit under ~12mm of width, so bigger inscribed disks only cost time
-      const dvc = Math.min(dv, 7 * pxPerMm)
+      // capped like the outline's wide[]: anything wider than the row/lattice
+      // threshold is "wide", so bigger inscribed disks only cost time. The
+      // cap must clear the threshold, which grows with the pitch: a fixed
+      // 14mm cap under a 14.5mm Open-spacing threshold made a 200mm star
+      // read as a thin stroke and fill with skeleton rows.
+      const dvc = Math.min(dv, strokeCapPx)
       const rr = dvc * dvc
       const val = (2 * dvc) / pxPerMm
       const r0 = Math.ceil(dvc)
@@ -3490,7 +3498,6 @@ export function fillStones(
   // The call is made PER MASK COMPONENT, not per pixel: a channel whose width
   // hovers at the threshold otherwise flickers between regimes along its own
   // length, alternating brick clusters with blocked row segments.
-  const strokeCut = pitch * 3
   const fillComps = labelComponents(mask, w, h)
   const compRows = new Uint8Array(fillComps.count + 1) // 1 = centered-row territory
   const compDot = new Uint8Array(fillComps.count + 1) // 1 = dot: one centred stone
