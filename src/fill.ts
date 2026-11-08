@@ -3698,6 +3698,31 @@ export function fillStones(
   // Walk the lattice at a given offset. `exact` decides each stone the slow,
   // accurate way; the cheap pixel test is only ever used to SCORE offsets
   // against each other, never to place a stone.
+  // Distance to the OUTLINE STONES' PATH (or to the glyph edge when there is
+  // no outline), as a field: one lookup answers "how far is this point from
+  // the wall" for the lattice's offset search and for the concentric rings.
+  let wallDt: Float32Array = dt
+  if (fixedPts.length) {
+    const wallBin = new Uint8Array(grid.bin)
+    const zero = (xMm: number, yMm: number) => {
+      const xi = Math.round(xMm * pxPerMm + padPx)
+      const yi = Math.round(yMm * pxPerMm + padPx)
+      if (xi >= 0 && yi >= 0 && xi < w && yi < h) wallBin[yi * w + xi] = 0
+    }
+    for (const s2 of fixedPts) zero(s2.x, s2.y)
+    for (const { a, b } of segs) {
+      const n2 = Math.max(1, Math.ceil((Math.hypot(b.x - a.x, b.y - a.y) * pxPerMm) / 0.5))
+      for (let i = 0; i <= n2; i++) zero(a.x + ((b.x - a.x) * i) / n2, a.y + ((b.y - a.y) * i) / n2)
+    }
+    wallDt = distanceTransform({ bin: wallBin, w, h, pxPerMm, padPx })
+  }
+  const wallAt = (xMm: number, yMm: number) => {
+    const xi = Math.round(xMm * pxPerMm + padPx)
+    const yi = Math.round(yMm * pxPerMm + padPx)
+    if (xi < 0 || yi < 0 || xi >= w || yi >= h) return 0
+    return wallDt[yi * w + xi] / pxPerMm
+  }
+
   const walk = (dx: number, dy: number, exact: boolean): Pt[] => {
     const got: Pt[] = []
     for (let r = -1; r <= nRows; r++) {
@@ -3719,13 +3744,48 @@ export function fillStones(
           const lbl2 = compAt(xMm, yMm)
           if (compRows[lbl2] || compDot[lbl2]) continue // rows/dots own these
         }
-        if (!clearOfOutline(p)) continue
+        // candidate: inside the fill area. 1 = placed, 2 = refused by the wall
+        if (!clearOfOutline(p)) {
+          rowStat.push(2)
+          rowPt.push(p)
+          continue
+        }
         if (!idx.canPlace(p)) continue
+        rowStat.push(1)
+        rowPt.push(p)
         got.push(p)
       }
+      // ROW COHERENCE. A run of candidates along one row is a row or it is
+      // nothing. A row running beside a wall at the clearance boundary is
+      // refused stone by stone as the wall wobbles — three stones, a gap,
+      // two more — and those survivors read as mistakes. The tell is a
+      // refusal BETWEEN two placed stones: a run that merely ends at a wall
+      // (a lattice row crossing a diagonal leg) is refused only at its ends
+      // and keeps what it has. A run with a quarter or more of its candidates
+      // refused in its interior is dropped whole; the offset search then
+      // favours a lattice phase whose rows clear.
+      let i0 = 0
+      while (i0 < rowStat.length) {
+        let i1 = i0
+        while (i1 + 1 < rowStat.length && Math.hypot(rowPt[i1 + 1].x - rowPt[i1].x, rowPt[i1 + 1].y - rowPt[i1].y) < stepX * 1.05) i1++
+        let first = -1
+        let last = -1
+        for (let i = i0; i <= i1; i++) if (rowStat[i] === 1) { if (first < 0) first = i; last = i }
+        if (first >= 0) {
+          let inner = 0
+          for (let i = first; i <= last; i++) if (rowStat[i] === 2) inner++
+          if (inner > 0 && inner >= (last - first + 1) * 0.25)
+            for (let i = i0; i <= i1; i++) if (rowStat[i] === 1) got.splice(got.indexOf(rowPt[i]), 1)
+        }
+        i0 = i1 + 1
+      }
+      rowStat.length = 0
+      rowPt.length = 0
     }
     return got
   }
+  const rowStat: number[] = []
+  const rowPt: Pt[] = []
 
   // Trim a path's ends back to legal positions, then push each end out along
   // its own tangent (direction over the last ~2mm) by up to `maxMm`, as long
@@ -3788,10 +3848,37 @@ export function fillStones(
           const lim = rhythm * 1.8
           const a0 = curP[0], a1 = curP[curP.length - 1]
           const b0 = c[0], b1 = c[c.length - 1]
-          if (dd(a1, b0) <= lim) curP = curP.concat(c)
-          else if (dd(a1, b1) <= lim) curP = curP.concat([...c].reverse())
-          else if (dd(a0, b1) <= lim) curP = c.concat(curP)
-          else if (dd(a0, b0) <= lim) curP = [...c].reverse().concat(curP)
+          // Join only where the second fragment CONTINUES the first: at a
+          // fork the stem's two halves join through the junction, and the
+          // leg that forks off stays its own row. Joining by proximity alone
+          // chained a stem into a leg into a stub, a path that doubled back
+          // on itself and could not hold an even run.
+          const dirAt = (pth: Pt[], atEnd: boolean): Pt | null => {
+            const n2 = pth.length
+            const e = atEnd ? pth[n2 - 1] : pth[0]
+            let k2 = atEnd ? n2 - 1 : 0
+            const st = atEnd ? -1 : 1
+            while (k2 + st >= 0 && k2 + st < n2 && dd(pth[k2 + st], e) < 2) k2 += st
+            const bk = pth[k2]
+            const l = dd(e, bk)
+            return l < 1e-6 ? null : { x: (e.x - bk.x) / l, y: (e.y - bk.y) / l }
+          }
+          // outgoing direction of curP's end must agree with the gap and
+          // with the incoming direction of c's start
+          const straight = (outDir: Pt | null, from: Pt, to: Pt, inDir: Pt | null) => {
+            const l = dd(from, to)
+            if (l < 1e-6) return true
+            const g = { x: (to.x - from.x) / l, y: (to.y - from.y) / l }
+            const cos = 0.5 // 60°
+            if (outDir && outDir.x * g.x + outDir.y * g.y < cos) return false
+            if (inDir && inDir.x * g.x + inDir.y * g.y < cos) return false
+            return true
+          }
+          const rev = (pth: Pt[]) => [...pth].reverse()
+          if (dd(a1, b0) <= lim && straight(dirAt(curP, true), a1, b0, dirAt(c, false))) curP = curP.concat(c)
+          else if (dd(a1, b1) <= lim && straight(dirAt(curP, true), a1, b1, dirAt(rev(c), false))) curP = curP.concat(rev(c))
+          else if (dd(a0, b1) <= lim && straight(dirAt(c, true), b1, a0, dirAt(curP, false))) curP = c.concat(curP)
+          else if (dd(a0, b0) <= lim && straight(dirAt(rev(c), true), b0, a0, dirAt(curP, false))) curP = rev(c).concat(curP)
           else continue
           pool.splice(k, 1)
           grew = true
@@ -3812,17 +3899,29 @@ export function fillStones(
       for (let k = 1; k < pth.length; k++)
         len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
       if (len < rhythm) continue
-      const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
-        const drop = () => {
+      const RDBG = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG
+      const why = [0, 0, 0]
+      const raw = placeOpenEven(pth, pitch, idx, rhythm)
+      const got = raw.filter((q) => {
+        const drop = (k: number) => {
+          why[k]++
           idx.remove(q)
           return false
         }
-        if (dtAt(q.x, q.y) < minPx) return drop()
-        if (!clearOfOutline(q)) return drop()
+        if (dtAt(q.x, q.y) < minPx) return drop(0)
+        if (!clearOfOutline(q)) {
+          if (RDBG) {
+            let dmin = Infinity
+            for (const f2 of fixedPts) dmin = Math.min(dmin, Math.hypot(f2.x - q.x, f2.y - q.y))
+            console.error(`    wall-refused (${q.x.toFixed(1)},${q.y.toFixed(1)}) nearest outline stone ${dmin.toFixed(2)} need ${outlineNeed.toFixed(2)} wallDt ${wallAt(q.x, q.y).toFixed(2)}`)
+          }
+          return drop(1)
+        }
         // the lattice already covers here — rows only fill its holes
-        if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < nearOut)) return drop()
+        if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < nearOut)) return drop(2)
         return true
       })
+      if (RDBG) console.error(`  skel path len=${len.toFixed(1)} pts=${pth.length} from (${pth[0].x.toFixed(1)},${pth[0].y.toFixed(1)}) to (${pth[pth.length - 1].x.toFixed(1)},${pth[pth.length - 1].y.toFixed(1)}) raw=${raw.length} kept=${got.length} dropped(inset,wall,near)=${why.join(',')}`)
       // Coherence: an interior row is a RUN or it is nothing. Mixed
       // outline/fill sizes put the medial right at the wall-clearance
       // boundary, and the legality flicker shredded rows into singles and
@@ -3875,26 +3974,7 @@ export function fillStones(
     // thresholded region, so a ring at exactly the floor loses stones to
     // rounding
     const rowStep = rhythm + 0.35
-    let wallDt: Float32Array
-    let startOff: number
-    if (fixedPts.length) {
-      const wallBin = new Uint8Array(grid.bin)
-      const zero = (xMm: number, yMm: number) => {
-        const xi = Math.round(xMm * pxPerMm + padPx)
-        const yi = Math.round(yMm * pxPerMm + padPx)
-        if (xi >= 0 && yi >= 0 && xi < w && yi < h) wallBin[yi * w + xi] = 0
-      }
-      for (const s of fixedPts) zero(s.x, s.y)
-      for (const { a, b } of segs) {
-        const n = Math.max(1, Math.ceil((Math.hypot(b.x - a.x, b.y - a.y) * pxPerMm) / 0.5))
-        for (let i = 0; i <= n; i++) zero(a.x + ((b.x - a.x) * i) / n, a.y + ((b.y - a.y) * i) / n)
-      }
-      wallDt = distanceTransform({ bin: wallBin, w, h, pxPerMm, padPx })
-      startOff = outlineNeed + 0.25
-    } else {
-      wallDt = dt
-      startOff = startInsetMm + 0.3
-    }
+    const startOff = fixedPts.length ? outlineNeed + 0.25 : startInsetMm + 0.3
 
     // Marching squares traces a pixel staircase up to ~27% longer than the
     // true curve; smooth it and resample to ~1mm chords so arc length
@@ -4239,16 +4319,43 @@ export function fillStones(
     // MATERIAL's own skeleton instead — continuous, exactly what fill-only
     // mode does — and let per-stone legality plus the run cull drop what
     // the walls refuse.
-    const materialRows = out.length < 3 && fixedPts.length > 0
+    // The same shattering hits any STROKE-LIKE pocket under an outline: the
+    // clearance stamp pinches the channel wherever the walls wobble in, the
+    // pocket's skeleton comes out in pieces, and a condensed K's stem gets
+    // its centre row in the top half only. So every material component that
+    // holds a stroke-like pocket is rowed from its own skeleton too; the
+    // per-stone checks and the 3+ run cull keep those rows honest.
+    let anyStrokePocket = false
+    for (let lbl = 1; lbl <= fillComps.count; lbl++) if (compRows[lbl]) anyStrokePocket = true
+    const materialRows = fixedPts.length > 0 && (out.length < 3 || anyStrokePocket)
     if (materialRows) {
       const mat2 = labelComponents(grid.bin, w, h)
+      const wanted = new Uint8Array(mat2.count + 1)
+      if (out.length < 3) wanted.fill(1)
+      else
+        for (let i = 0; i < w * h; i++) {
+          const lbl = fillComps.labels[i]
+          if (lbl && compRows[lbl] && mat2.labels[i]) wanted[mat2.labels[i]] = 1
+        }
+      // The channel: material at least the nesting distance from the wall
+      // path (a fill stone may sit that close to the wall midway between
+      // two outline stones). Its skeleton is the stroke's own midline with
+      // far smaller end forks than the whole letter's skeleton has.
+      let medD = 0
+      {
+        const ds = segs.map((sg) => Math.hypot(sg.b.x - sg.a.x, sg.b.y - sg.a.y)).sort((p2, q2) => p2 - q2)
+        medD = ds.length ? ds[ds.length >> 1] : 0
+      }
+      const sagNeed = Math.sqrt(Math.max(0, outlineNeed * outlineNeed - (medD / 2) ** 2)) + 0.1
+      const sagPx = sagNeed * pxPerMm
       for (let ml = 1; ml <= mat2.count; ml++) {
+        if (!wanted[ml]) continue
         let any = false
         for (let i = 0; i < w * h; i++) {
-          cm[i] = mat2.labels[i] === ml ? 1 : 0
+          cm[i] = mat2.labels[i] === ml && wallDt[i] >= sagPx ? 1 : 0
           if (cm[i]) any = true
         }
-        if (any) rowsFromMask(cm)
+        if (any) rowsFromMask(cm, rhythm * 1.05, rhythm)
       }
     }
     for (let lbl = 1; lbl <= fillComps.count; lbl++) {
