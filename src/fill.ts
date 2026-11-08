@@ -659,23 +659,31 @@ function tryEvenLayout(
   // and judging that against a rhythm-width bar would reject the only correct
   // answer. The bar is for FOREIGN stones intruding on a run, never for the
   // run's own even spacing.
-  const fits = (pts: Pt[], arcs: number[], sp: number) => {
+  // Why a layout fails: '' = fits; 'self' = the run collides with itself
+  // (curvature shortens the chords); 'near' = a foreign stone blocks it,
+  // with the closest blocker's distance; 'tangent' = crowded along the run.
+  type Verdict = { why: '' | 'self' | 'near' | 'tangent' | 'dup'; near?: number }
+  const fits = (pts: Pt[], arcs: number[], sp: number): Verdict => {
     const minSep = Math.min(wantSep, sp)
     for (let i = 0; i < pts.length; i++) {
-      if (!idx.canPlace(pts[i])) return false
+      if (!idx.canPlace(pts[i])) {
+        let near = Infinity
+        for (const o of idx.within(pts[i], idx.minDist)) near = Math.min(near, Math.hypot(o.x - pts[i].x, o.y - pts[i].y))
+        return { why: 'near', near }
+      }
       const t = tangentAt(arcs[i])
       if (t)
         for (const o of idx.within(pts[i], minSep)) {
           const dx = o.x - pts[i].x
           const dy = o.y - pts[i].y
           const l = Math.hypot(dx, dy)
-          if (l < 1e-9) return false
-          if (Math.abs((dx / l) * t.x + (dy / l) * t.y) > 0.7) return false
+          if (l < 1e-9) return { why: 'dup' }
+          if (Math.abs((dx / l) * t.x + (dy / l) * t.y) > 0.7) return { why: 'tangent' }
         }
       for (let j = 0; j < i; j++)
-        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pitch - 1e-6) return false
+        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < pitch - 1e-6) return { why: 'self' }
     }
-    return true
+    return { why: '' }
   }
   const ideal = includeEnds
     ? Math.max(2, Math.round(L / rhythm) + 1)
@@ -686,16 +694,44 @@ function tryEvenLayout(
   // does is far too sparse: a V dropped from 47 stones at 4.97mm to 37 at
   // 6.99mm. Better to hand those back to the older placer untouched.
   const floor = Math.max(includeEnds ? 2 : 1, ideal - 1)
-  for (let m = ideal; m >= floor; m--) {
-    const arcs: number[] = []
+  // PHASE SEARCH. A run beside another row — the second wall of a stroke
+  // just too narrow for its stones to sit side by side — finds its even
+  // positions blocked one by one by the first wall, and with a single phase
+  // on offer the whole run fell through to the per-stone dodge, which
+  // breaks the beat: that is the ragged bowl on a P. Sliding the whole run
+  // by a fraction of its beat keeps it even and lets it interleave with the
+  // row beside it. The end gaps then differ from the interior beat, so the
+  // shifts are small and tried after the centred layout; a shift that
+  // crowds an anchor stone is rejected by the spacing index like any other.
+  const phases = includeEnds ? [0] : [0, 0.5, -0.5, 0.25, -0.25, 0.4, -0.4]
+  // CURVATURE. Stones are divided by ARC length, and on a bend the chord
+  // between neighbours is shorter than the arc: a run at exactly the floor
+  // along a bowl collides with ITSELF, and one stone fewer does not clear a
+  // tight curve either. When the run's own geometry is the blocker (self
+  // collision, or the anchor stone sitting just under the floor by the same
+  // chord shortfall) keep shedding stones, down to ~70% of the ideal count:
+  // a slower beat that stays even beats the dodge's broken one. Foreign
+  // blockers still stop at one stone fewer, as before.
+  const sparseFloor = Math.max(includeEnds ? 2 : 1, Math.ceil(ideal * 0.7))
+  let curved = false
+  for (let m = ideal; m >= sparseFloor; m--) {
+    if (m < floor && !curved) break
     const sp = includeEnds ? L / (m - 1) : L / (m + 1)
     if (sp < pitch * 1.005) continue
-    if (includeEnds) for (let i = 0; i < m; i++) arcs.push(aArc + i * sp)
-    else for (let i = 1; i <= m; i++) arcs.push(aArc + i * sp)
-    const pts = arcs.map((s) => pointAt(path, s))
-    if (!fits(pts, arcs, sp)) continue
-    for (const p of pts) idx.add(p)
-    return pts
+    for (const f of phases) {
+      if (f !== 0 && m < 2) break // a single stone has no beat to slide along
+      const arcs: number[] = []
+      if (includeEnds) for (let i = 0; i < m; i++) arcs.push(aArc + i * sp)
+      else for (let i = 1; i <= m; i++) arcs.push(aArc + (i + f) * sp)
+      const pts = arcs.map((s) => pointAt(path, s))
+      const v = fits(pts, arcs, sp)
+      if (v.why) {
+        if (v.why === 'self' || (v.why === 'near' && (v.near ?? 0) >= pitch * 0.9)) curved = true
+        continue
+      }
+      for (const p of pts) idx.add(p)
+      return pts
+    }
   }
   return null
 }
