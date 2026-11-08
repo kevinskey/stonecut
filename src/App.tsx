@@ -3599,7 +3599,7 @@ export default function App() {
           <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
             <option value="brick">Brick — offset rows</option>
             <option value="grid">Grid — aligned rows</option>
-            <option value="concentric">Concentric — rings following the edge</option>
+            <option value="concentric">Concentric — rows following the stroke</option>
             <option value="radial">Radial — rays from the center</option>
           </select>
         </label>
@@ -5299,7 +5299,7 @@ export default function App() {
             <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
               <option value="brick">Brick — offset rows</option>
               <option value="grid">Grid — aligned rows</option>
-              <option value="concentric">Concentric — rings following the edge</option>
+              <option value="concentric">Concentric — rows following the stroke</option>
               <option value="radial">Radial — rays from the center</option>
             </select>
           </label>

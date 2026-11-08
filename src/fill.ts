@@ -3727,175 +3727,414 @@ export function fillStones(
     return got
   }
 
-  // CONCENTRIC: rings offset inward from the shape's edge, each a full
-  // rhythm further in, walked with the same even-spacing placer the outline
-  // rows use. Stroke-like and dot components are excluded — they keep their
-  // centered-row / single-stone treatment from the salvage pass below, same
-  // as under the lattice.
+  // Trim a path's ends back to legal positions, then push each end out along
+  // its own tangent (direction over the last ~2mm) by up to `maxMm`, as long
+  // as the positions stay legal. A row traced from a band that stops short
+  // of a stroke's end reaches the end this way, instead of ending a stone
+  // early and leaving the end hollow.
+  const extendEnds = (pth: Pt[], maxMm: number, legal: (q: Pt) => boolean) => {
+    while (pth.length && !legal(pth[0])) pth.shift()
+    while (pth.length && !legal(pth[pth.length - 1])) pth.pop()
+    if (pth.length < 2) return
+    const grow = (atStart: boolean) => {
+      const n2 = pth.length
+      const end = atStart ? pth[0] : pth[n2 - 1]
+      let k = atStart ? 0 : n2 - 1
+      const step = atStart ? 1 : -1
+      while (k + step >= 0 && k + step < n2 && Math.hypot(pth[k + step].x - end.x, pth[k + step].y - end.y) < 2) k += step
+      const back = pth[k]
+      const l = Math.hypot(end.x - back.x, end.y - back.y)
+      if (l < 1e-6) return
+      const ux = (end.x - back.x) / l
+      const uy = (end.y - back.y) / l
+      for (let t = 0.5; t <= maxMm + 1e-9; t += 0.5) {
+        const q = { x: end.x + ux * t, y: end.y + uy * t }
+        if (!legal(q)) break
+        if (atStart) pth.unshift(q)
+        else pth.push(q)
+      }
+    }
+    grow(true)
+    grow(false)
+  }
+  const onMaterial = (q: Pt) => {
+    const xi = Math.round(q.x * pxPerMm + padPx)
+    const yi = Math.round(q.y * pxPerMm + padPx)
+    return xi >= 0 && yi >= 0 && xi < w && yi < h && grid.bin[yi * w + xi] === 1
+  }
+  // Skeleton rows from a mask: trace, bridge junction breaks, place even
+  // rows, keep only coherent runs of 3+. Returns whether any run landed.
+  const rowsFromMask = (m: Uint8Array, nearOut = rhythm * 1.05, extendMm = 0): boolean => {
+    let placedAny = false
+    const skel = skeletonize(m, w, h)
+    const traced = traceSkeleton(skel, w, h)
+      .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
+      .sort((a, b) => b.length - a.length)
+    // Bridge junction breaks. The skeleton fractures at every fork, and a
+    // row that restarts its beat at each fragment reads ragged — the break
+    // lands mid-stroke where nothing in the material justifies it. Join
+    // fragments whose endpoints nearly touch (longest first, so stubs
+    // attach to trunks, not to each other) and let one beat flow through.
+    const pool = [...traced]
+    const paths: Pt[][] = []
+    const dd = (p: Pt, q: Pt) => Math.hypot(p.x - q.x, p.y - q.y)
+    while (pool.length) {
+      let curP = pool.shift() as Pt[]
+      let grew = true
+      while (grew) {
+        grew = false
+        for (let k = 0; k < pool.length; k++) {
+          const c = pool[k]
+          const lim = rhythm * 1.8
+          const a0 = curP[0], a1 = curP[curP.length - 1]
+          const b0 = c[0], b1 = c[c.length - 1]
+          if (dd(a1, b0) <= lim) curP = curP.concat(c)
+          else if (dd(a1, b1) <= lim) curP = curP.concat([...c].reverse())
+          else if (dd(a0, b1) <= lim) curP = c.concat(curP)
+          else if (dd(a0, b0) <= lim) curP = [...c].reverse().concat(curP)
+          else continue
+          pool.splice(k, 1)
+          grew = true
+          break
+        }
+      }
+      paths.push(curP)
+    }
+    paths.sort((a, b) => b.length - a.length)
+    if (extendMm > 0) {
+      const legal = (q: Pt) =>
+        onMaterial(q) && dtAt(q.x, q.y) >= minPx && clearOfOutline(q) &&
+        !out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < nearOut)
+      for (const pth of paths) extendEnds(pth, extendMm, legal)
+    }
+    for (const pth of paths) {
+      let len = 0
+      for (let k = 1; k < pth.length; k++)
+        len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
+      if (len < rhythm) continue
+      const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
+        const drop = () => {
+          idx.remove(q)
+          return false
+        }
+        if (dtAt(q.x, q.y) < minPx) return drop()
+        if (!clearOfOutline(q)) return drop()
+        // the lattice already covers here — rows only fill its holes
+        if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < nearOut)) return drop()
+        return true
+      })
+      // Coherence: an interior row is a RUN or it is nothing. Mixed
+      // outline/fill sizes put the medial right at the wall-clearance
+      // boundary, and the legality flicker shredded rows into singles and
+      // pairs that read as mistakes. Keep only runs of 3+ consecutive
+      // stones on the beat; release the fragments.
+      const runs: Pt[][] = []
+      let cur: Pt[] = []
+      for (const q of got) {
+        if (!cur.length || Math.hypot(q.x - cur[cur.length - 1].x, q.y - cur[cur.length - 1].y) <= rhythm * 1.6) cur.push(q)
+        else {
+          runs.push(cur)
+          cur = [q]
+        }
+      }
+      if (cur.length) runs.push(cur)
+      for (const r of runs) {
+        if (r.length >= 3) {
+          placedAny = true
+          out.push(...r)
+        } else for (const q of r) idx.remove(q)
+      }
+    }
+    return placedAny
+  }
+
+  // CONCENTRIC: rows that follow the stroke.
+  //
+  // Rings are iso-contours of the distance to the OUTLINE STONES' PATH (or
+  // to the glyph edge when there is no outline), stepped one rhythm apart.
+  // Measuring from the outline path instead of the glyph edge matters: the
+  // first ring sits exactly one clearance from the wall, so every stone on
+  // it is legal against every outline stone whatever the two pitches do,
+  // and there is no beat between the outline's rhythm and the fill's. Two
+  // iso-contours a rhythm apart are never closer than a rhythm, so ring-to-
+  // ring spacing is legal by construction too.
+  //
+  // Where a stroke runs out of width the last ring would be a sliver loop
+  // whose two sides cull each other to a stipple. A component thinner than
+  // half a row gets its SPINE instead: one even row down the stroke's
+  // medial axis, the way a hand-set fill finishes a stroke. A component that
+  // can hold one more ring and still has a pitch of depth left gets both.
+  //
+  // Stroke-like and dot components are excluded — they keep their centered-
+  // row / single-stone treatment from the salvage pass below, same as under
+  // the lattice.
   const concentricRings = (): Pt[] => {
     const got: Pt[] = []
-    // Rings follow iso-contours of the SHAPE's own distance field, not the
-    // outline-stamped mask. The stamp's boundary scallops around each outline
-    // stone, every ring inherited that wobble, and arcs of each wandering
-    // ring then fell inside the clearance floors and were culled to a
-    // stipple. The shape's field is smooth; the first ring instead takes a
-    // fixed inset deep enough to clear the outline wall's own radial wobble
-    // (~0.55mm), and the exact per-stone checks keep it honest.
-    //
-    // Rings stepped at exactly the rhythm would also sit at exactly the
-    // pairwise floor ring-to-ring; step a shade wider, the same slack the
-    // lattice builds into its default rhythm.
-    const ringStep = rhythm * 1.1
-    const startOff = fixedPts.length ? outlineNeed + 0.6 : startInsetMm + 0.3
+    const CDBG = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.SC_DBG
+    // +0.2: the marching-squares contour sits half a pixel outside the
+    // thresholded region, so a ring at exactly the floor loses stones to
+    // rounding
+    const rowStep = rhythm + 0.35
+    let wallDt: Float32Array
+    let startOff: number
+    if (fixedPts.length) {
+      const wallBin = new Uint8Array(grid.bin)
+      const zero = (xMm: number, yMm: number) => {
+        const xi = Math.round(xMm * pxPerMm + padPx)
+        const yi = Math.round(yMm * pxPerMm + padPx)
+        if (xi >= 0 && yi >= 0 && xi < w && yi < h) wallBin[yi * w + xi] = 0
+      }
+      for (const s of fixedPts) zero(s.x, s.y)
+      for (const { a, b } of segs) {
+        const n = Math.max(1, Math.ceil((Math.hypot(b.x - a.x, b.y - a.y) * pxPerMm) / 0.5))
+        for (let i = 0; i <= n; i++) zero(a.x + ((b.x - a.x) * i) / n, a.y + ((b.y - a.y) * i) / n)
+      }
+      wallDt = distanceTransform({ bin: wallBin, w, h, pxPerMm, padPx })
+      startOff = outlineNeed + 0.25
+    } else {
+      wallDt = dt
+      startOff = startInsetMm + 0.3
+    }
+
+    // Marching squares traces a pixel staircase up to ~27% longer than the
+    // true curve; smooth it and resample to ~1mm chords so arc length
+    // converges to the real curve before the ring is divided.
+    const smoothClosed = (poly: Pt[]): Pt[] => {
+      let pts = poly
+      for (let pass = 0; pass < 6; pass++) {
+        const n = pts.length
+        const nx: Pt[] = new Array(n)
+        for (let i = 0; i < n; i++) {
+          const a = pts[(i - 1 + n) % n]
+          const b = pts[i]
+          const c2 = pts[(i + 1) % n]
+          nx[i] = { x: (a.x + 2 * b.x + c2.x) / 4, y: (a.y + 2 * b.y + c2.y) / 4 }
+        }
+        pts = nx
+      }
+      return pts
+    }
+    const chordStep = Math.min(1, pitch / 4)
+    const decimate = (poly: Pt[]): Pt[] => {
+      const kept: Pt[] = [poly[0]]
+      for (const p of poly) {
+        const last = kept[kept.length - 1]
+        if (Math.hypot(p.x - last.x, p.y - last.y) >= chordStep) kept.push(p)
+      }
+      while (
+        kept.length > 1 &&
+        Math.hypot(kept[kept.length - 1].x - kept[0].x, kept[kept.length - 1].y - kept[0].y) <
+          chordStep / 2
+      )
+        kept.pop()
+      return kept
+    }
+    // One ring. A ring is an offset of the wall path, so along a stroke it
+    // is two straight sides joined by tight arcs around the stroke's ends
+    // (radius = the offset). Dividing the whole loop evenly puts the beat's
+    // remainder into those arcs and leaves the sides uneven; instead the
+    // loop is cut at every tight bend and each straight stretch is laid as
+    // its own even run, the way the outline lays a glyph's edges. A loop
+    // with no tight bend (the ring inside an O) is divided as a whole.
+    const validate = (p: Pt) =>
+      dtAt(p.x, p.y) >= minPx && clearOfOutline(p)
+    const placeLoop = (ring: Pt[], accept: (p: Pt) => boolean = () => true) => {
+      const n = ring.length
+      if (n < 3) return
+      let per = 0
+      for (let i = 0; i < n; i++) {
+        const a = ring[i]
+        const b = ring[(i + 1) % n]
+        per += Math.hypot(b.x - a.x, b.y - a.y)
+      }
+      if (per < pitch * 1.6) {
+        let cx = 0
+        let cy = 0
+        for (const p of ring) {
+          cx += p.x
+          cy += p.y
+        }
+        const c = { x: cx / n, y: cy / n }
+        if (accept(c) && validate(c) && idx.canPlace(c)) {
+          idx.add(c)
+          got.push(c)
+          out.push(c)
+        }
+        return
+      }
+      // turning angle over a ±1mm window; a stroke-end arc of radius L turns
+      // ~30° across it, a straight side 0°
+      const kk = Math.max(1, Math.round(1 / chordStep))
+      const cut = new Uint8Array(n)
+      let anyCut = 0
+      for (let i = 0; i < n; i++) {
+        const a = ring[(i - kk + n) % n]
+        const b = ring[i]
+        const c = ring[(i + kk) % n]
+        const t1 = Math.atan2(b.y - a.y, b.x - a.x)
+        const t2 = Math.atan2(c.y - b.y, c.x - b.x)
+        let d = Math.abs(t2 - t1)
+        if (d > Math.PI) d = 2 * Math.PI - d
+        if (d > (15 * Math.PI) / 180 || !accept(b)) {
+          cut[i] = 1
+          anyCut = 1
+        }
+      }
+      const commit = (placed: Pt[]) => {
+        for (const p of placed) {
+          if (!validate(p)) {
+            idx.remove(p)
+            continue
+          }
+          got.push(p)
+          out.push(p)
+        }
+      }
+      if (!anyCut) {
+        // whole ring: equal division, count never under the floor, best of
+        // 12 phases, complete ring preferred (placeRing's own rules)
+        const placed = placeRing(ring, pitch, idx, 12, rhythm)
+        commit(placed)
+        return
+      }
+      // straight stretches between cuts, walked cyclically from a cut point;
+      // longest first, so a stroke's two long sides are laid before the
+      // short cap across its end has to fit between them — the other way
+      // round the caps' stones push one side off its beat
+      let s0 = 0
+      while (s0 < n && !cut[s0]) s0++
+      const runs: { pts: Pt[]; len: number }[] = []
+      let run: Pt[] = []
+      const flush = () => {
+        if (run.length >= 2) {
+          let len = 0
+          for (let i = 1; i < run.length; i++) len += Math.hypot(run[i].x - run[i - 1].x, run[i].y - run[i - 1].y)
+          if (len >= pitch * 0.9) runs.push({ pts: run, len })
+        }
+        run = []
+      }
+      for (let j = 1; j <= n; j++) {
+        const i = (s0 + j) % n
+        if (cut[i]) flush()
+        else run.push(ring[i])
+      }
+      flush()
+      runs.sort((a, b) => b.len - a.len)
+      const legalRing = (q: Pt) =>
+        onMaterial(q) && dtAt(q.x, q.y) >= minPx && clearOfOutline(q) &&
+        !out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < pitch + 0.05)
+      for (const r of runs) {
+        // the loop rounds off a row step before the stroke's end; run the
+        // row straight on to where the lattice would have stopped
+        extendEnds(r.pts, rowStep, legalRing)
+        if (r.pts.length < 2) continue
+        const placed = placeOpenEven(r.pts, pitch, idx, rhythm)
+        if (CDBG) console.error(`    run len=${r.len.toFixed(1)} from (${r.pts[0].x.toFixed(1)},${r.pts[0].y.toFixed(1)}) to (${r.pts[r.pts.length - 1].x.toFixed(1)},${r.pts[r.pts.length - 1].y.toFixed(1)}) placed=${placed.length}`)
+        commit(placed)
+      }
+    }
+
     const ringBin = new Uint8Array(w * h)
+    const compBin = new Uint8Array(w * h)
+    const spined = new Uint8Array(w * h) // pixels already finished by a spine row
+    const tmp = new Uint8Array(w * h)
+    const spine = (m: Uint8Array) => {
+      // The band a spine is traced from stops a row step short of the ring
+      // beside it at every stroke end (it is the deeper iso-contour), so a
+      // centre row traced from it alone ends a stone early. The traced line
+      // is extended a row step along its own end tangents and the per-stone
+      // clearance checks trim it where it meets the cap.
+      // two row steps: the skeleton trace also erodes the band's ends
+      rowsFromMask(m, pitch * 0.98, rowStep * 2)
+      for (let i = 0; i < w * h; i++) if (m[i]) spined[i] = 1
+    }
+    // local width: a pixel is THICK when it is covered by an inscribed disk
+    // of radius >= half a pitch (a morphological opening), so two ring sides
+    // there are at least a pitch apart. Everything else is sliver.
+    const r0 = (pitch / 2 + 0.1) * pxPerMm
     for (let k = 0; k < 200; k++) {
-      const offPx = (k * ringStep + startOff) * pxPerMm
+      const L = k * rowStep + startOff
+      const Lpx = L * pxPerMm
       let any = 0
       for (let i = 0; i < w * h; i++) {
-        // stroke-like and dot components keep their centered-row / single-
-        // stone treatment; label 0 just outside the stamped mask is allowed
-        // through — the exact outline check below owns that band
         const lbl = fillComps.labels[i]
         ringBin[i] =
-          grid.bin[i] && dt[i] >= offPx && !(lbl > 0 && (compRows[lbl] || compDot[lbl])) ? 1 : 0
+          grid.bin[i] && wallDt[i] >= Lpx && !spined[i] && !(lbl > 0 && (compRows[lbl] || compDot[lbl])) ? 1 : 0
         any |= ringBin[i]
       }
       if (!any) break
-      // The marching-squares contour is a pixel staircase up to ~27% longer
-      // than the true curve, and the even-division placers divide ARC length:
-      // stones laid every rhythm of staircase arc sit ~0.8x rhythm apart in
-      // real distance, so the spacing index rejected scattered stones and
-      // rings came out at half density. Smooth with wraparound, then resample
-      // to ~1mm euclidean chords — chords cut through the residual zigzag, so
-      // path length converges to the true curve. A 1mm chamfer on a corner is
-      // invisible at stone scale.
-      // 6 passes: anything less leaves quantization bumps that analyzeContour
-      // reads as CORNERS (~18 fake corners on a smooth circle), and corner-
-      // anchored division then places apex stones with empty 2-beat segments
-      // between them — a half-density ring. A real tip's turn is an order of
-      // magnitude above the corner threshold and survives the smoothing.
-      const smoothClosed = (poly: Pt[]): Pt[] => {
-        let pts = poly
-        for (let pass = 0; pass < 6; pass++) {
-          const n = pts.length
-          const nx: Pt[] = new Array(n)
-          for (let i = 0; i < n; i++) {
-            const a = pts[(i - 1 + n) % n]
-            const b = pts[i]
-            const c2 = pts[(i + 1) % n]
-            nx[i] = { x: (a.x + 2 * b.x + c2.x) / 4, y: (a.y + 2 * b.y + c2.y) / 4 }
-          }
-          pts = nx
+      const comps = labelComponents(ringBin, w, h)
+      if (CDBG) console.error(`ring level ${k} L=${L.toFixed(2)} comps=${comps.count}`)
+      for (let c = 1; c <= comps.count; c++) {
+        let any2 = 0
+        for (let i = 0; i < w * h; i++) {
+          compBin[i] = comps.labels[i] === c ? 1 : 0
+          any2 |= compBin[i]
         }
-        return pts
-      }
-      const chordStep = Math.min(1, pitch / 4)
-      const decimate = (poly: Pt[]): Pt[] => {
-        const kept: Pt[] = [poly[0]]
-        for (const p of poly) {
-          const last = kept[kept.length - 1]
-          if (Math.hypot(p.x - last.x, p.y - last.y) >= chordStep) kept.push(p)
+        if (!any2) continue
+        const dtc = distanceTransform({ bin: compBin, w, h, pxPerMm, padPx })
+        let coreAny = 0
+        for (let i = 0; i < w * h; i++) {
+          tmp[i] = compBin[i] && dtc[i] >= r0 ? 0 : 1
+          if (!tmp[i]) coreAny = 1
         }
-        // closing chord: drop a last point that crowds the first
-        while (
-          kept.length > 1 &&
-          Math.hypot(kept[kept.length - 1].x - kept[0].x, kept[kept.length - 1].y - kept[0].y) <
-            chordStep / 2
-        )
-          kept.pop()
-        return kept
-      }
-      const rings = marchingSquares(ringBin, w, h).map((c) =>
-        decimate(smoothClosed(c.map((p) => ({ x: toMmX(p.x), y: toMmY(p.y) })))),
-      )
-      for (const ring of rings) {
-        if (ring.length < 3) continue
-        // Equal division of the ring, with the stone count chosen by CHORD
-        // distance. walkPoly divides by ARC length, and on a curve the chord
-        // of an arc-length step comes up short of the floor — a ring whose
-        // division landed at exactly the pitch placed stones 3.296mm apart
-        // against a 3.300mm floor, and the pairwise check culled every other
-        // stone into a half-density stipple.
-        const n = ring.length
-        const cum: number[] = [0]
-        for (let i2 = 1; i2 <= n; i2++) {
-          const a = ring[i2 - 1]
-          const b = ring[i2 % n]
-          cum.push(cum[i2 - 1] + Math.hypot(b.x - a.x, b.y - a.y))
-        }
-        const per = cum[n]
-        const at = (s: number): Pt => {
-          s = ((s % per) + per) % per
-          let lo = 0
-          let hi = n
-          while (lo + 1 < hi) {
-            const mid = (lo + hi) >> 1
-            if (cum[mid] <= s) lo = mid
-            else hi = mid
-          }
-          const a = ring[lo]
-          const b = ring[(lo + 1) % n]
-          const seg = cum[lo + 1] - cum[lo]
-          const t = seg === 0 ? 0 : (s - cum[lo]) / seg
-          return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }
-        }
-        if (per < pitch * 1.6) {
-          // a ring too short for two stones collapses to one centred stone
-          let cx = 0
-          let cy = 0
-          for (const p of ring) {
-            cx += p.x
-            cy += p.y
-          }
-          const c = { x: cx / n, y: cy / n }
-          if (dtAt(c.x, c.y) >= minPx && clearOfOutline(c) && idx.canPlace(c)) {
-            idx.add(c)
-            got.push(c)
-          }
+        if (!coreAny) {
+          spine(new Uint8Array(compBin))
           continue
         }
-        const minChord = (mm: number) => {
-          const sp = per / mm
-          let worst = Infinity
-          for (const f of [0, 0.25, 0.5, 0.75]) {
-            const s0 = f * per
-            const p0 = at(s0)
-            const p1 = at(s0 + sp)
-            const d = Math.hypot(p1.x - p0.x, p1.y - p0.y)
-            if (d < worst) worst = d
+        const toCore = distanceTransform({ bin: tmp, w, h, pxPerMm, padPx })
+        const thick = new Uint8Array(w * h)
+        const sliver = new Uint8Array(w * h)
+        let sliverAny = 0
+        for (let i = 0; i < w * h; i++) {
+          if (!compBin[i]) continue
+          if (toCore[i] <= r0 + 1.5) thick[i] = 1
+          else {
+            sliver[i] = 1
+            sliverAny = 1
           }
-          return worst
         }
-        let m = Math.max(3, Math.round(per / rhythm))
-        while (m > 3 && minChord(m) < pitch * 1.01) m--
-        const sp = per / m
-        let best: Pt[] = []
-        for (let ph = 0; ph < 7; ph++) {
-          const off = (ph / 7) * sp
-          const placed: Pt[] = []
-          for (let i2 = 0; i2 < m; i2++) {
-            const p = at(off + i2 * sp)
-            if (dtAt(p.x, p.y) < minPx) continue
-            if (!clearOfOutline(p)) continue
-            let ok = idx.canPlace(p)
-            if (ok)
-              for (const q of placed)
-                if (Math.hypot(p.x - q.x, p.y - q.y) < pitch - 1e-6) {
-                  ok = false
-                  break
-                }
-            if (ok) placed.push(p)
-          }
-          if (placed.length > best.length) best = placed
+        // rings on the thick part's boundary — but only where that boundary
+        // is the component's own edge, not the cut where a sliver was split off
+        const loops = marchingSquares(thick, w, h).map((cc) =>
+          decimate(smoothClosed(cc.map((p) => ({ x: toMmX(p.x), y: toMmY(p.y) })))),
+        )
+        const onEdge = (p: Pt) => {
+          const xi = Math.round(p.x * pxPerMm + padPx)
+          const yi = Math.round(p.y * pxPerMm + padPx)
+          if (xi < 1 || yi < 1 || xi >= w - 1 || yi >= h - 1) return true
+          // the smoothed loop drifts a pixel or two inside the staircase;
+          // the sliver cut sits a full r0 inside, so there is room between
+          return dtc[yi * w + xi] <= Math.min(r0 / 2, 6)
         }
-        for (const p of best) {
-          idx.add(p)
-          got.push(p)
+        const before = got.length
+        for (const loop of loops) placeLoop(loop, onEdge)
+        if (CDBG) console.error(`  comp ${c}: loops=${loops.map((l) => l.length).join(',')} placed=${got.length - before} sliver=${sliverAny}`)
+        if (sliverAny) spine(sliver)
+        // a thick region whose remaining depth holds a centre row but not a
+        // whole further ring would otherwise be left hollow: spine it now
+        const nextPx = (L + rowStep) * pxPerMm
+        const remPx = (L + pitch) * pxPerMm
+        let remAny = 0
+        for (let i = 0; i < w * h; i++) {
+          tmp[i] = thick[i] && wallDt[i] >= remPx ? 1 : 0
+          remAny |= tmp[i]
+        }
+        if (!remAny) continue
+        const rem = labelComponents(tmp, w, h)
+        const hasNext = new Uint8Array(rem.count + 1)
+        for (let i = 0; i < w * h; i++) if (rem.labels[i] && wallDt[i] >= nextPx) hasNext[rem.labels[i]] = 1
+        for (let rc = 1; rc <= rem.count; rc++) {
+          if (hasNext[rc]) continue
+          const m = new Uint8Array(w * h)
+          for (let i = 0; i < w * h; i++) m[i] = rem.labels[i] === rc ? 1 : 0
+          spine(m)
         }
       }
     }
     return got
   }
+
 
   // RADIAL: rays from each component's deepest point. The ray count is set so
   // the arc gap between neighbouring rays matches the stone rhythm midway
@@ -3945,7 +4184,7 @@ export function fillStones(
   }
 
   if (style === 'concentric') {
-    out.push(...concentricRings())
+    concentricRings()
   } else if (style === 'radial') {
     out.push(...radialRays())
   } else {
@@ -3993,85 +4232,6 @@ export function fillStones(
   const dotStones = new Set<Pt>()
   {
     const cm = new Uint8Array(w * h)
-    // Skeleton rows from a mask: trace, bridge junction breaks, place even
-    // rows, keep only coherent runs of 3+. Returns whether any run landed.
-    const rowsFromMask = (m: Uint8Array): boolean => {
-      let placedAny = false
-      const skel = skeletonize(m, w, h)
-      const traced = traceSkeleton(skel, w, h)
-        .map((pp) => smoothPath(pp, 5).map((q) => ({ x: toMmX(q.x), y: toMmY(q.y) })))
-        .sort((a, b) => b.length - a.length)
-      // Bridge junction breaks. The skeleton fractures at every fork, and a
-      // row that restarts its beat at each fragment reads ragged — the break
-      // lands mid-stroke where nothing in the material justifies it. Join
-      // fragments whose endpoints nearly touch (longest first, so stubs
-      // attach to trunks, not to each other) and let one beat flow through.
-      const pool = [...traced]
-      const paths: Pt[][] = []
-      const dd = (p: Pt, q: Pt) => Math.hypot(p.x - q.x, p.y - q.y)
-      while (pool.length) {
-        let curP = pool.shift() as Pt[]
-        let grew = true
-        while (grew) {
-          grew = false
-          for (let k = 0; k < pool.length; k++) {
-            const c = pool[k]
-            const lim = rhythm * 1.8
-            const a0 = curP[0], a1 = curP[curP.length - 1]
-            const b0 = c[0], b1 = c[c.length - 1]
-            if (dd(a1, b0) <= lim) curP = curP.concat(c)
-            else if (dd(a1, b1) <= lim) curP = curP.concat([...c].reverse())
-            else if (dd(a0, b1) <= lim) curP = c.concat(curP)
-            else if (dd(a0, b0) <= lim) curP = [...c].reverse().concat(curP)
-            else continue
-            pool.splice(k, 1)
-            grew = true
-            break
-          }
-        }
-        paths.push(curP)
-      }
-      paths.sort((a, b) => b.length - a.length)
-      for (const pth of paths) {
-        let len = 0
-        for (let k = 1; k < pth.length; k++)
-          len += Math.hypot(pth[k].x - pth[k - 1].x, pth[k].y - pth[k - 1].y)
-        if (len < rhythm) continue
-        const got = placeOpenEven(pth, pitch, idx, rhythm).filter((q) => {
-          const drop = () => {
-            idx.remove(q)
-            return false
-          }
-          if (dtAt(q.x, q.y) < minPx) return drop()
-          if (!clearOfOutline(q)) return drop()
-          // the lattice already covers here — rows only fill its holes
-          if (out.some((o) => Math.hypot(o.x - q.x, o.y - q.y) < rhythm * 1.05)) return drop()
-          return true
-        })
-        // Coherence: an interior row is a RUN or it is nothing. Mixed
-        // outline/fill sizes put the medial right at the wall-clearance
-        // boundary, and the legality flicker shredded rows into singles and
-        // pairs that read as mistakes. Keep only runs of 3+ consecutive
-        // stones on the beat; release the fragments.
-        const runs: Pt[][] = []
-        let cur: Pt[] = []
-        for (const q of got) {
-          if (!cur.length || Math.hypot(q.x - cur[cur.length - 1].x, q.y - cur[cur.length - 1].y) <= rhythm * 1.6) cur.push(q)
-          else {
-            runs.push(cur)
-            cur = [q]
-          }
-        }
-        if (cur.length) runs.push(cur)
-        for (const r of runs) {
-          if (r.length >= 3) {
-            placedAny = true
-            out.push(...r)
-          } else for (const q of r) idx.remove(q)
-        }
-      }
-      return placedAny
-    }
     // SCRIPT GLYPHS: when the lattice found almost nothing, the glyph is all
     // stroke. The clearance-stamped mask shatters into pockets under mixed
     // outline/fill sizes, and rows derived pocket-by-pocket come out as
