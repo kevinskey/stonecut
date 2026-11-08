@@ -4,7 +4,8 @@ import { validLayers } from './layers'
 import type { Layer } from './layers'
 import { validateConditions } from './preflight'
 export interface TextMeta { text: string; fontName: string; fontId: string; weight: 'bold' | 'regular'; height: number; spacing: number; bend: number }
-export interface Recipe { contours: Pt[][]; mode: 'outline' | 'fill' | 'both'; wholeWord: boolean; sx: number; sy: number; textMeta?: TextMeta }
+export interface ShapeMeta { kind: string; w: number; h: number }
+export interface Recipe { contours: Pt[][]; mode: 'outline' | 'fill' | 'both'; wholeWord: boolean; sx: number; sy: number; textMeta?: TextMeta; shapeMeta?: ShapeMeta }
 export type Elements = Record<number, Recipe>
 export interface VecItem { id: number; name: string; base: Pt[][]; baseW: number; baseH: number; x: number; y: number; s: number; lay?: number }
 export interface CutterProfile { format: 'gpgl' | 'hpgl'; gpStep: number; originCorner: 'bl' | 'br'; sendConditions: boolean; swapAxes: boolean; wCircles: boolean; overcut: number; preset: MaterialPreset; linePreset: MaterialPreset }
@@ -49,6 +50,10 @@ export function parseProject(data: unknown): Project {
     if (r.textMeta !== undefined) {
       const m = r.textMeta
       requireValue(obj(m) && typeof m.text === 'string' && typeof m.fontName === 'string' && typeof m.fontId === 'string' && ['bold', 'regular'].includes(String(m.weight)) && positive(m.height) && finite(m.spacing) && finite(m.bend), 'invalid editable text')
+    }
+    if (r.shapeMeta !== undefined) {
+      const m = r.shapeMeta
+      requireValue(obj(m) && typeof m.kind === 'string' && m.kind.length <= 32 && positive(m.w) && positive(m.h), 'invalid editable shape')
     }
   }
   if (data.context !== undefined) {

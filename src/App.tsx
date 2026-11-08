@@ -1373,7 +1373,7 @@ export default function App() {
     const y0 = clamp(cy - h / 2, 10, Math.max(10, boardHmm - h - 10))
     const placed = pts.map((p) => ({ ...p, x: p.x - minX + x0 - previewOffX, y: p.y - minY }))
     const first = stones.length
-    addGenerated(placed, y0, { contours, mode: shapeMode, wholeWord: true })
+    addGenerated(placed, y0, { contours, mode: shapeMode, wholeWord: true, shapeMeta: { kind: shapeKind, w: shapeW, h: shapeH } })
     // hand it over selected so it can be dragged straight away
     setSelection(new Set(placed.map((_, i) => first + i)))
     setSelVecs(new Set())
@@ -2255,6 +2255,61 @@ export default function App() {
     return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gap, sizes, textMode, outlineStyle, outlineDesign, uniformRhythm, fillStyle, strokePolicy])
+
+  // ---------------------------------------------------------------------
+  // EDITABLE SHAPES. Same idea as text: selecting a shape loads its kind,
+  // size and style into the Shapes panel, and any further change there — or
+  // to the stone settings shown in that panel — re-stones THAT shape in
+  // place. Before this the panel only described the NEXT shape, so picking
+  // "Outline" with a filled diamond selected changed nothing on the board.
+  // ---------------------------------------------------------------------
+  const editingShapeElRef = useRef<number | null>(null)
+  const shapeSigRef = useRef('')
+  useEffect(() => {
+    const rec = selectedEl != null ? elementsRef.current[selectedEl] : undefined
+    const meta = rec?.shapeMeta
+    editingShapeElRef.current = meta && selectedEl != null ? selectedEl : null
+    shapeSigRef.current = ''
+    if (!meta || !rec) return
+    setShapeKind(meta.kind as ShapeKind)
+    setShapeW(Math.round(meta.w * rec.sx))
+    setShapeH(Math.round(meta.h * rec.sy))
+    setShapeMode(rec.mode)
+    const d = document.querySelector<HTMLDetailsElement>('details.sec[data-section="Shapes"]')
+    if (d) d.open = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEl])
+  useEffect(() => {
+    const el = editingShapeElRef.current
+    if (el == null || selectedEl !== el) return
+    const rec = elementsRef.current[el]
+    const meta = rec?.shapeMeta
+    if (!rec || !meta) return
+    const sig = JSON.stringify([gap, outlineStyle, outlineDesign, uniformRhythm, fillStyle, sizes])
+    const geomChanged = meta.kind !== shapeKind || Math.round(meta.w * rec.sx) !== shapeW || Math.round(meta.h * rec.sy) !== shapeH
+    const metaChanged = geomChanged || rec.mode !== shapeMode
+    if (shapeSigRef.current === '') {
+      // just selected: the panel is still catching up with the element's
+      // own values — arm once they agree, never re-stone on a plain click
+      if (!metaChanged) shapeSigRef.current = sig
+      return
+    }
+    if (!metaChanged && shapeSigRef.current === sig) return
+    const t = window.setTimeout(() => {
+      if (!stonesRef.current.some((st) => st.el === el)) return
+      const box = elBoxOf(el)
+      if (!box) return
+      let contours = rec.contours, sx = rec.sx, sy = rec.sy
+      if (geomChanged) { contours = normaliseContours(shapeToContours(shapeKind, shapeW, shapeH).contours); sx = 1; sy = 1 }
+      const next: Recipe = { ...rec, contours, mode: shapeMode, shapeMeta: { kind: shapeKind, w: shapeW, h: shapeH } }
+      elementsRef.current = { ...elementsRef.current, [el]: next }
+      setElements((prev) => ({ ...prev, [el]: next }))
+      pushUndo(stonesRef.current)
+      regenElement(el, sx, sy, box, 'nw', true)
+      shapeSigRef.current = sig
+    }, 250)
+    return () => window.clearTimeout(t)
+  }, [selectedEl, shapeKind, shapeW, shapeH, shapeMode, gap, outlineStyle, outlineDesign, uniformRhythm, fillStyle, sizes, regenElement, elBoxOf, pushUndo])
 
   // Typed size from the sidebar: uniform, anchored top-left.
   const resizeSelectedTo = useCallback(
@@ -3492,6 +3547,43 @@ export default function App() {
   }, [duplicateSelection, copySelection, pasteClipboard])
 
   const sizeKeys = Object.keys(sizes)
+  const editingShape = selectedEl != null && !!elements[selectedEl]?.shapeMeta
+  // The outline / fill controls from the Stones and Fill panels, repeated
+  // inside Shapes so a shape can be edited without leaving that panel.
+  const stoneToolsBlock = (showFill: boolean) => (
+    <>
+      <div className="grid2">
+        <label>Outline design
+          <select value={outlineDesign} onChange={(e) => setOutlineDesign(e.target.value as typeof outlineDesign)}>
+            <option value="single">Single outline</option>
+            <option value="double">{canEcho ? 'Double — echo row outside' : 'Double — needs upsize'}</option>
+            <option value="ghost">Ghost — floats outside</option>
+            <option value="centerline">Single line</option>
+          </select>
+        </label>
+        <label>Narrow strokes
+          <select value={strokePolicy} disabled={outlineDesign === 'centerline'} onChange={(e) => setStrokePolicy(e.target.value as typeof strokePolicy)}>
+            <option value="auto">Auto fallback</option>
+            <option value="walls">Force walls</option>
+          </select>
+        </label>
+      </div>
+      <label className="row">
+        <input type="checkbox" checked={uniformRhythm} onChange={(e) => setUniformRhythm(e.target.checked)} />
+        Uniform rhythm — verticals match horizontals
+      </label>
+      {showFill && (
+        <label>Fill style
+          <select value={fillStyle} onChange={(e) => setFillStyle(e.target.value as typeof fillStyle)}>
+            <option value="brick">Brick — offset rows</option>
+            <option value="grid">Grid — aligned rows</option>
+            <option value="concentric">Concentric — rings following the edge</option>
+            <option value="radial">Radial — rays from the center</option>
+          </select>
+        </label>
+      )}
+    </>
+  )
   // Stone size inline where things get added (Text, Shapes, Image). It is
   // the ACTIVE LAYER's size — the same control as the Layers panel, within
   // reach — so a change re-stones whatever is already on that layer.
@@ -5229,12 +5321,18 @@ export default function App() {
               <option value="both">Outline + fill</option>
             </select>
           </label>
+          {stoneToolsBlock(shapeMode !== 'outline')}
           {layerSizeRow(shapeMode !== 'outline')}
-          <p className="hint">
-            Spacing, outline and fill style come from the Stones and Fill panels. Shapes land in the
-            middle of the view, selected and ready to drag.
-          </p>
-          <button className="primary" onClick={generateShape}>Add {shapeKind} stones</button>
+          {editingShape ? (
+            <p className="hint" style={{ color: '#e8d5a0' }}>
+              Editing the selected {shapeKind} — every change above re-stones it in place (⌘Z undoes). The Add button makes another one.
+            </p>
+          ) : (
+            <p className="hint">
+              Shapes land in the middle of the view, selected and ready to drag. Click a shape on the board later to edit it here.
+            </p>
+          )}
+          <button className="primary" onClick={generateShape}>Add {editingShape ? 'another ' : ''}{shapeKind} stones</button>
           <button onClick={shapeAsCutLines}>Add {shapeKind} as a cut line</button>
           <details className="sec sub">
             <summary>Scatter spray</summary>
