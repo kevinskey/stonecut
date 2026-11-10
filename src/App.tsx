@@ -58,6 +58,30 @@ const normaliseContours = (contours: Pt[][]): Pt[][] => {
 
 // splitContoursIntoLetters moved to contours.ts — shared with arc text.
 
+// Smooth curve through every clicked point (Catmull-Rom, flattened to short
+// straight runs): the pen's Curve mode. A click-drag Bézier pen needs handle
+// dragging the node tool can't edit yet; a through-point spline gives a
+// smooth path with nothing to learn — click where the curve should pass.
+const smoothThrough = (pts: Pt[], closed: boolean, perSeg = 12): Pt[] => {
+  const n = pts.length
+  if (n < 3) return pts.map((q) => ({ ...q }))
+  const at = (i: number) => closed ? pts[((i % n) + n) % n] : pts[Math.max(0, Math.min(n - 1, i))]
+  const out: Pt[] = []
+  const segs = closed ? n : n - 1
+  for (let i = 0; i < segs; i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2)
+    for (let k = 0; k < perSeg; k++) {
+      const t = k / perSeg, t2 = t * t, t3 = t2 * t
+      out.push({
+        x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+      })
+    }
+  }
+  if (!closed) out.push({ ...pts[n - 1] })
+  return out
+}
+
 // Rotate points by `rad` around `center` — used when baking rotation into
 // cut-line objects (holes are circles, so stone rotation is exact too).
 const rotatePt = (q: Pt, center: Pt, rad: number): Pt => {
@@ -287,6 +311,12 @@ function Swatches({ value, onPick }: { value: string; onPick: (c: string) => voi
 
 export default function App() {
   const [initialDesign] = useState(loadDesign)
+  // Start card on an empty board. Kevin wanted to land on a blank board and
+  // get going, so "Blank project" dismisses it and the checkbox remembers
+  // that; File → "Show start screen" brings it back.
+  const [startCardPref, setStartCardPref] = useState(() => safeStorage.getItem('stonecut.startcard') !== '0')
+  useEffect(() => { safeStorage.setItem('stonecut.startcard', startCardPref ? '1' : '0') }, [startCardPref])
+  const [startCardShown, setStartCardShown] = useState(startCardPref)
   const savedDesign = useRef(initialDesign)
   const [release, setRelease] = useState('')
   useEffect(() => { void fetch('./build-info.json').then((r) => r.ok ? r.json() : null).then((d) => { if (typeof d?.commit === 'string') setRelease(d.commit.slice(0, 7)) }).catch(() => {}) }, [])
@@ -2409,6 +2439,11 @@ export default function App() {
   const penPtsRef = useRef(penPts)
   penPtsRef.current = penPts
   const [penOut, setPenOut] = useState<'stones' | 'line' | 'both'>('stones')
+  // Curve mode: the path bends smoothly through the clicked points instead of
+  // cornering at them. Remembered — people who draw curves keep drawing them.
+  const [penCurve, setPenCurve] = useState(() => safeStorage.getItem('stonecut.pencurve') === '1')
+  useEffect(() => { safeStorage.setItem('stonecut.pencurve', penCurve ? '1' : '0') }, [penCurve])
+  const penShape = useCallback((pts: Pt[], closed: boolean): Pt[] => (penCurve ? smoothThrough(pts, closed) : (closed ? [...pts] : pts)), [penCurve])
   useEffect(() => { if (tool !== 'pen') setPenPts([]) }, [tool])
   // Stones along a polyline at the panel's stone pitch. Sharp corners get a
   // stone of their own and each straight run between corners is divided
@@ -2481,8 +2516,8 @@ export default function App() {
     return out
   }, [sizes, curSize, gap])
   const penPreview = useMemo(
-    () => (tool === 'pen' && penPts.length > 1 ? stonesAlongPath(penPts, false) : []),
-    [tool, penPts, stonesAlongPath],
+    () => (tool === 'pen' && penPts.length > 1 ? stonesAlongPath(penShape(penPts, false), false) : []),
+    [tool, penPts, stonesAlongPath, penShape],
   )
   const finishPen = useCallback((close: boolean) => {
     const raw = penPtsRef.current
@@ -2496,8 +2531,9 @@ export default function App() {
     if (pts.length < 2) { setStatus('Pen needs at least two points — click along the line you want, then Enter'); return }
     pushUndo(stonesRef.current)
     const parts: string[] = []
+    const shaped = penShape(pts, close)
     if (penOut !== 'line') {
-      const placed = stonesAlongPath(pts, close)
+      const placed = stonesAlongPath(shaped, close)
       const el = nextEl()
       const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el, lay: activeLayerId }))]
       stonesRef.current = next
@@ -2505,7 +2541,7 @@ export default function App() {
       parts.push(`${placed.length} stones`)
     }
     if (penOut !== 'stones') {
-      const path = close ? [...pts, { ...pts[0] }] : pts
+      const path = close ? [...shaped, { ...shaped[0] }] : shaped
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const q of path) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
       setVectors((prev) => [...prev, {
@@ -2520,8 +2556,8 @@ export default function App() {
       }])
       parts.push('1 cut line')
     }
-    setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} path — keep clicking for another, V to select`)
-  }, [penOut, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
+    setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} ${penCurve ? 'curve' : 'path'} — keep clicking for another, V to select`)
+  }, [penOut, penCurve, penShape, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
 
   // STONES ONTO DRAWN LINES AND SHAPES. The pen, the Shapes panel and an
   // imported SVG all make cut-line objects; this puts stones on the ones that
@@ -4758,6 +4794,7 @@ export default function App() {
   const menus: Menu[] = [
     { label: 'File', items: [
       { label: 'New design', onClick: () => { clearAll(); adoptHandle(null, null) }, disabled: !hasStones && !pending && !vectors.length },
+      { label: 'Show start screen', onClick: () => { setStartCardPref(true); setStartCardShown(true); if (hasStones || vectors.length) setStatus('The start screen shows on an empty board — File → New design to clear this one') } },
       { label: 'Open design…', onClick: () => { void openDesignFile() } },
       { label: 'Import project file…', onClick: importProjectFile },
       { label: 'Save named project version…', disabled: !hasStones && !vectors.length, onClick: () => { void (async () => {
@@ -5892,13 +5929,22 @@ export default function App() {
                   : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels.'}
           </p>
           {tool === 'pen' && (
-            <label>Pen output
-              <select value={penOut} onChange={(e) => setPenOut(e.target.value as typeof penOut)}>
-                <option value="stones">Stones along the path</option>
-                <option value="line">Cut line</option>
-                <option value="both">Both</option>
-              </select>
-            </label>
+            <>
+              <label>Pen output
+                <select value={penOut} onChange={(e) => setPenOut(e.target.value as typeof penOut)}>
+                  <option value="stones">Stones along the path</option>
+                  <option value="line">Cut line</option>
+                  <option value="both">Both</option>
+                </select>
+              </label>
+              <label>Pen shape
+                <select value={penCurve ? 'curve' : 'straight'} onChange={(e) => setPenCurve(e.target.value === 'curve')}>
+                  <option value="straight">Straight segments — corners at each click</option>
+                  <option value="curve">Smooth curve — bends through each click</option>
+                </select>
+              </label>
+              <p className="hint">{penCurve ? 'Click along the curve you want; it bends through every point. Close it by clicking the first point for a smooth loop. For true Bézier artwork, draw it in Illustrator or Inkscape and use File → Import vector cut (SVG), then put stones on it from Vector cut.' : 'Switch Pen shape to Smooth curve for arcs, swashes and loops.'}</p>
+            </>
           )}
           {selectedEl != null && selBox && (
             <div className="grid2" key={`sz-${selectedEl}-${selBox.minX.toFixed(1)}-${(selBox.maxX - selBox.minX).toFixed(1)}`}>
@@ -6419,14 +6465,20 @@ export default function App() {
             Clear all
           </button>
         </div>
-        {!stones.length && !vectors.length && !pending && <div className="start-card">
+        {startCardShown && !stones.length && !vectors.length && !pending && <div className="start-card">
           <h2>Start your next design</h2><p>Create lettering, convert artwork, or reopen a project.</p>
           <div className="start-actions">
+            <button className="primary" onClick={() => setStartCardShown(false)}>Blank project</button>
             <button onClick={() => openSection('Text', 'input')}>Create text</button>
             <button onClick={() => openSection('Image', 'input[type=file]')}>Import artwork</button>
             <button onClick={importProjectFile}>Open project</button>
             <button onClick={() => openSection('Templates')}>Use a template</button>
-          </div><p className="hint">Direct cutter control requires a compatible desktop browser or the StoneCut desktop app.</p>
+          </div>
+          <label className="row" style={{ marginTop: 10 }}>
+            <input type="checkbox" checked={!startCardPref} onChange={(e) => setStartCardPref(!e.target.checked)} />
+            Always start with a blank project (File → Show start screen brings this back)
+          </label>
+          <p className="hint">Direct cutter control requires a compatible desktop browser or the StoneCut desktop app.</p>
         </div>}
         {/* stones render on a bitmap: one paint instead of thousands of SVG
             DOM circles, which made scrolling large designs crawl. The SVG
@@ -6550,7 +6602,7 @@ export default function App() {
             />
           ))}
           {tool === 'pen' && penPts.length > 0 && (() => {
-            const d = 'M' + penPts.map((q) => `${(q.x * zoom).toFixed(1)},${(q.y * zoom).toFixed(1)}`).join('L')
+            const d = 'M' + penShape(penPts, false).map((q) => `${(q.x * zoom).toFixed(1)},${(q.y * zoom).toFixed(1)}`).join('L')
             const r = ((sizes[curSize]?.holeMm ?? 3) / 2) * zoom
             return (
               <g pointerEvents="none">
