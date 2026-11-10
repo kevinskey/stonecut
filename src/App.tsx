@@ -2546,6 +2546,17 @@ export default function App() {
     }
     setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} ${penMode === 'straight' ? 'path' : 'curve'} — keep clicking for another, N edits its handles, V to select`)
   }, [penOut, penMode, penPath, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
+  // Leaving the pen with a path in progress FINISHES it. Switching tools used
+  // to throw the unfinished path away — press N to edit the curve you just
+  // drew, before Enter, and it vanished.
+  const finishPenRef = useRef(finishPen)
+  finishPenRef.current = finishPen
+  const toolRef = useRef(tool)
+  toolRef.current = tool
+  const switchTool = useCallback((t: Tool) => {
+    if (toolRef.current === 'pen' && t !== 'pen' && penPtsRef.current.length >= 2) finishPenRef.current(false)
+    setTool(t)
+  }, [])
 
   // STONES ONTO DRAWN LINES AND SHAPES. The pen, the Shapes panel and an
   // imported SVG all make cut-line objects; this puts stones on the ones that
@@ -3210,14 +3221,14 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomAbout(zoomRef.current / 1.25) }
       if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); fitSheet() }
       if (!e.metaKey && !e.ctrlKey && (e.key === 'f' || e.key === 'F')) fitDesign()
-      if (!e.metaKey && !e.ctrlKey && (e.key === 'v' || e.key === 'V')) setTool('select')
-      if (!e.metaKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N')) setTool('node')
-      if (!e.metaKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) setTool('add')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'v' || e.key === 'V')) switchTool('select')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N')) switchTool('node')
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) switchTool('add')
       if (!e.metaKey && !e.ctrlKey && (e.key === 'p' || e.key === 'P')) setTool('pen')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selection, stones, layerOpen, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen, pending, discardPreviews])
+  }, [selection, stones, layerOpen, mutate, zoomAbout, fitSheet, fitDesign, selVecs, mutateVectors, tool, nodeSel, nodeVec, undo, redo, finishPen, switchTool, pending, discardPreviews])
 
   // ---------- material presets ----------
   const preset = presets[presetIdx] ?? presets[0]
@@ -4956,9 +4967,9 @@ export default function App() {
       { label: 'Sparkle simulation — stones as gems', checked: simView, onClick: () => setSimView((o) => !o) },
       { label: 'Garment mockup…', disabled: !hasStones && !vectors.length, onClick: () => setMockupOpen(true) },
       'sep',
-      { label: 'Select / move tool', shortcut: 'V', checked: tool === 'select', onClick: () => setTool('select') },
-      { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => setTool('add') },
-      { label: 'Node tool — edit path points', shortcut: 'N', checked: tool === 'node', onClick: () => setTool('node') },
+      { label: 'Select / move tool', shortcut: 'V', checked: tool === 'select', onClick: () => switchTool('select') },
+      { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => switchTool('add') },
+      { label: 'Node tool — edit path points', shortcut: 'N', checked: tool === 'node', onClick: () => switchTool('node') },
       { label: 'Pen tool — stones along a drawn path', shortcut: 'P', checked: tool === 'pen', onClick: () => setTool('pen') },
     ] },
     { label: 'Window', items: sectionItems.map((t) => ({ label: t, onClick: () => openSection(t) })) },
@@ -5948,9 +5959,9 @@ export default function App() {
 
         <Section title="Edit">
           <div className="toolrow">
-            <button className={tool === 'select' ? 'active' : ''} onClick={() => setTool('select')}>Select / move</button>
-            <button className={tool === 'add' ? 'active' : ''} onClick={() => setTool('add')}>Add / erase</button>
-            <button className={tool === 'node' ? 'active' : ''} onClick={() => setTool('node')}>Nodes</button>
+            <button className={tool === 'select' ? 'active' : ''} onClick={() => switchTool('select')}>Select / move</button>
+            <button className={tool === 'add' ? 'active' : ''} onClick={() => switchTool('add')}>Add / erase</button>
+            <button className={tool === 'node' ? 'active' : ''} onClick={() => switchTool('node')}>Nodes</button>
             <button className={tool === 'pen' ? 'active' : ''} onClick={() => setTool('pen')}>Pen</button>
           </div>
           <p className="hint">
