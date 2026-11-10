@@ -3225,6 +3225,13 @@ export default function App() {
       if (!e.metaKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N')) switchTool('node')
       if (!e.metaKey && !e.ctrlKey && (e.key === 'a' || e.key === 'A')) switchTool('add')
       if (!e.metaKey && !e.ctrlKey && (e.key === 'p' || e.key === 'P')) setTool('pen')
+      // Pen shape straight from the keyboard: B = Bézier (curves with
+      // handles), S = smooth curve through clicks, L = straight lines. Each
+      // also picks up the pen, so B alone is "draw curves now". A path in
+      // progress keeps its anchors and takes the new shape.
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'b' || e.key === 'B')) { setPenMode('bezier'); setTool('pen'); setStatus('Pen: Bézier — click for corners, press-and-drag for curves (S smooth, L straight)') }
+      if (!e.metaKey && !e.ctrlKey && (e.key === 's' || e.key === 'S')) { setPenMode('curve'); setTool('pen'); setStatus('Pen: smooth curve through every click (B Bézier, L straight)') }
+      if (!e.metaKey && !e.ctrlKey && (e.key === 'l' || e.key === 'L')) { setPenMode('straight'); setTool('pen'); setStatus('Pen: straight segments (B Bézier, S smooth)') }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -4971,6 +4978,9 @@ export default function App() {
       { label: 'Add / erase tool', shortcut: 'A', checked: tool === 'add', onClick: () => switchTool('add') },
       { label: 'Node tool — edit path points', shortcut: 'N', checked: tool === 'node', onClick: () => switchTool('node') },
       { label: 'Pen tool — stones along a drawn path', shortcut: 'P', checked: tool === 'pen', onClick: () => setTool('pen') },
+      { label: 'Pen: Bézier curves', shortcut: 'B', checked: tool === 'pen' && penMode === 'bezier', onClick: () => { setPenMode('bezier'); setTool('pen') } },
+      { label: 'Pen: smooth curve through clicks', shortcut: 'S', checked: tool === 'pen' && penMode === 'curve', onClick: () => { setPenMode('curve'); setTool('pen') } },
+      { label: 'Pen: straight segments', shortcut: 'L', checked: tool === 'pen' && penMode === 'straight', onClick: () => { setPenMode('straight'); setTool('pen') } },
     ] },
     { label: 'Window', items: sectionItems.map((t) => ({ label: t, onClick: () => openSection(t) })) },
     { label: 'Help', items: [
@@ -6429,7 +6439,7 @@ export default function App() {
           <button className={`zbtn${tool === 'select' ? ' active' : ''}`} title="Select / move (V) — click or box-select holes and lines, drag to move" onClick={() => switchTool('select')}>Select</button>
           <button className={`zbtn${tool === 'add' ? ' active' : ''}`} title="Add / erase (A) — click empty board to add a hole, click a hole to erase it" onClick={() => switchTool('add')}>Add / erase</button>
           <button className={`zbtn${tool === 'node' ? ' active' : ''}`} title="Nodes (N) — edit a cut line's anchors and handles" onClick={() => switchTool('node')}>Nodes</button>
-          <button className={`zbtn${tool === 'pen' ? ' active' : ''}`} title="Pen (P) — draw a path for stones or a cut line" onClick={() => setTool('pen')}>Pen</button>
+          <button className={`zbtn${tool === 'pen' ? ' active' : ''}`} title="Pen (P) — draw a path for stones or a cut line. B = Bézier curves, S = smooth curve, L = straight" onClick={() => setTool('pen')}>Pen</button>
           {tool === 'pen' && (
             <>
               <label className="tb">Pen output
@@ -6440,10 +6450,10 @@ export default function App() {
                 </select>
               </label>
               <label className="tb">Pen shape
-                <select value={penMode} onChange={(e) => setPenMode(e.target.value as PenMode)}>
-                  <option value="straight">Straight segments</option>
-                  <option value="curve">Smooth curve through clicks</option>
-                  <option value="bezier">Bézier — drag for handles</option>
+                <select value={penMode} title="L straight · S smooth · B Bézier" onChange={(e) => setPenMode(e.target.value as PenMode)}>
+                  <option value="straight">Straight segments (L)</option>
+                  <option value="curve">Smooth curve through clicks (S)</option>
+                  <option value="bezier">Bézier — drag for handles (B)</option>
                 </select>
               </label>
             </>
