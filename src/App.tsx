@@ -3115,7 +3115,12 @@ export default function App() {
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return
       if (tool === 'pen') {
         if (e.key === 'Enter') { finishPen(false); return }
-        if (e.key === 'Escape') { setPenPts([]); setStatus('Pen cancelled'); return }
+        if (e.key === 'Escape') {
+          // Esc with a path in progress drops the path; Esc again (or Esc with
+          // nothing drawn) leaves the pen — people reach for Esc to get out.
+          if (penPtsRef.current.length) { setPenPts([]); setStatus('Pen cancelled — Esc again or V to leave the pen'); return }
+          setTool('select'); setStatus('Select tool'); return
+        }
         if ((e.key === 'Backspace' || e.key === 'Delete') && penPtsRef.current.length) {
           setPenPts((prev) => prev.slice(0, -1))
           return
@@ -5926,7 +5931,7 @@ export default function App() {
                 ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
                 : tool === 'node'
                   ? 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'
-                  : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels.'}
+                  : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels. Press V or Esc (with nothing drawn) to leave the pen.'}
           </p>
           {tool === 'pen' && (
             <>
