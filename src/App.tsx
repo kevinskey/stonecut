@@ -469,6 +469,17 @@ export default function App() {
   // when ORIGIN is set inboard of them.
   const [margin, setMargin] = useState(() => initialDesign?.context?.margin ?? +(safeStorage.getItem('stonecut.margin') ?? DEFAULT_MARGIN))
   useEffect(() => { safeStorage.setItem('stonecut.margin', String(margin)) }, [margin])
+  // Minimum clearance between any cut and a media edge, in inches. Flock lifts
+  // and shifts wherever the sheet is not pinned: a corner half an inch from the
+  // side edge with an inch of lead under the rollers cut ragged, oval holes no
+  // stone would seat in, while the rest of the template was perfect. The
+  // preview shows the safe zone and flags the edges a cut comes too close
+  // to. A warning, never a block — a sheet on a tacky mat cuts fine at 0.
+  const [edgeMinIn, setEdgeMinIn] = useState(() => {
+    const v = +(safeStorage.getItem('stonecut.edgemin') ?? 1)
+    return isFinite(v) && v >= 0 ? v : 1
+  })
+  useEffect(() => { safeStorage.setItem('stonecut.edgemin', String(edgeMinIn)) }, [edgeMinIn])
   // 'design' re-zeroes the job to its own bounding box (cut always starts at
   // the machine origin); 'artboard' keeps the stones where they sit on the
   // sheet, so what you positioned on the page is what gets cut.
@@ -2399,34 +2410,74 @@ export default function App() {
   penPtsRef.current = penPts
   const [penOut, setPenOut] = useState<'stones' | 'line' | 'both'>('stones')
   useEffect(() => { if (tool !== 'pen') setPenPts([]) }, [tool])
-  // Equal arc-length stepping at the panel's stone pitch; both ends get a
-  // stone on an open path, a closed loop spaces n evenly with no doubled
-  // start stone.
+  // Stones along a polyline at the panel's stone pitch. Sharp corners get a
+  // stone of their own and each straight run between corners is divided
+  // evenly, never finer than the pitch: equal arc-length stepping straight
+  // through a right angle put two stones on either side of it at the pitch
+  // along the path but only 0.7 pitch apart in a straight line, so every
+  // beaded rectangle came out "holes too close" and could not cut. Smooth
+  // curves (imported SVG arcs, circles) have no sharp vertices, so they
+  // still space by arc length, where chord and arc agree. A run shorter
+  // than the legal gap drops its far stone rather than crowd the corner.
   const stonesAlongPath = useCallback((pts: Pt[], closed: boolean): Pt[] => {
     if (pts.length < 2) return pts.map((q) => ({ ...q }))
     const hole = sizes[curSize]?.holeMm ?? 3
-    const rhythm = hole + Math.max(gap, hardGapOf(gap))
-    const path = closed ? [...pts, pts[0]] : pts
-    const segs: { a: Pt; b: Pt; len: number }[] = []
-    let total = 0
-    for (let i = 1; i < path.length; i++) {
-      const len = Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)
-      if (len < 1e-6) continue
-      segs.push({ a: path[i - 1], b: path[i], len })
-      total += len
+    const hardGap = hardGapOf(gap)
+    const rhythm = hole + Math.max(gap, hardGap)
+    const minD = hole + hardGap - 0.01
+    // drop zero-length steps so corner detection sees real directions
+    const path: Pt[] = []
+    for (const q of pts) { const l = path[path.length - 1]; if (!l || Math.hypot(q.x - l.x, q.y - l.y) > 1e-6) path.push(q) }
+    if (closed && path.length > 1 && Math.hypot(path[0].x - path[path.length - 1].x, path[0].y - path[path.length - 1].y) <= 1e-6) path.pop()
+    const n = path.length
+    if (n < 2) return [{ ...path[0] }]
+    const dir = (a: Pt, b: Pt) => { const d = Math.hypot(b.x - a.x, b.y - a.y); return { x: (b.x - a.x) / d, y: (b.y - a.y) / d } }
+    const corner = (i: number) => {
+      if (!closed && (i === 0 || i === n - 1)) return true
+      const a = path[(i - 1 + n) % n], b = path[i], c = path[(i + 1) % n]
+      const u = dir(a, b), v = dir(b, c)
+      return u.x * v.x + u.y * v.y < Math.cos(35 * Math.PI / 180)
     }
-    if (!segs.length || total < rhythm * 0.5) return [{ ...pts[0] }]
-    const n = Math.max(1, Math.round(total / rhythm))
-    const step = total / n
-    const count = closed ? n : n + 1
+    const corners: number[] = []
+    for (let i = 0; i < n; i++) if (corner(i)) corners.push(i)
     const out: Pt[] = []
-    let si = 0, acc = 0
-    for (let k = 0; k < count; k++) {
-      const target = Math.min(k * step, total - 1e-9)
-      while (si < segs.length - 1 && acc + segs[si].len < target) { acc += segs[si].len; si++ }
-      const t = Math.max(0, Math.min(1, (target - acc) / segs[si].len))
-      out.push({ x: segs[si].a.x + (segs[si].b.x - segs[si].a.x) * t, y: segs[si].a.y + (segs[si].b.y - segs[si].a.y) * t })
+    const far = (q: Pt) => !out.length || Math.hypot(q.x - out[out.length - 1].x, q.y - out[out.length - 1].y) >= minD
+    // even arc-length stepping along one run of the path, endpoints excluded
+    const stepRun = (from: number, to: number, withEnd: boolean) => {
+      const seg: { a: Pt; b: Pt; len: number }[] = []
+      let total = 0
+      for (let i = from; i !== to; i = (i + 1) % n) {
+        const a = path[i], b = path[(i + 1) % n]
+        const len = Math.hypot(b.x - a.x, b.y - a.y)
+        seg.push({ a, b, len }); total += len
+      }
+      if (!seg.length) return
+      const k = Math.max(1, Math.floor(total / (rhythm * 0.98) + 1e-6))
+      const step = total / k
+      let si = 0, acc = 0
+      for (let j = 1; j < k + (withEnd ? 1 : 0); j++) {
+        const target = Math.min(j * step, total - 1e-9)
+        while (si < seg.length - 1 && acc + seg[si].len < target) { acc += seg[si].len; si++ }
+        const t = Math.max(0, Math.min(1, (target - acc) / seg[si].len))
+        const q = { x: seg[si].a.x + (seg[si].b.x - seg[si].a.x) * t, y: seg[si].a.y + (seg[si].b.y - seg[si].a.y) * t }
+        if (far(q)) out.push(q)
+      }
     }
+    if (!corners.length) {
+      // smooth loop: no anchor, divide the whole loop evenly from the start
+      out.push({ ...path[0] })
+      stepRun(0, 0, false)
+    } else {
+      for (let c = 0; c < corners.length; c++) {
+        const i = corners[c]
+        if (far(path[i])) out.push({ ...path[i] })
+        const last = c === corners.length - 1
+        if (last && !closed) break
+        const to = last ? corners[0] : corners[c + 1]
+        if (i !== to) stepRun(i, to, false)
+      }
+    }
+    if (closed && out.length > 1 && Math.hypot(out[0].x - out[out.length - 1].x, out[0].y - out[out.length - 1].y) < minD) out.pop()
     return out
   }, [sizes, curSize, gap])
   const penPreview = useMemo(
@@ -2471,6 +2522,53 @@ export default function App() {
     }
     setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} path — keep clicking for another, V to select`)
   }, [penOut, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
+
+  // STONES ONTO DRAWN LINES AND SHAPES. The pen, the Shapes panel and an
+  // imported SVG all make cut-line objects; this puts stones on the ones that
+  // are selected, after the fact, without redrawing them. 'bead' threads one
+  // stone every pitch along each line the way the pen does (open or closed);
+  // the other modes treat the closed lines as a shape and run the same
+  // outline / fill engine that text and the Shapes panel use, so the result
+  // is a real element that resizes and re-stones like any other design.
+  const stoneSelectedVectors = useCallback((mode: 'bead' | StoneMode) => {
+    const picked = vectors.filter((v) => selVecs.has(v.id))
+    if (!picked.length) { setStatus('Select a line or shape on the board first (click it, or pick it in Vector cut)'); return }
+    const isClosed = (p: Pt[]) => p.length > 2 && Math.hypot(p[0].x - p[p.length - 1].x, p[0].y - p[p.length - 1].y) < 0.3
+    if (mode === 'bead') {
+      pushUndo(stonesRef.current)
+      const fresh: Stone[] = []
+      const el = nextEl()
+      for (const v of picked) for (const path of vecPaths(v)) {
+        const closed = isClosed(path)
+        const pts = closed ? path.slice(0, -1) : path
+        for (const q of stonesAlongPath(pts, closed)) fresh.push({ x: q.x, y: q.y, size: curSize, layer: 'outline', el, lay: activeLayerId })
+      }
+      if (!fresh.length) { setStatus('Nothing to bead — the selected lines are too short for a stone'); return }
+      const first = stonesRef.current.length
+      const next = [...stonesRef.current, ...fresh]
+      stonesRef.current = next
+      setStones(next)
+      setSelection(new Set(fresh.map((_, i) => first + i)))
+      setSelVecs(new Set())
+      setStatus(`${fresh.length} stones beaded along ${picked.length} line${picked.length === 1 ? '' : 's'} at ${curSize} — the cut line stays; Remove it in Vector cut if the template should be holes only`)
+      return
+    }
+    const paths = picked.flatMap(vecPaths)
+    const closedPaths = paths.filter(isClosed)
+    if (!closedPaths.length) { setStatus('Outline / fill needs a closed shape — these lines are open. Use “Bead stones along the line” instead, or close the path with the Node tool.'); return }
+    let minX = Infinity, minY = Infinity
+    for (const c of closedPaths) for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y) }
+    const contours = closedPaths.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY })))
+    const pts = contoursToStones(contours, mode)
+    if (!pts.length) { setStatus('Shape is too small to hold stones at this size — enlarge it or pick a smaller stone'); return }
+    pushUndo(stonesRef.current)
+    const first = stones.length
+    addGenerated(pts.map((p) => ({ ...p, x: p.x + minX - previewOffX })), minY, { contours, mode, wholeWord: true })
+    setSelection(new Set(pts.map((_, i) => first + i)))
+    setSelVecs(new Set())
+    const skipped = paths.length - closedPaths.length
+    setStatus(`Added ${pts.length} stones from ${closedPaths.length} shape${closedPaths.length === 1 ? '' : 's'} (${mode === 'both' ? 'outline + fill' : mode})${skipped ? ` — ${skipped} open line${skipped === 1 ? '' : 's'} skipped` : ''}. The cut line stays; Remove it in Vector cut if the template should be holes only`)
+  }, [vectors, selVecs, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl, contoursToStones, stones.length, addGenerated, previewOffX])
 
   const onCanvasDown = useCallback(
     (e: React.MouseEvent) => {
@@ -3185,6 +3283,51 @@ export default function App() {
   const conditionIssue = useMemo(() => { try { validateConditions(preset); validateConditions(linePreset); return '' } catch (e) { return e instanceof Error ? e.message : String(e) } }, [preset, linePreset])
   const cutBlocked = frameOutside || cutIssues.length > 0 || !!conditionIssue
   const cutCount = framedCutJob.stones.length + (framedCutJob.paths?.length ?? 0)
+  // Edge clearance: how close what is actually cutting (frame included) comes
+  // to each edge of the loaded media. In artboard mode the board IS the media,
+  // so the four board edges are the four sheet edges; in design mode the job is
+  // re-zeroed `margin` mm inside the corner ORIGIN was pressed on, so only that
+  // corner's two edges are known.
+  const edgeClear = useMemo(() => {
+    if (!cutCount || edgeMinIn <= 0) return null
+    const needMm = edgeMinIn * 25.4
+    const inch = (mm: number) => `${(mm / 25.4).toFixed(2)}″`
+    if (placement === 'design') {
+      if (margin >= needMm - 0.01) return null
+      return {
+        bad: { left: false, right: false, bottom: false, top: false },
+        msg: `Cuts start ${inch(margin)} from the material corner — under the ${edgeMinIn}″ edge clearance. Raise the edge margin, or set ORIGIN at least ${edgeMinIn}″ in from the sheet's corner, so the pinch rollers hold the sheet flat where it cuts.`,
+      }
+    }
+    const j = framedCutJob
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const s of j.stones) {
+      const r = (j.sizes[s.size]?.holeMm ?? 3) / 2
+      minX = Math.min(minX, s.x - r); minY = Math.min(minY, s.y - r)
+      maxX = Math.max(maxX, s.x + r); maxY = Math.max(maxY, s.y + r)
+    }
+    for (const path of j.paths ?? []) for (const q of path) {
+      minX = Math.min(minX, q.x); minY = Math.min(minY, q.y)
+      maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y)
+    }
+    if (!isFinite(minX)) return null
+    const right = originCorner === 'br'
+    const gaps = [
+      { key: 'left' as const, gap: minX, name: right ? 'left edge (far end of the carriage)' : 'left edge (origin side)' },
+      { key: 'right' as const, gap: boardWmm - maxX, name: right ? 'right edge (origin side)' : 'right edge (far end of the carriage)' },
+      { key: 'bottom' as const, gap: boardHmm - maxY, name: 'leading edge (where the media feeds in)' },
+      { key: 'top' as const, gap: minY, name: 'far end of the media' },
+    ]
+    const close = gaps.filter((g) => g.gap < needMm - 0.01)
+    if (!close.length) return null
+    const bad = { left: false, right: false, bottom: false, top: false }
+    for (const g of close) bad[g.key] = true
+    const list = close.map((g) => `${inch(Math.max(0, g.gap))} from the ${g.name}`).join(', ')
+    return {
+      bad,
+      msg: `Cuts come within ${list} — keep at least ${edgeMinIn}″ clear so the pinch rollers hold the sheet flat there. Holes cut on a loose edge come out ragged and undersized. Move the design inward, or load the media with more lead and set ORIGIN again.`,
+    }
+  }, [cutCount, edgeMinIn, placement, margin, framedCutJob, originCorner, boardWmm, boardHmm])
   const layerCounts = useMemo(() => {
     let o = 0
     let f = 0
@@ -3226,6 +3369,7 @@ export default function App() {
     try {
       const warnings: string[] = []
       if (offBoard) warnings.push('Part of the design is off the board and may be clipped.')
+      if (edgeClear) warnings.push(edgeClear.msg)
       const audit = findOverlaps(framedCutJob.stones, (s) => framedCutJob.sizes[s.size]?.holeMm ?? 3, hardGapOf(gap))
       if (audit.involved.length) warnings.push(`${audit.involved.length} cut stones sit closer than the spacing floor. Fix in Production → Check spacing, or cut anyway.`)
       if (framedCutJob.stones.length && framedCutJob.paths?.length && linePreset !== preset) warnings.push('Holes and lines use different material presets but will cut on the same loaded sheet. Cancel and separate the jobs if they belong on different sheets.')
@@ -3242,7 +3386,7 @@ export default function App() {
     } finally {
       preparingCutRef.current = false
     }
-  }, [cutCount, cutBlocked, cutIssues, conditionIssue, frameOutside, frameWarning, offBoard, framedCutJob, gap, linePreset, preset, format, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut, selectionCut, cutLayer])
+  }, [cutCount, cutBlocked, cutIssues, conditionIssue, frameOutside, frameWarning, offBoard, edgeClear, framedCutJob, gap, linePreset, preset, format, originCorner, gpStep, sendConditions, swapAxes, wCircles, overcut, selectionCut, cutLayer])
   const doSendNow = useCallback(async () => {
     if (sendingRef.current || !cutConfirm) return
     // Lock synchronously: two clicks before React rerenders cannot send twice.
@@ -4673,6 +4817,10 @@ export default function App() {
       { label: 'Resize design…', disabled: selectedEl == null, onClick: () => openSection('Edit', 'input[type=number]') },
       { label: 'Ungroup element — split into letters', disabled: selectedEl == null, onClick: ungroupElement },
       'sep',
+      { label: 'Bead stones along the selected line', disabled: !selVecs.size, onClick: () => stoneSelectedVectors('bead') },
+      { label: 'Stone selected shape — outline', disabled: !selVecs.size, onClick: () => stoneSelectedVectors('outline') },
+      { label: 'Stone selected shape — outline + fill', disabled: !selVecs.size, onClick: () => stoneSelectedVectors('both') },
+      'sep',
       { label: 'Rotate 90° CW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(90) },
       { label: 'Rotate 90° CCW', disabled: !selection.size && !selVecs.size, onClick: () => rotateSelection(-90) },
       { label: 'Flip horizontal', disabled: !selection.size && !selVecs.size, onClick: () => flipSelection('h') },
@@ -5660,6 +5808,20 @@ export default function App() {
           {vectors.length > 0 && (
             <p className="hint">Click a line on the board to select it, drag to move, arrows nudge. Lines cut after the holes, in the same pass.</p>
           )}
+          {vectors.length > 0 && (
+            <>
+              <p className="hint" style={{ marginTop: 10 }}><b>Stones on the selected lines</b> — at the active layer's size and the Stones panel's spacing. Works on pen paths, Shapes-panel cut lines and imported SVGs.</p>
+              <div className="toolrow">
+                <button disabled={!selVecs.size} onClick={() => stoneSelectedVectors('bead')}>Bead along the line</button>
+                <button disabled={!selVecs.size} onClick={() => stoneSelectedVectors('outline')}>Outline</button>
+              </div>
+              <div className="toolrow">
+                <button disabled={!selVecs.size} onClick={() => stoneSelectedVectors('both')}>Outline + fill</button>
+                <button disabled={!selVecs.size} onClick={() => stoneSelectedVectors('fill')}>Fill only</button>
+              </div>
+              <p className="hint">Bead threads one stone per pitch along any line, open or closed. Outline and fill treat closed shapes like text — the Fill panel's style applies — and give you a resizable design.</p>
+            </>
+          )}
         </Section>
 
         <Section title="Align & Pathfinder">
@@ -6033,6 +6195,22 @@ export default function App() {
               </p>
             </>
           )}
+          <label>Keep cuts clear of the media edges (in)
+            <input
+              type="number"
+              min={0}
+              max={4}
+              step={0.25}
+              value={edgeMinIn}
+              onChange={(e) => setEdgeMinIn(Math.min(4, Math.max(0, +e.target.value || 0)))}
+            />
+          </label>
+          <p className="hint">
+            The dashed line on the board is the safe zone. Flock that is not under the pinch rollers lifts as the blade sweeps it, and holes cut there come out ragged. 0 turns the check off.
+          </p>
+          {edgeClear && (
+            <p className="hint" style={{ color: '#f0b95e' }} role="alert">{edgeClear.msg}</p>
+          )}
           {offBoard && (
             <p className="hint" style={{ color: '#f0b95e' }}>
               Part of the design sits outside the {boardWIn}″ × {boardHIn}″ artboard. Move it back inside or enlarge the loaded media area before cutting.
@@ -6289,6 +6467,31 @@ export default function App() {
               return (
                 <>
                   <rect x={0} y={0} width={W} height={H} fill={boardColor ?? '#ffffff'} fillOpacity={boardColor ? 1 : 0.035} stroke="#7789ad" strokeWidth={1.5} />
+                  {/* safe zone: cuts closer than edgeMinIn to a sheet edge sit
+                      on flock the pinch rollers are not holding flat */}
+                  {placement === 'artboard' && edgeMinIn > 0 && edgeMinIn * inch * 2 < Math.min(W, H) && (() => {
+                    const m = edgeMinIn * inch
+                    const bad = edgeClear?.bad
+                    const band = 6
+                    return (
+                      <>
+                        <rect x={m} y={m} width={W - 2 * m} height={H - 2 * m} fill="none" stroke={bad ? '#f0b95e' : ruleCol} strokeWidth={1} strokeDasharray="6 4" />
+                        {bad?.left && <rect x={0} y={0} width={m} height={H} fill="#f0b95e" fillOpacity={0.22} />}
+                        {bad?.right && <rect x={W - m} y={0} width={m} height={H} fill="#f0b95e" fillOpacity={0.22} />}
+                        {bad?.bottom && <rect x={0} y={H - m} width={W} height={m} fill="#f0b95e" fillOpacity={0.22} />}
+                        {bad?.top && <rect x={0} y={0} width={W} height={m} fill="#f0b95e" fillOpacity={0.22} />}
+                        {bad?.left && <line x1={band / 2} y1={0} x2={band / 2} y2={H} stroke="#f0b95e" strokeWidth={band} />}
+                        {bad?.right && <line x1={W - band / 2} y1={0} x2={W - band / 2} y2={H} stroke="#f0b95e" strokeWidth={band} />}
+                        {bad?.bottom && <line x1={0} y1={H - band / 2} x2={W} y2={H - band / 2} stroke="#f0b95e" strokeWidth={band} />}
+                        {bad?.top && <line x1={0} y1={band / 2} x2={W} y2={band / 2} stroke="#f0b95e" strokeWidth={band} />}
+                        {bad && (
+                          <text x={W / 2} y={H / 2} fill="#f0b95e" fontSize={12} fontWeight={700} textAnchor="middle" stroke="#12151c" strokeWidth={3} paintOrder="stroke">
+                            ⚠ cuts within {edgeMinIn}″ of the media edge — rollers may not hold the sheet flat there
+                          </text>
+                        )}
+                      </>
+                    )
+                  })()}
                   {Array.from({ length: cols }, (_, k) => k + 1).map((i) => (
                     <g key={`v${i}`}>
                       <line x1={ox + dir * i * inch} y1={0} x2={ox + dir * i * inch} y2={H} stroke={ruleCol} strokeWidth={1} />
@@ -6457,6 +6660,10 @@ export default function App() {
           const items: Item[] =
             ctxMenu.kind === 'vec'
               ? [
+                  { label: 'Bead stones along the line', disabled: !selVecs.size, onClick: () => run(() => stoneSelectedVectors('bead')) },
+                  { label: 'Stone as a shape — outline', disabled: !selVecs.size, onClick: () => run(() => stoneSelectedVectors('outline')) },
+                  { label: 'Stone as a shape — outline + fill', disabled: !selVecs.size, onClick: () => run(() => stoneSelectedVectors('both')) },
+                  'sep',
                   { label: 'Ungroup — split into letters', disabled: !selVecs.size, onClick: () => run(ungroup) },
                   { label: 'Rotate 90° CW', onClick: () => run(() => rotateSelection(90)) },
                   { label: 'Rotate 90° CCW', onClick: () => run(() => rotateSelection(-90)) },
