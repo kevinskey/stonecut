@@ -1,3 +1,5 @@
+import { flattenPath, polylineToBez, svgPathToBez, transformBez } from './bezier'
+import type { BezPath } from './bezier'
 import type { Pt } from './model'
 
 // ---------------------------------------------------------------------------
@@ -15,6 +17,7 @@ import type { Pt } from './model'
 export interface VectorImport {
   name: string
   paths: Pt[][] // mm, normalised so the bounding box starts at (0,0)
+  bez: BezPath[] // one per path, same coordinates: <path> curves keep their handles, everything else is corner anchors
   widthMm: number
   heightMm: number
   skipped: number // elements that could not be flattened (text, images…)
@@ -121,6 +124,7 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
 
     const stepMm = 0.15 // sampling step along curves, before simplification
     const paths: Pt[][] = []
+    const bez: BezPath[] = []
     let skipped = 0
     const all = Array.from(svg.querySelectorAll('*'))
     for (const el of all) {
@@ -138,6 +142,19 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
         x: (m.a * x + m.c * y + m.e - vbX) * mmPerUnit,
         y: (m.b * x + m.d * y + m.f - vbY) * mmPerUnit,
       })
+      // <path> data parses straight to Bézier anchors (exact, editable);
+      // arcs and the other elements fall through to sampling below.
+      if (tag === 'path') {
+        const parsed = svgPathToBez(g.getAttribute('d') ?? '')
+        if (parsed) {
+          const inMm = transformBez(parsed, (q) => toMm(q.x, q.y))
+          for (const bp of inMm) {
+            const flat = flattenPath(bp)
+            if (flat.length >= 2) { paths.push(flat); bez.push(bp) }
+          }
+          continue
+        }
+      }
       let total: number
       try { total = g.getTotalLength() } catch { skipped++; continue }
       if (!isFinite(total) || total <= 0) continue
@@ -157,7 +174,7 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
         }
         start = end
         const s = simplify(pts, 0.03)
-        if (s.length >= 2) paths.push(s)
+        if (s.length >= 2) { paths.push(s); bez.push(polylineToBez(s)) }
       }
     }
     if (!paths.length) throw new Error(skipped ? 'No cuttable shapes — the file is text or images only. Convert text to outlines first.' : 'No shapes found in this SVG')
@@ -165,7 +182,8 @@ export function parseSvgToPaths(svgText: string, name = 'vector'): VectorImport 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const p of paths) for (const q of p) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
     const out = paths.map((p) => p.map((q) => ({ x: q.x - minX, y: q.y - minY })))
-    return { name, paths: out, widthMm: maxX - minX, heightMm: maxY - minY, skipped }
+    const outBez = transformBez(bez, (q) => ({ x: q.x - minX, y: q.y - minY }))
+    return { name, paths: out, bez: outBez, widthMm: maxX - minX, heightMm: maxY - minY, skipped }
   } finally {
     host.remove()
   }

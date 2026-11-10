@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type opentype from 'opentype.js'
 import { DEFAULT_PRESETS, DEFAULT_SIZES } from './model'
 import { layerOf, makeLayer, nextLayerId, nextLayerName, resolveLayers } from './layers'
+import { anchorAt, autoSmooth, bezToBase, flattenPath, hasHandle, nearestOnPath, polylineToBez, smoothThroughPts, splitAt, transformBez } from './bezier'
+import type { BezAnchor, BezPath } from './bezier'
 import type { Layer } from './layers'
 import type { MaterialPreset, Pt, Stone, StoneSpec } from './model'
 import { SpacingIndex, bareFrac, capGaps, debugSpans, debugStones, spinedWidths, fillByGlyph, fillStones, offsetRows, outlineOrSpine, pointInPoly, rasterizeContours } from './fill'
@@ -57,30 +59,6 @@ const normaliseContours = (contours: Pt[][]): Pt[][] => {
 }
 
 // splitContoursIntoLetters moved to contours.ts — shared with arc text.
-
-// Smooth curve through every clicked point (Catmull-Rom, flattened to short
-// straight runs): the pen's Curve mode. A click-drag Bézier pen needs handle
-// dragging the node tool can't edit yet; a through-point spline gives a
-// smooth path with nothing to learn — click where the curve should pass.
-const smoothThrough = (pts: Pt[], closed: boolean, perSeg = 12): Pt[] => {
-  const n = pts.length
-  if (n < 3) return pts.map((q) => ({ ...q }))
-  const at = (i: number) => closed ? pts[((i % n) + n) % n] : pts[Math.max(0, Math.min(n - 1, i))]
-  const out: Pt[] = []
-  const segs = closed ? n : n - 1
-  for (let i = 0; i < segs; i++) {
-    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2)
-    for (let k = 0; k < perSeg; k++) {
-      const t = k / perSeg, t2 = t * t, t3 = t2 * t
-      out.push({
-        x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
-        y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
-      })
-    }
-  }
-  if (!closed) out.push({ ...pts[n - 1] })
-  return out
-}
 
 // Rotate points by `rad` around `center` — used when baking rotation into
 // cut-line objects (holes are circles, so stone rotation is exact too).
@@ -1929,7 +1907,8 @@ export default function App() {
     const rot = vecPaths(v).map((c) => c.map((q) => rotatePt(q, center, rad)))
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
     for (const c of rot) for (const q of c) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
-    return { ...v, base: rot.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY }))), baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
+    const bez = v.bez && transformBez(v.bez, (q) => { const b = rotatePt({ x: q.x * v.s + v.x, y: q.y * v.s + v.y }, center, rad); return { x: b.x - minX, y: b.y - minY } })
+    return { ...v, base: rot.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY }))), bez, baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
   }
   const rotateSelection = useCallback((deg: number) => {
     const rad = (deg * Math.PI) / 180
@@ -1961,10 +1940,12 @@ export default function App() {
       pushUndo(stonesRef.current)
       setVectors((prev) => prev.map((v) => {
         if (!selVecs.has(v.id)) return v
-        const flipped = vecPaths(v).map((pl) => pl.map((q) => (axis === 'h' ? { x: cx * 2 - q.x, y: q.y } : { x: q.x, y: cy * 2 - q.y })))
+        const flip = (q: Pt) => (axis === 'h' ? { x: cx * 2 - q.x, y: q.y } : { x: q.x, y: cy * 2 - q.y })
+        const flipped = vecPaths(v).map((pl) => pl.map(flip))
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
         for (const pl of flipped) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
-        return { ...v, base: flipped.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))), baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
+        const bez = v.bez && transformBez(v.bez, (q) => { const b = flip({ x: q.x * v.s + v.x, y: q.y * v.s + v.y }); return { x: b.x - minX, y: b.y - minY } })
+        return { ...v, base: flipped.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))), bez, baseW: maxX - minX, baseH: maxY - minY, x: minX, y: minY, s: 1 }
       }))
       setStatus(`Flipped ${axis === 'h' ? 'horizontally' : 'vertically'}`)
       return
@@ -2395,21 +2376,10 @@ export default function App() {
   const [nodeSel, setNodeSel] = useState<Set<string>>(new Set()) // `${pathIdx}:${ptIdx}`
   const nodeSelRef = useRef(nodeSel)
   nodeSelRef.current = nodeSel
-  const nodeDrag = useRef<{ vecId: number; p0: Pt; orig: VecItem; keys: Set<string>; moved: boolean } | null>(null)
+  // Keys name ANCHORS (`${pathIdx}:${anchorIdx}` of v.bez). A drag moves the
+  // selected anchors with their handles, or one handle of one anchor.
+  const nodeDrag = useRef<{ vecId: number; p0: Pt; orig: VecItem; kind: 'anchor' | 'hi' | 'ho'; pi: number; ai: number; keys: Set<string>; moved: boolean; alt: boolean } | null>(null)
   useEffect(() => { setNodeSel(new Set()) }, [tool, selVecs])
-  // A closed ring stores its first point twice (start + closing point) —
-  // whatever happens to one end must happen to the other, or the loop opens.
-  const expandClosedPairs = (v: VecItem, keys: Set<string>): Set<string> => {
-    const out = new Set(keys)
-    v.base.forEach((pl, pi) => {
-      const n = pl.length
-      if (n > 2 && Math.hypot(pl[0].x - pl[n - 1].x, pl[0].y - pl[n - 1].y) < 1e-6) {
-        if (out.has(`${pi}:0`)) out.add(`${pi}:${n - 1}`)
-        if (out.has(`${pi}:${n - 1}`)) out.add(`${pi}:0`)
-      }
-    })
-    return out
-  }
   // After node edits the base no longer starts at (0,0) — shift it back and
   // fold the shift into x/y so boxes, exports and resize stay honest.
   const renormalizeVec = (v: VecItem): VecItem => {
@@ -2419,6 +2389,7 @@ export default function App() {
     return {
       ...v,
       base: v.base.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+      bez: v.bez && transformBez(v.bez, (q) => ({ x: q.x - minX, y: q.y - minY })),
       baseW: maxX - minX,
       baseH: maxY - minY,
       x: v.x + minX * v.s,
@@ -2429,21 +2400,36 @@ export default function App() {
     () => (tool === 'node' && selVecs.size === 1 ? vectors.find((v) => selVecs.has(v.id)) ?? null : null),
     [tool, selVecs, vectors],
   )
+  // The node tool edits curves. An object that never had any (text cut
+  // lines, shapes, booleans, old projects) gets exact corner anchors the
+  // first time it is picked — nothing moves until a handle is pulled.
+  useEffect(() => {
+    if (nodeVec && !nodeVec.bez) setVectors((prev) => prev.map((v) => (v.id === nodeVec.id ? { ...v, bez: v.base.map(polylineToBez) } : v)))
+  }, [nodeVec])
 
   // ---------- pen tool: draw a path, stones bead along it ----------
   // Click to place anchors; Enter or double-click finishes an open path,
   // clicking back on the first anchor closes it. Backspace removes the last
   // anchor, Esc cancels. Output: stones at pitch along the path, a cut
   // line, or both.
-  const [penPts, setPenPts] = useState<Pt[]>([])
+  // Anchors in board mm. Straight: corners at every click. Curve: the path
+  // bends through every click (handles worked out at finish). Bézier: click
+  // for a corner, click-drag to pull out handles, Illustrator-style — the
+  // drag sets the out-handle and mirrors the in-handle.
+  const [penPts, setPenPts] = useState<BezAnchor[]>([])
   const penPtsRef = useRef(penPts)
   penPtsRef.current = penPts
   const [penOut, setPenOut] = useState<'stones' | 'line' | 'both'>('stones')
-  // Curve mode: the path bends smoothly through the clicked points instead of
-  // cornering at them. Remembered — people who draw curves keep drawing them.
-  const [penCurve, setPenCurve] = useState(() => safeStorage.getItem('stonecut.pencurve') === '1')
-  useEffect(() => { safeStorage.setItem('stonecut.pencurve', penCurve ? '1' : '0') }, [penCurve])
-  const penShape = useCallback((pts: Pt[], closed: boolean): Pt[] => (penCurve ? smoothThrough(pts, closed) : (closed ? [...pts] : pts)), [penCurve])
+  type PenMode = 'straight' | 'curve' | 'bezier'
+  const [penMode, setPenMode] = useState<PenMode>(() => {
+    const v = safeStorage.getItem('stonecut.penmode')
+    if (v === 'curve' || v === 'bezier' || v === 'straight') return v
+    return safeStorage.getItem('stonecut.pencurve') === '1' ? 'curve' : 'straight'
+  })
+  useEffect(() => { safeStorage.setItem('stonecut.penmode', penMode) }, [penMode])
+  const penDragRef = useRef<{ idx: number; p0: Pt } | null>(null)
+  const penPath = useCallback((anchors: BezAnchor[], closed: boolean): BezPath =>
+    (penMode === 'curve' ? smoothThroughPts(anchors, closed) : { a: anchors, closed }), [penMode])
   useEffect(() => { if (tool !== 'pen') setPenPts([]) }, [tool])
   // Stones along a polyline at the panel's stone pitch. Sharp corners get a
   // stone of their own and each straight run between corners is divided
@@ -2516,24 +2502,26 @@ export default function App() {
     return out
   }, [sizes, curSize, gap])
   const penPreview = useMemo(
-    () => (tool === 'pen' && penPts.length > 1 ? stonesAlongPath(penShape(penPts, false), false) : []),
-    [tool, penPts, stonesAlongPath, penShape],
+    () => (tool === 'pen' && penPts.length > 1 ? stonesAlongPath(flattenPath(penPath(penPts, false)), false) : []),
+    [tool, penPts, stonesAlongPath, penPath],
   )
   const finishPen = useCallback((close: boolean) => {
     const raw = penPtsRef.current
-    const pts: Pt[] = []
+    const pts: BezAnchor[] = []
     for (const q of raw) {
       const l = pts[pts.length - 1]
       if (!l || Math.hypot(q.x - l.x, q.y - l.y) > 0.3) pts.push(q) // dbl-click dup
     }
     setPenPts([])
+    penDragRef.current = null
     if (!raw.length) return // double-click with nothing drawn: not an error
     if (pts.length < 2) { setStatus('Pen needs at least two points — click along the line you want, then Enter'); return }
     pushUndo(stonesRef.current)
     const parts: string[] = []
-    const shaped = penShape(pts, close)
+    const path = penPath(pts, close)
+    const shaped = flattenPath(path) // closed: ends on a copy of the first point
     if (penOut !== 'line') {
-      const placed = stonesAlongPath(shaped, close)
+      const placed = stonesAlongPath(close ? shaped.slice(0, -1) : shaped, close)
       const el = nextEl()
       const next = [...stonesRef.current, ...placed.map((p): Stone => ({ x: p.x, y: p.y, size: curSize, layer: 'outline', el, lay: activeLayerId }))]
       stonesRef.current = next
@@ -2541,13 +2529,13 @@ export default function App() {
       parts.push(`${placed.length} stones`)
     }
     if (penOut !== 'stones') {
-      const path = close ? [...shaped, { ...shaped[0] }] : shaped
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-      for (const q of path) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
+      for (const q of shaped) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
       setVectors((prev) => [...prev, {
         id: vecSeq.current++,
         name: 'pen path',
-        base: [path.map((q) => ({ x: q.x - minX, y: q.y - minY }))],
+        base: [shaped.map((q) => ({ x: q.x - minX, y: q.y - minY }))],
+        bez: transformBez([path], (q) => ({ x: q.x - minX, y: q.y - minY })),
         baseW: maxX - minX,
         baseH: maxY - minY,
         x: minX,
@@ -2556,8 +2544,8 @@ export default function App() {
       }])
       parts.push('1 cut line')
     }
-    setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} ${penCurve ? 'curve' : 'path'} — keep clicking for another, V to select`)
-  }, [penOut, penCurve, penShape, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
+    setStatus(`Pen: ${parts.join(' + ')} along the ${close ? 'closed' : 'open'} ${penMode === 'straight' ? 'path' : 'curve'} — keep clicking for another, N edits its handles, V to select`)
+  }, [penOut, penMode, penPath, stonesAlongPath, curSize, activeLayerId, pushUndo, nextEl])
 
   // STONES ONTO DRAWN LINES AND SHAPES. The pen, the Shapes panel and an
   // imported SVG all make cut-line objects; this puts stones on the ones that
@@ -2623,35 +2611,43 @@ export default function App() {
           finishPen(true) // clicking back on the start closes the loop
           return
         }
-        setPenPts((prev) => [...prev, p])
+        const next = [...penPtsRef.current, anchorAt(p)]
+        penPtsRef.current = next
+        setPenPts(next)
+        // Bézier: keep the button down and drag to pull the handles out
+        if (penMode === 'bezier') penDragRef.current = { idx: next.length - 1, p0: p }
         return
       }
       if (tool === 'node') {
         const slopN = Math.max(0.5, 8 / zoom)
-        if (nodeVec) {
+        if (nodeVec?.bez) {
           const v = nodeVec
-          let hit: { pi: number; qi: number } | null = null
+          const bz: BezPath[] = nodeVec.bez
+          const bd = (q: Pt) => Math.hypot(q.x * v.s + v.x - p.x, q.y * v.s + v.y - p.y)
+          const total = bz.reduce((n, pp) => n + pp.a.length, 0)
+          // handles sit on top of anchors, so they win a tie; past 600
+          // anchors only the selected ones show handles (see the renderer)
+          let hit = null as { pi: number; ai: number; kind: 'anchor' | 'hi' | 'ho' } | null
           let hd = slopN
-          v.base.forEach((pl, pi) => pl.forEach((q, qi) => {
-            const d = Math.hypot(q.x * v.s + v.x - p.x, q.y * v.s + v.y - p.y)
-            if (d < hd) { hd = d; hit = { pi, qi } }
+          bz.forEach((pp, pi) => pp.a.forEach((a, ai) => {
+            if (total > 600 && !nodeSelRef.current.has(`${pi}:${ai}`)) return
+            if (hasHandle(a, a.hi)) { const d = bd(a.hi); if (d < hd) { hd = d; hit = { pi, ai, kind: 'hi' } } }
+            if (hasHandle(a, a.ho)) { const d = bd(a.ho); if (d < hd) { hd = d; hit = { pi, ai, kind: 'ho' } } }
           }))
+          if (!hit) {
+            hd = slopN
+            bz.forEach((pp, pi) => pp.a.forEach((a, ai) => { const d = bd(a); if (d < hd) { hd = d; hit = { pi, ai, kind: 'anchor' } } }))
+          }
           if (hit) {
-            const { pi, qi } = hit
-            const key = `${pi}:${qi}`
-            if (e.shiftKey) {
+            const { pi, ai, kind } = hit
+            const key = `${pi}:${ai}`
+            if (kind === 'anchor' && e.shiftKey) {
               setNodeSel((prev) => { const n = new Set(prev); if (n.has(key)) n.delete(key); else n.add(key); return n })
               return
             }
-            const keys = nodeSelRef.current.has(key) ? nodeSelRef.current : new Set([key])
+            const keys = kind === 'anchor' && nodeSelRef.current.has(key) ? nodeSelRef.current : new Set([key])
             setNodeSel(keys)
-            nodeDrag.current = {
-              vecId: v.id,
-              p0: p,
-              orig: { ...v, base: v.base.map((pl) => pl.map((q) => ({ ...q }))) },
-              keys: expandClosedPairs(v, keys),
-              moved: false,
-            }
+            nodeDrag.current = { vecId: v.id, p0: p, orig: v, kind, pi, ai, keys, moved: false, alt: e.altKey }
             if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
             return
           }
@@ -2798,7 +2794,7 @@ export default function App() {
       drag.current = { startX: p.x, startY: p.y, moved: false, orig: stones }
       if (svgRef.current) svgRef.current.style.cursor = 'grabbing'
     },
-    [toMm, stones, vectors, selVecs, tool, curSize, activeLayerId, layerOpen, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen, previewLive, previewStones, imagePreview, textPreview, previewOffX, previewOffsetY, previewBaseY],
+    [toMm, stones, vectors, selVecs, tool, curSize, activeLayerId, layerOpen, addSize, mutate, pickStone, zoom, hitHandle, hitVecHandle, hitRotateHandle, vecSelBox, selectedEl, selBox, pushUndo, nodeVec, finishPen, penMode, previewLive, previewStones, imagePreview, textPreview, previewOffX, previewOffsetY, previewBaseY],
   )
   const vecDrag = useRef<{ ids: number[]; startX: number; startY: number; moved: boolean; orig: VecItem[] } | null>(null)
 
@@ -2818,6 +2814,13 @@ export default function App() {
         previewDragRef.current = { x: p.x, y: p.y }
         return
       }
+      const penD = penDragRef.current
+      if (penD) {
+        const p = toMm(e)
+        if (Math.hypot(p.x - penD.p0.x, p.y - penD.p0.y) * zoom < 3) return
+        setPenPts((prev) => prev.map((a, i) => (i === penD.idx ? { ...a, ho: p, hi: { x: 2 * a.x - p.x, y: 2 * a.y - p.y }, smooth: true } : a)))
+        return
+      }
       const nd = nodeDrag.current
       if (nd) {
         const p = toMm(e)
@@ -2825,10 +2828,28 @@ export default function App() {
         if (!nd.moved && Math.hypot(dx, dy) * zoom < 3) return
         if (!nd.moved) { nd.moved = true; pushUndo(stonesRef.current) }
         const o = nd.orig
-        setVectors((prev) => prev.map((v) =>
-          v.id === nd.vecId
-            ? { ...v, base: o.base.map((pl, pi) => pl.map((q, qi) => (nd.keys.has(`${pi}:${qi}`) ? { x: q.x + dx / o.s, y: q.y + dy / o.s } : q))) }
-            : v))
+        const ob = o.bez ?? o.base.map(polylineToBez)
+        const sx = dx / o.s, sy = dy / o.s
+        const bez: BezPath[] = ob.map((pp, pi) => ({ closed: pp.closed, a: pp.a.map((a, ai) => {
+          if (nd.kind === 'anchor') {
+            if (!nd.keys.has(`${pi}:${ai}`)) return a
+            return { ...a, x: a.x + sx, y: a.y + sy, hi: { x: a.hi.x + sx, y: a.hi.y + sy }, ho: { x: a.ho.x + sx, y: a.ho.y + sy } }
+          }
+          if (pi !== nd.pi || ai !== nd.ai) return a
+          // one handle: a smooth anchor swings the opposite handle to stay in
+          // line (its own length kept); Alt breaks the pair into a corner
+          const moved = nd.kind === 'hi' ? { x: a.hi.x + sx, y: a.hi.y + sy } : { x: a.ho.x + sx, y: a.ho.y + sy }
+          const other = nd.kind === 'hi' ? a.ho : a.hi
+          const smooth = a.smooth && !(e.altKey || nd.alt)
+          let otherNew = other
+          if (smooth) {
+            const len = Math.hypot(other.x - a.x, other.y - a.y)
+            const d = Math.hypot(moved.x - a.x, moved.y - a.y)
+            if (d > 1e-6) otherNew = { x: a.x - ((moved.x - a.x) / d) * len, y: a.y - ((moved.y - a.y) / d) * len }
+          }
+          return nd.kind === 'hi' ? { ...a, hi: moved, ho: otherNew, smooth } : { ...a, ho: moved, hi: otherNew, smooth }
+        }) }))
+        setVectors((prev) => prev.map((v) => (v.id === nd.vecId ? { ...v, bez, base: bezToBase(bez) } : v)))
         return
       }
       if (marqueeRef.current && tool === 'select') {
@@ -2908,6 +2929,7 @@ export default function App() {
                 x: ax + (v.x - ax) * fx,
                 y: ay + (v.y - ay) * fy,
                 base: rx === 1 ? v.base : v.base.map((pl) => pl.map((q) => ({ x: q.x * rx, y: q.y }))),
+                bez: rx === 1 ? v.bez : v.bez && transformBez(v.bez, (q) => ({ x: q.x * rx, y: q.y })),
                 baseW: v.baseW * rx,
               }
             : v))
@@ -2983,6 +3005,7 @@ export default function App() {
 
   const onCanvasUp = useCallback(() => {
     previewDragRef.current = null
+    penDragRef.current = null
     const nd = nodeDrag.current
     nodeDrag.current = null
     if (nd?.moved) setVectors((prev) => prev.map((v) => (v.id === nd.vecId ? renormalizeVec(v) : v)))
@@ -3045,35 +3068,42 @@ export default function App() {
       const p = toMm(e)
       if (tool === 'pen') { finishPen(false); return }
       if (tool === 'node') {
-        // double-click a segment of the edited object: insert a vertex there
         const v = nodeVec
-        if (!v) return
+        if (!v?.bez) return
+        const bz = v.bez
         const slopN = Math.max(0.5, 8 / zoom)
-        let best: { pi: number; i: number; q: Pt } | null = null
-        let bestD = slopN
-        v.base.forEach((pl, pi) => {
-          for (let i = 1; i < pl.length; i++) {
-            const A = { x: pl[i - 1].x * v.s + v.x, y: pl[i - 1].y * v.s + v.y }
-            const B = { x: pl[i].x * v.s + v.x, y: pl[i].y * v.s + v.y }
-            const dx = B.x - A.x, dy = B.y - A.y
-            const len2 = dx * dx + dy * dy
-            const t = len2 ? Math.max(0, Math.min(1, ((p.x - A.x) * dx + (p.y - A.y) * dy) / len2)) : 0
-            const d = Math.hypot(p.x - (A.x + t * dx), p.y - (A.y + t * dy))
-            if (d < bestD) {
-              bestD = d
-              best = { pi, i, q: { x: pl[i - 1].x + t * (pl[i].x - pl[i - 1].x), y: pl[i - 1].y + t * (pl[i].y - pl[i - 1].y) } }
-            }
-          }
+        const commit = (bez: BezPath[]) => {
+          pushUndo(stonesRef.current)
+          setVectors((prev) => prev.map((vv) => (vv.id === v.id ? renormalizeVec({ ...vv, bez, base: bezToBase(bez) }) : vv)))
+        }
+        // on an anchor: corner <-> smooth
+        let hitA = null as { pi: number; ai: number } | null
+        let hd = slopN
+        bz.forEach((pp, pi) => pp.a.forEach((a, ai) => {
+          const d = Math.hypot(a.x * v.s + v.x - p.x, a.y * v.s + v.y - p.y)
+          if (d < hd) { hd = d; hitA = { pi, ai } }
+        }))
+        if (hitA) {
+          const { pi, ai } = hitA
+          const cur = bz[pi].a[ai]
+          const curved = cur.smooth || hasHandle(cur, cur.hi) || hasHandle(cur, cur.ho)
+          commit(bz.map((pp, k) => (k !== pi ? pp : { ...pp, a: pp.a.map((a, j) => (j !== ai ? a : curved ? anchorAt(a) : autoSmooth(pp, ai))) })))
+          setNodeSel(new Set([`${pi}:${ai}`]))
+          setStatus(curved ? 'Smooth → corner' : 'Corner → smooth — drag a handle to shape the curve, Alt-drag moves one handle alone')
+          return
+        }
+        // on a segment: insert an anchor there, shape unchanged
+        const local = { x: (p.x - v.x) / v.s, y: (p.y - v.y) / v.s }
+        let best = null as { pi: number; seg: number; t: number; d: number } | null
+        bz.forEach((pp, pi) => {
+          const h = nearestOnPath(pp, local, slopN / v.s)
+          if (h && (!best || h.d < best.d)) best = { pi, seg: h.seg, t: h.t, d: h.d }
         })
         if (!best) return
-        const { pi, i, q } = best
-        pushUndo(stonesRef.current)
-        setVectors((prev) => prev.map((vv) =>
-          vv.id === v.id
-            ? { ...vv, base: vv.base.map((pl, k) => (k === pi ? [...pl.slice(0, i), q, ...pl.slice(i)] : pl)) }
-            : vv))
-        setNodeSel(new Set([`${pi}:${i}`]))
-        setStatus('Node added — drag it, Delete removes it')
+        const { pi, seg, t } = best
+        commit(bz.map((pp, k) => (k === pi ? splitAt(pp, seg, t) : pp)))
+        setNodeSel(new Set([`${pi}:${seg + 1}`]))
+        setStatus('Anchor added — drag it or its handles, Delete removes it')
         return
       }
       const start = pickStone(p, Math.max(0.5, HIT_SLOP_PX / zoom))
@@ -3126,22 +3156,19 @@ export default function App() {
           return
         }
       }
-      if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && nodeSel.size && nodeVec) {
-        // remove the selected nodes, not the whole object — the node tool's
+      if ((e.key === 'Delete' || e.key === 'Backspace') && tool === 'node' && nodeSel.size && nodeVec?.bez) {
+        // remove the selected anchors, not the whole object — the node tool's
         // Delete must win over the object-level delete below
         const v = nodeVec
-        const keys = expandClosedPairs(v, nodeSel)
+        const bz: BezPath[] = nodeVec.bez
         mutateVectors((prev) => prev.flatMap((vv) => {
           if (vv.id !== v.id) return [vv]
-          const base: Pt[][] = []
-          vv.base.forEach((pl, pi) => {
-            const n = pl.length
-            const closed = n > 3 && Math.hypot(pl[0].x - pl[n - 1].x, pl[0].y - pl[n - 1].y) < 1e-6
-            let pts = pl.filter((_, qi) => !keys.has(`${pi}:${qi}`))
-            if (closed && keys.has(`${pi}:0`) && pts.length >= 3) pts = [...pts, { ...pts[0] }]
-            if (pts.length >= (closed ? 4 : 2)) base.push(pts)
+          const bez: BezPath[] = []
+          bz.forEach((pp, pi) => {
+            const a = pp.a.filter((_, ai) => !nodeSel.has(`${pi}:${ai}`))
+            if (a.length >= (pp.closed ? 3 : 2)) bez.push({ closed: pp.closed, a })
           })
-          return base.length ? [renormalizeVec({ ...vv, base })] : []
+          return bez.length ? [renormalizeVec({ ...vv, bez, base: bezToBase(bez) })] : []
         }))
         setNodeSel(new Set())
         return
@@ -4216,7 +4243,7 @@ export default function App() {
         const id = vecSeq.current++
         const below = stones.length || vectors.length ? bbox.maxY + 10 : 10
         const y = Math.max(10, Math.min(below, boardHmm - r.heightMm * s - 10))
-        mutateVectors((prev) => [...prev, { id, name: r.name, base: r.paths, baseW: r.widthMm, baseH: r.heightMm, x: 10, y, s }])
+        mutateVectors((prev) => [...prev, { id, name: r.name, base: r.paths, bez: r.bez, baseW: r.widthMm, baseH: r.heightMm, x: 10, y, s }])
         setSelVecs(new Set([id]))
         const pts = r.paths.reduce((n, p) => n + p.length, 0)
         setStatus(
@@ -4371,6 +4398,7 @@ export default function App() {
       for (const pl of result) for (const q of pl) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y) }
       replaced.set(v.id, {
         ...v,
+        bez: undefined, // an offset is a new polygon; node-editing it rebuilds anchors
         base: result.map((pl) => pl.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
         baseW: maxX - minX,
         baseH: maxY - minY,
@@ -4415,6 +4443,7 @@ export default function App() {
             id,
             name: `${v.name} ${k + 1}`,
             base: cs.map((c) => c.map((q) => ({ x: q.x - minX, y: q.y - minY }))),
+            bez: v.bez && transformBez(g.map((i) => v.bez![i]), (q) => ({ x: q.x * v.s + v.x - minX, y: q.y * v.s + v.y - minY })),
             baseW: maxX - minX,
             baseH: maxY - minY,
             x: minX,
@@ -5930,7 +5959,7 @@ export default function App() {
               : tool === 'add'
                 ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
                 : tool === 'node'
-                  ? 'Click a cut-line object to edit its points: drag a node to move it, shift-click selects several, double-click a segment inserts a node, Delete removes the selected nodes. Works on cut-line objects (imported SVGs, shapes, text cut lines), not on stones.'
+                  ? 'Click a cut-line object to edit its curve: drag an anchor to move it, drag a handle to bend the curve (Alt-drag moves one handle on its own), double-click an anchor to switch it between corner and smooth, double-click a segment to add an anchor, shift-click selects several, Delete removes the selected anchors. Diamonds are smooth anchors, squares are corners. Works on cut-line objects (pen paths, imported SVGs, shapes, text cut lines), not on stones.'
                   : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels. Press V or Esc (with nothing drawn) to leave the pen.'}
           </p>
           {tool === 'pen' && (
@@ -5943,12 +5972,17 @@ export default function App() {
                 </select>
               </label>
               <label>Pen shape
-                <select value={penCurve ? 'curve' : 'straight'} onChange={(e) => setPenCurve(e.target.value === 'curve')}>
+                <select value={penMode} onChange={(e) => setPenMode(e.target.value as PenMode)}>
                   <option value="straight">Straight segments — corners at each click</option>
                   <option value="curve">Smooth curve — bends through each click</option>
+                  <option value="bezier">Bézier — click for a corner, drag to pull handles</option>
                 </select>
               </label>
-              <p className="hint">{penCurve ? 'Click along the curve you want; it bends through every point. Close it by clicking the first point for a smooth loop. For true Bézier artwork, draw it in Illustrator or Inkscape and use File → Import vector cut (SVG), then put stones on it from Vector cut.' : 'Switch Pen shape to Smooth curve for arcs, swashes and loops.'}</p>
+              <p className="hint">{penMode === 'bezier'
+                ? 'Click to place a corner; press and drag to place a smooth anchor and pull its handles out, like Illustrator’s pen. Click the first anchor to close. After Enter, press N to edit anchors and handles.'
+                : penMode === 'curve'
+                  ? 'Click along the curve you want; it bends through every point. Click the first point to close a smooth loop. Press N afterwards to adjust the handles.'
+                  : 'Switch Pen shape to Bézier to draw with handles, or Smooth curve for a curve through your clicks.'}</p>
             </>
           )}
           {selectedEl != null && selBox && (
@@ -6607,7 +6641,7 @@ export default function App() {
             />
           ))}
           {tool === 'pen' && penPts.length > 0 && (() => {
-            const d = 'M' + penShape(penPts, false).map((q) => `${(q.x * zoom).toFixed(1)},${(q.y * zoom).toFixed(1)}`).join('L')
+            const d = 'M' + flattenPath(penPath(penPts, false)).map((q) => `${(q.x * zoom).toFixed(1)},${(q.y * zoom).toFixed(1)}`).join('L')
             const r = ((sizes[curSize]?.holeMm ?? 3) / 2) * zoom
             return (
               <g pointerEvents="none">
@@ -6615,6 +6649,12 @@ export default function App() {
                 {penOut !== 'line' && penPreview.map((q, i) => (
                   <circle key={`g${i}`} cx={q.x * zoom} cy={q.y * zoom} r={r} fill="#f0b95e" fillOpacity={0.35} />
                 ))}
+                {penMode === 'bezier' && penPts.map((a, i) => [a.hi, a.ho].filter((h) => hasHandle(a, h)).map((h, k) => (
+                  <g key={`h${i}${k}`}>
+                    <line x1={a.x * zoom} y1={a.y * zoom} x2={h.x * zoom} y2={h.y * zoom} stroke="#8fd3ff" strokeWidth={1} />
+                    <circle cx={h.x * zoom} cy={h.y * zoom} r={3} fill="#12151c" stroke="#8fd3ff" strokeWidth={1.2} />
+                  </g>
+                )))}
                 {penPts.map((q, i) => (
                   <rect key={i} x={q.x * zoom - 3} y={q.y * zoom - 3} width={6} height={6} fill={i === 0 ? '#f0b95e' : '#12151c'} stroke="#f0b95e" strokeWidth={1.2} />
                 ))}
@@ -6623,7 +6663,9 @@ export default function App() {
           })()}
           {nodeVec && (() => {
             const v = nodeVec
-            const total = v.base.reduce((n, pl) => n + pl.length, 0)
+            const bz = v.bez
+            if (!bz) return null
+            const total = bz.reduce((n, pp) => n + pp.a.length, 0)
             // a traced mascot can carry 30k+ vertices — that many DOM rects
             // kills the tab; node-edit stays for hand-sized paths
             if (total > 4000) {
@@ -6634,22 +6676,38 @@ export default function App() {
               )
             }
             const r = 3.5
+            const B = (q: Pt) => ({ x: (q.x * v.s + v.x) * zoom, y: (q.y * v.s + v.y) * zoom })
+            const showAll = total <= 600
             return (
               <g pointerEvents="none">
-                {v.base.map((pl, pi) => pl.map((q, qi) => {
-                  const key = `${pi}:${qi}`
+                {bz.map((pp, pi) => pp.a.map((a, ai) => {
+                  const key = `${pi}:${ai}`
                   const sel = nodeSel.has(key)
+                  const A = B(a)
+                  const handles = showAll || sel ? [a.hi, a.ho].filter((h) => hasHandle(a, h)) : []
                   return (
-                    <rect
-                      key={key}
-                      x={(q.x * v.s + v.x) * zoom - r}
-                      y={(q.y * v.s + v.y) * zoom - r}
-                      width={r * 2}
-                      height={r * 2}
-                      fill={sel ? '#f0b95e' : '#12151c'}
-                      stroke={sel ? '#12151c' : '#8fd3ff'}
-                      strokeWidth={1.2}
-                    />
+                    <g key={key}>
+                      {handles.map((h, k) => {
+                        const H = B(h)
+                        return (
+                          <g key={k}>
+                            <line x1={A.x} y1={A.y} x2={H.x} y2={H.y} stroke="#8fd3ff" strokeWidth={1} />
+                            <circle cx={H.x} cy={H.y} r={3} fill="#12151c" stroke="#8fd3ff" strokeWidth={1.2} />
+                          </g>
+                        )
+                      })}
+                      {/* smooth anchors draw as diamonds, corners as squares */}
+                      <rect
+                        x={A.x - r}
+                        y={A.y - r}
+                        width={r * 2}
+                        height={r * 2}
+                        fill={sel ? '#f0b95e' : '#12151c'}
+                        stroke={sel ? '#12151c' : '#8fd3ff'}
+                        strokeWidth={1.2}
+                        transform={a.smooth ? `rotate(45 ${A.x} ${A.y})` : undefined}
+                      />
+                    </g>
                   )
                 }))}
               </g>

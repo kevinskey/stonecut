@@ -1,3 +1,5 @@
+import { validBez } from './bezier'
+import type { BezPath } from './bezier'
 import type { Stone, StoneSpec, Pt, MaterialPreset } from './model'
 import { mergeSavedSizes } from './model'
 import { validLayers } from './layers'
@@ -7,7 +9,7 @@ export interface TextMeta { text: string; fontName: string; fontId: string; weig
 export interface ShapeMeta { kind: string; w: number; h: number }
 export interface Recipe { contours: Pt[][]; mode: 'outline' | 'fill' | 'both'; wholeWord: boolean; sx: number; sy: number; textMeta?: TextMeta; shapeMeta?: ShapeMeta }
 export type Elements = Record<number, Recipe>
-export interface VecItem { id: number; name: string; base: Pt[][]; baseW: number; baseH: number; x: number; y: number; s: number; lay?: number }
+export interface VecItem { id: number; name: string; base: Pt[][]; baseW: number; baseH: number; x: number; y: number; s: number; lay?: number; bez?: BezPath[] }
 export interface CutterProfile { format: 'gpgl' | 'hpgl'; gpStep: number; originCorner: 'bl' | 'br'; sendConditions: boolean; swapAxes: boolean; wCircles: boolean; overcut: number; preset: MaterialPreset; linePreset: MaterialPreset }
 export interface ProjectContext { boardWIn: number; boardHIn: number; placement: 'design' | 'artboard'; margin: number; gap: number; outlineColor: string; fillColor: string; boardColor: string | null; garmentColor: string; frameOn?: boolean; frameMm?: number; activeLayer?: number; cutter: CutterProfile }
 export interface Project { v: 1 | 2; stones: Stone[]; sizes: Record<string, StoneSpec>; elements: Elements; vectors: VecItem[]; layers?: Layer[]; context?: ProjectContext; lastText?: { el: number; fontName: string; text: string; height: number; spacing: number; bend: number } }
@@ -41,6 +43,7 @@ export function parseProject(data: unknown): Project {
   for (const v of vectors) {
     requireValue(obj(v) && Number.isSafeInteger(v.id) && !ids.has(v.id) && typeof v.name === 'string' && finite(v.x) && finite(v.y) && positive(v.s) && finite(v.baseW) && v.baseW >= 0 && finite(v.baseH) && v.baseH >= 0 && (v.lay === undefined || Number.isSafeInteger(v.lay)), 'invalid vector object')
     ids.add(v.id); paths(v.base)
+    requireValue(v.bez === undefined || (validBez(v.bez) && v.bez.length === (v.base as unknown[]).length), 'invalid curve data')
   }
   requireValue(data.layers === undefined || validLayers(data.layers), 'invalid layers')
   requireValue(data.elements === undefined || obj(data.elements), 'invalid elements')
