@@ -5958,14 +5958,8 @@ export default function App() {
         </Section>
 
         <Section title="Edit">
-          <div className="toolrow">
-            <button className={tool === 'select' ? 'active' : ''} onClick={() => switchTool('select')}>Select / move</button>
-            <button className={tool === 'add' ? 'active' : ''} onClick={() => switchTool('add')}>Add / erase</button>
-            <button className={tool === 'node' ? 'active' : ''} onClick={() => switchTool('node')}>Nodes</button>
-            <button className={tool === 'pen' ? 'active' : ''} onClick={() => setTool('pen')}>Pen</button>
-          </div>
           <p className="hint">
-            {tool === 'select'
+            <b>{tool === 'select' ? 'Select / move' : tool === 'add' ? 'Add / erase' : tool === 'node' ? 'Nodes' : 'Pen'}</b> — tools are in the bar above the board (V, A, N, P). {tool === 'select'
               ? 'Click a hole to select it, drag to move. Shift-click adds to the selection, drag on empty board boxes a group. Double-click a design to grab all of it: drag its handles to resize (holes stay the same size, the count changes). Arrow keys nudge 0.5 mm (Shift: 5 mm), Delete removes.'
               : tool === 'add'
                 ? 'Click empty board to add a hole; clicking an existing hole ERASES it. Switch to Select / move to drag holes.'
@@ -5974,27 +5968,11 @@ export default function App() {
                   : 'Click along the line you want — stones bead along it at the active layer’s stone size and the Stones panel’s spacing. Enter or double-click finishes, clicking the first point closes the loop, Backspace removes the last point, Esc cancels. Press V or Esc (with nothing drawn) to leave the pen.'}
           </p>
           {tool === 'pen' && (
-            <>
-              <label>Pen output
-                <select value={penOut} onChange={(e) => setPenOut(e.target.value as typeof penOut)}>
-                  <option value="stones">Stones along the path</option>
-                  <option value="line">Cut line</option>
-                  <option value="both">Both</option>
-                </select>
-              </label>
-              <label>Pen shape
-                <select value={penMode} onChange={(e) => setPenMode(e.target.value as PenMode)}>
-                  <option value="straight">Straight segments — corners at each click</option>
-                  <option value="curve">Smooth curve — bends through each click</option>
-                  <option value="bezier">Bézier — click for a corner, drag to pull handles</option>
-                </select>
-              </label>
-              <p className="hint">{penMode === 'bezier'
-                ? 'Click to place a corner; press and drag to place a smooth anchor and pull its handles out, like Illustrator’s pen. Click the first anchor to close. After Enter, press N to edit anchors and handles.'
-                : penMode === 'curve'
-                  ? 'Click along the curve you want; it bends through every point. Click the first point to close a smooth loop. Press N afterwards to adjust the handles.'
-                  : 'Switch Pen shape to Bézier to draw with handles, or Smooth curve for a curve through your clicks.'}</p>
-            </>
+            <p className="hint">{penMode === 'bezier'
+              ? 'Bézier: click to place a corner; press and drag to place a smooth anchor and pull its handles out, like Illustrator’s pen. Click the first anchor to close. Press N afterwards to edit anchors and handles.'
+              : penMode === 'curve'
+                ? 'Smooth curve: click along the curve you want; it bends through every point. Click the first point to close a smooth loop. Press N afterwards to adjust the handles.'
+                : 'Straight: corners at every click. Switch Pen shape (in the bar above) to Bézier to draw with handles, or Smooth curve for a curve through your clicks.'}</p>
           )}
           {selectedEl != null && selBox && (
             <div className="grid2" key={`sz-${selectedEl}-${selBox.minX.toFixed(1)}-${(selBox.maxX - selBox.minX).toFixed(1)}`}>
@@ -6444,7 +6422,47 @@ export default function App() {
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => { void onBoardDrop(e) }}
       >
-        <div className="zoombar" ref={barRef}>
+        <div className="bars" ref={barRef}>
+        {/* Tools live over the board, not in a sidebar section: Kevin found
+            opening Edit on the left to reach them clumsy. */}
+        <div className="toolbar" role="toolbar" aria-label="Tools">
+          <button className={`zbtn${tool === 'select' ? ' active' : ''}`} title="Select / move (V) — click or box-select holes and lines, drag to move" onClick={() => switchTool('select')}>Select</button>
+          <button className={`zbtn${tool === 'add' ? ' active' : ''}`} title="Add / erase (A) — click empty board to add a hole, click a hole to erase it" onClick={() => switchTool('add')}>Add / erase</button>
+          <button className={`zbtn${tool === 'node' ? ' active' : ''}`} title="Nodes (N) — edit a cut line's anchors and handles" onClick={() => switchTool('node')}>Nodes</button>
+          <button className={`zbtn${tool === 'pen' ? ' active' : ''}`} title="Pen (P) — draw a path for stones or a cut line" onClick={() => setTool('pen')}>Pen</button>
+          {tool === 'pen' && (
+            <>
+              <label className="tb">Pen output
+                <select value={penOut} onChange={(e) => setPenOut(e.target.value as typeof penOut)}>
+                  <option value="stones">Stones along the path</option>
+                  <option value="line">Cut line</option>
+                  <option value="both">Both</option>
+                </select>
+              </label>
+              <label className="tb">Pen shape
+                <select value={penMode} onChange={(e) => setPenMode(e.target.value as PenMode)}>
+                  <option value="straight">Straight segments</option>
+                  <option value="curve">Smooth curve through clicks</option>
+                  <option value="bezier">Bézier — drag for handles</option>
+                </select>
+              </label>
+            </>
+          )}
+          <span className="tb-hint">
+            {tool === 'select'
+              ? 'Click or drag a box to select · drag to move · double-click a design to grab all of it · arrows nudge · Delete removes'
+              : tool === 'add'
+                ? 'Click empty board to add a hole · click a hole to erase it'
+                : tool === 'node'
+                  ? 'Click a line to edit it · drag anchors and handles · double-click a segment to add an anchor, an anchor to toggle corner/smooth · Delete removes'
+                  : penMode === 'bezier'
+                    ? 'Click = corner · press-and-drag = curve · click the first point to close · Enter finishes · Esc Esc leaves'
+                    : penMode === 'curve'
+                      ? 'Click along the curve · click the first point to close · Enter finishes · Esc Esc leaves'
+                      : 'Click to place corners · click the first point to close · Enter finishes · Esc Esc leaves'}
+          </span>
+        </div>
+        <div className="zoombar">
           <button className="zbtn" title="Zoom out (⌘−)" onClick={() => zoomAbout(zoom / 1.25)}>−</button>
           <input
             type="range"
@@ -6514,6 +6532,7 @@ export default function App() {
           >
             Clear all
           </button>
+        </div>
         </div>
         {startCardShown && !stones.length && !vectors.length && !pending && <div className="start-card">
           <h2>Start your next design</h2><p>Create lettering, convert artwork, or reopen a project.</p>

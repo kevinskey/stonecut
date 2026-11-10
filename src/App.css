@@ -324,11 +324,31 @@ button.urgent:hover:not(:disabled) { background: #dda047; animation: none; }
   user-select: none;
 }
 
+.bars { position: sticky; top: 0; left: 0; z-index: 2; }
+.toolbar {
+  user-select: none;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+  gap: 6px;
+  align-items: center;
+  padding: 7px 14px 6px;
+  background: #12151cdd;
+  backdrop-filter: blur(4px);
+  border-bottom: 1px solid #1f2533;
+  font-size: 11px;
+  color: #8b96ab;
+}
+.toolbar::-webkit-scrollbar { display: none; }
+.toolbar > * { flex-shrink: 0; }
+.toolbar .zbtn { width: auto; white-space: nowrap; margin: 0; padding: 5px 11px; font-size: 12px; line-height: 1.2; border-radius: 5px; }
+.toolbar .zbtn.active { background: #3b5bd9; border-color: #3b5bd9; color: #fff; }
+.toolbar label.tb { display: flex; flex-direction: row; align-items: center; gap: 5px; margin: 0 0 0 6px; font-size: 11px; color: #c3cbdb; }
+.toolbar label.tb select { width: auto; margin: 0; padding: 3px 6px; font-size: 11px; }
+.toolbar .tb-hint { margin-left: 10px; color: #8b96ab; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; min-width: 0; }
 .zoombar {
-  position: sticky;
-  top: 0;
-  left: 0;
-  z-index: 2;
   user-select: none;
   display: flex;
   gap: 10px;
