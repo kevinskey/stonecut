@@ -22,13 +22,22 @@ performed.**
 
 | | |
 | --- | --- |
-| Engine + app | `~/src/gleembroidery` (standalone Vite app, 17 modules) |
-| Target host | `~/src/stonecut` → rhinestones.tshirtbrothers.com |
+| Engine + app | `~/src/gleembroidery` — github.com/kevinskey/gleembroidery (public) |
+| **Live at** | **https://threads.tshirtbrothers.com** |
+| Sibling tool | `~/src/stonecut` → rhinestones.tshirtbrothers.com |
+| Droplet | 198.211.113.144, nginx vhost, `/var/www/gleembroidery/html` |
+| Deploy | `curl -fsSL https://raw.githubusercontent.com/kevinskey/gleembroidery/main/deploy.sh \| bash` on the droplet |
 | Machine | BAI commercial, Tajima DST, bracket spacing configurable |
 
-**The spec (§2) requires an embroidery workspace inside StoneCut. What exists
-is a separate app.** This is a known, deliberate deviation, not an oversight —
-see "Integration" below. It is the single largest open item.
+**Spec §2 was AMENDED on 2026-11-12**: the tool ships at its own subdomain
+rather than as a mode inside StoneCut. See the amendment block at the top of
+§2 in `embroidery-spec.md` for the reasoning and what it does not change.
+Integration is still owed and still blocked on StoneCut's version gate.
+
+The deploy script runs the full engine suite **and** the pyembroidery
+machine-safety gate on the droplet before swapping in a build; a failure
+aborts the deploy. The previous build is kept as `html.prev`, so a rollback
+is one `mv`.
 
 ---
 

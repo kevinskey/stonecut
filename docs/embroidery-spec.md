@@ -49,9 +49,34 @@ Only assign a status when evidence supports it.
 
 ## 2. Integrate embroidery into the existing application
 
-Add a clearly identifiable **Embroidery workspace or mode** within
-rhinestones.tshirtbrothers.com, using the application's established
-navigation and design system.
+> **AMENDMENT, 2026-11-12 — agreed with Kevin.** The embroidery tool ships at
+> its own subdomain, **threads.tshirtbrothers.com**, rather than as a mode
+> inside rhinestones.tshirtbrothers.com. This is a deliberate change to this
+> section, recorded here rather than left as a silent divergence.
+>
+> *Why:* integration is blocked on two prerequisites that should not gate
+> shipping — StoneCut writes a `v: 1` schema version and reads it nowhere, so
+> adding an embroidery key today would make an older build (including the
+> frozen MAS `dist/`) silently strip that data on the next save; and
+> generation must move behind a Worker before it enters a 5,987-line
+> component that re-renders on every zoom frame. Separately, the engine's
+> verification suite could not have been written inside a repo with no test
+> framework.
+>
+> *What this does NOT change:* integration is still owed, and the rest of this
+> section still applies to it. Two sites means artwork is imported twice and
+> projects are not shared — that is the accepted cost for now. A subdomain can
+> become a workspace later; the object model and the stitch engine are
+> unchanged either way.
+>
+> The two tools are siblings on one droplet and are deployed the same way on
+> purpose: `rhinestones` → `/var/www/stonecut/html`,
+> `threads` → `/var/www/gleembroidery/html`, each with a `deploy.sh` that
+> clones, builds, verifies and swaps in the build with a `.prev` rollback.
+
+Add a clearly identifiable **Embroidery workspace or mode** — at
+threads.tshirtbrothers.com per the amendment above — using the application's
+established navigation and design system.
 
 Reuse suitable foundations, including:
 
