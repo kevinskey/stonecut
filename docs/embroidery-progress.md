@@ -1,7 +1,7 @@
 # Embroidery digitizing — progress
 
 Companion to `embroidery-spec.md` (the standing specification). Updated
-2026-11-12 (second committee round).
+2026-11-13 (after Milestone 4).
 
 **Status statuses mean exactly this:**
 
@@ -43,54 +43,66 @@ is one `mv`.
 
 ## Feature matrix
 
+Updated 2026-11-13, after Milestone 4. **725 engine assertions**, all passing.
+**6 fixtures × 3 machine formats** verified against pyembroidery. Still **zero
+physical sewouts**, so nothing below is Sewout verified.
+
 ### §2 Integration
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| Embroidery workspace inside StoneCut | **Missing** | Zero hits for `embroider\|satin\|\.dst` in `stonecut/src` |
+| Embroidery workspace inside StoneCut | **Missing** | Ships at its own subdomain per the §2 amendment; integration still owed |
 | Rhinestone / embroidery data separation | **Missing** | No shared document exists yet |
-| Versioned backward-compatible storage | **Missing** | StoneCut writes `v: 1` (`App.tsx:360`, `:4008`) and **reads it nowhere**; both loaders duck-type |
+| Versioned backward-compatible storage | **Missing** | StoneCut writes `v: 1` and reads it nowhere; both loaders duck-type |
 | Shared artwork with explicit derivatives | **Missing** | — |
-| Background generation keyed to project+revision | **Software verified** | `useStitchPlan` keys on a document CONTENT signature; stale revisions discarded on arrival and superseded workers terminated |
+| Background generation keyed to project+revision | **Software verified** | `useStitchPlan` keys on a content signature taken FROM THE SAVE FORMAT; a 53-setting test asserts every saveable field changes it |
 | Existing rhinestone workflow unaffected | **Implemented** | Nothing in StoneCut has been modified |
 
 ### §3 Object model
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| Source artwork / objects / stitch plan kept separate | **Software verified** | `model.ts` objects → `digitize.ts` → `stitches.ts`; plan regenerated on every change |
-| Stable object identity, layer membership | **Implemented** | `newObject()` ids; flat list, no layers yet |
-| Editable outlines | **In progress** | Paths are flattened polylines — **no Bézier nodes, no handle editing** |
-| Holes | **Software verified** | `toRegions` + selftest "hole touching the outline", 4 vertex rotations |
-| Satin rails and stitch-angle guides | **Missing** | Satin is a centreline + scalar width, not a rail pair |
-| Stitch type + parameters, density, lengths, underlay, pull comp | **Software verified** | `model.ts`; each asserted in selftest |
-| Entry / exit points | **Missing** | Implicit from path order |
-| Tie-in / tie-off settings | **In progress** | Locks are generated (`digitize.ts` `lock()`), not yet user-settable |
-| Thread assignment | **Implemented** | `ThreadRef{brand,code,name}` per object; run sheet prints it, or UNASSIGNED. Colour blocks merge on THREAD, not screen colour |
-| Sewing order | **Implemented** | Document order with up/down reorder in the Sewing sequence panel |
-| Branching / connected objects | **Missing** | — |
-| Millimetres throughout, inches displayed | **Software verified** | mm everywhere above `dst.ts`; independent check confirms dimensions survive export |
-| Save / reopen preserving editability | **Software verified** | `project.ts` `.gleemb`; test asserts every field round-trips AND that a reopened project re-digitises byte-identically |
+| Source artwork / objects / stitch plan kept separate | **Software verified** | `model.ts` → `digitize.ts` → `stitches.ts` |
+| Stable object identity, layer membership | **Software verified** | `newObject()` ids; `Group` membership with hide/lock/fold, asserted not to alter sewing order |
+| Editable outlines, Bézier nodes, holes | **Software verified** | `nodes.ts` shapes with handles; `paths` is a flattened cache; holes via `toRegions` |
+| Satin rails and stitch-angle guides | **Software verified** | Two-rail columns with rung pairing; `AngleGuide` lines interpolating along a spine column |
+| Stitch type + parameters, density, lengths, underlay, pull comp | **Software verified** | each asserted |
+| Entry / exit points | **Software verified** | draggable markers; `orientToEntryExit` chooses which way round an object runs |
+| Tie-in / tie-off settings | **Software verified** | `Doc.tie` — on/off, style, length, count; all five change the stitches |
+| Thread assignment | **Implemented** | per object; blocks merge on THREAD, not screen colour |
+| Sewing order | **Implemented** | document order, reorderable; groups deliberately do not change it |
+| Branching / connected objects | **Software verified** | `travel.ts` chains paths whose ends meet; 4 loose sides → one ring, 120 mm of travel and 3 trims → 0 |
+| Millimetres throughout, inches displayed | **Software verified** | independent check confirms dimensions survive export |
+| Save / reopen preserving editability | **Software verified** | every field round-trips; a reopened project re-digitises byte-identically |
 | Imported stitch files stay identified as stitch data | **Implemented** | DST import loads as a read-only grey reference, never as objects |
 
 ### §4 Digitizing features
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| SVG import at correct physical scale | **Implemented** | `vector.ts`; verified in-browser against a mm-dimensioned SVG |
-| Raster import | **Missing** | StoneCut's `imageToColorLayers` is the port path |
-| Point / freehand / Bézier drawing, node editing | **Missing** | No drawing tools |
+| SVG import at correct physical scale | **Implemented** | verified in-browser against a mm-dimensioned SVG |
+| Raster import + assisted tracing | **Software verified** | `trace.ts` flood + marching squares, DOM-free; Wand tool |
+| Point / freehand / Bézier drawing, node editing | **Software verified** | Pen, Arc, Polygon, Rect, Ellipse, Draw, Nodes; `draw.ts` + `nodes.ts` |
 | Shapes with holes | **Software verified** | see §3 |
-| Align / distribute / rotate / mirror / duplicate | **Missing** | — |
-| Selection, grouping, layers, undo/redo | **Missing** | Single selection only; **no undo** |
-| Union / intersection / subtraction / flatten | **In progress** | Self-union runs on every fill (`unionSelfChecked`), software verified; no UI for explicit booleans |
-| Offset / inflate / deflate | **In progress** | Bisector fast path with the Minkowski clipper as fallback; direction verified on donuts and frames; no UI |
-| Running stitch | **Software verified** | selftest resample + length bounds |
-| Bean / triple | **Implemented** | `beanStitch`; no dedicated test |
-| Satin border / column | **In progress** | Generates, **mitres corners**, refuses unsewable geometry; **not a true rail-pair column** |
-| Tatami fill | **Software verified** | row count, coverage, stagger (with control), holes, max/min length |
-| Manual stitches, appliqué, motif, stipple, cross-stitch, contour | **Missing** | — |
-| Minimum stitch length | **Software verified** | `MIN_STITCH_MM`, design-aware floor, asserted on donut + tapering leaf |
+| Align / distribute / rotate / mirror / duplicate | **Software verified** | `arrange.ts`; distribute evens GAPS not centres; mirror is its own undo |
+| Selection, grouping, layers, undo/redo | **Software verified** | marquee + range/toggle in the sequence list; `Group`; `history.ts` snapshot undo |
+| Union / intersection / subtraction / flatten | **Software verified** | `shapeops.ts` with UI; "No overlap" took a two-fill test case from 198 over-dense areas to 1 |
+| Path splitting and joining | **Software verified** | split at a node (a ring cut once OPENS); join welds ends and closes rings |
+| Offset / inflate / deflate | **Software verified** | Grow/Shrink buttons; refuses open paths with a reason |
+| Simplification and node cleanup | **Software verified** | polyline simplify for raw paths, NODE cleanup for Bézier outlines so curves survive |
+| Running stitch | **Software verified** | — |
+| Bean / triple | **Software verified** | — |
+| Satin border / column | **Software verified** | spine and TWO-RAIL columns, mitred corners, refusal with location |
+| Tatami fill | **Software verified** | rows, coverage, stagger, holes, length bounds |
+| Manual stitches | **Software verified** | `stitchedit.ts` — pick, band-select, move, delete, on the freeze model |
+| Appliqué | **Software verified** | placement → STOP → tack-down → STOP → border, each its own block |
+| Motif runs and fills | **Software verified** | 8 motifs, unit-cell mapping through the local frame, whole motifs only |
+| Stippling | **Software verified** | deterministic wander; ~1/7 the stitches of a tatami; runs unbroken |
+| Cross-stitch | **Software verified** | whole crosses only — all four corners inside |
+| Contour / echo | **Software verified** | rings entered at the nearest point: 39 trims → 0 |
+| Manual satin-angle guides | **Software verified** | relative to the local normal, interpolated, held at the ends |
+| Satin splitting | **Software verified** | columns to 30 mm, split points staggered from a deterministic phase |
+| Minimum stitch length | **Software verified** | design-aware floor |
 | Travel / jump / trim / colour-change behaviour | **Software verified** | asserted at record level against the written file |
 
 ### §5 Pipeline
@@ -98,50 +110,77 @@ is one `mv`.
 | Feature | Status | Evidence |
 | --- | --- | --- |
 | objects → geometry → underlay+top → sequencing → encoding | **Implemented** | `digitize.ts` is exactly this shape |
-| Holes, stitch-length limits, underlay, entry/exit routing | **Software verified** | selftest |
-| Narrow regions / sharp corners | **Software verified** | Corners detected and mitred with an outer fan on a pivoting inner rail; same-rail spacing held >= 0.3 mm on box, L and 40-degree chevron |
-| Deterministic generation | **Software verified** | Asserted: three runs of the same document produce byte-identical output |
-| One plan drives counts, simulation, inspection, export | **Software verified** | single `StitchPlan` consumed by renderer, status bar and writer |
-| Responsive / cancellable | **Implemented** | Web Worker keyed to a content signature, superseded work terminated; 28,944 stitches in ~97 ms (was ~7 s) |
+| Holes, stitch-length limits, underlay, entry/exit routing | **Software verified** | — |
+| Narrow regions / sharp corners | **Software verified** | corners mitred; same-rail spacing held ≥ 0.3 mm |
+| Deterministic generation | **Software verified** | asserted for the engine, for guided satin, for splitting and for stippling |
+| One plan drives counts, simulation, inspection, density, export | **Software verified** | single `StitchPlan` |
+| Responsive / cancellable | **Implemented** | Worker keyed to the content signature; superseded work terminated |
 
 ### §6 Production features
 
-Lettering, 3D puff foam, appliqué/patches, and every item under "Advanced
-tools": **Missing**. Recorded, not dropped.
+| Feature | Status | Evidence |
+| --- | --- | --- |
+| Editable lettering | **Software verified** | `TextSpec` regenerates outlines from the words |
+| Outlines from supported fonts | **Implemented** | rasterise + trace: every font on the machine, ~0.05 mm error |
+| Spacing, sizing, placement | **Implemented** | cap height in mm, tracking, word spacing, slant |
+| Text along a path or curve | **Software verified** | `textOnPath`; letter height kept by default, "fit to path" offered and labelled |
+| Shaped lettering envelopes | **Software verified** | top/bottom bow independently: arc, fan, pinch |
+| Explicit conversion to digitizing objects | **Implemented** | "Convert to outlines", confirmed, one-way |
+| Reusable native alphabets | **Software verified** | `alphabets.ts` — outlines not stitches; missing characters reported and left as gaps |
+| 3D puff foam | **Software verified** | width band, density scaling, end caps that tear the foam along the stitch line |
+| Appliqué and patches | **Software verified** | incl. faux overlock edge and a true-size cut file from the SAME outline |
+| Knockdown | **Software verified** | coarse net, expanded past the outline; warns if sewn out of order |
+| Curved / gradient / feathered fills, embossing, fringe, freestanding | **Missing** | Recorded, not dropped |
+| Custom motifs (user-drawn) | **Missing** | 8 built-in motifs only |
+| Branching and connected sewing paths | **Software verified** | `travel.ts` |
+| Reusable stitch styles and presets | **Software verified** | `presets.ts`, 9 built-ins, localStorage |
+| Custom embroidery-font authoring | **Software verified** | alphabet capture (see above) |
+| Batch export | **Implemented** | "All formats" — every format and sidecar from ONE plan |
 
 ### §7 Inspection and repair
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| Stitch-point and connecting-line views | **Implemented** | `render.ts`, toggleable |
+| Stitch-point and connecting-line views | **Implemented** | toggleable |
 | Sewing playback with movable position | **Implemented** | stitch-out slider |
-| Visible jumps and trims | **Implemented** | jumps drawn dashed; trims not yet distinguished visually |
+| Object and colour boundaries | **Implemented** | sequence panel + per-block labels |
+| Visible jumps and trims | **Implemented** | jumps drawn dashed; trims still not distinguished from jumps visually |
 | Actual generated stitch counts | **Software verified** | from the same plan that is exported |
-| Hoop boundaries + overflow warning | **Implemented** | incl. rotated-fit advice and bracket-spacing check |
-| Stitch/range selection, move, delete, repair | **Missing** | — |
-| Density visualisation and diagnostics | **Missing** | — |
+| Design dimensions and hoop boundaries | **Implemented** | incl. rotated-fit advice and bracket-spacing check |
+| Stitch/range selection, move, delete, repair | **Software verified** | `stitchedit.ts` on the freeze model |
+| Density visualisation and diagnostics | **Software verified** | penetrations/mm² on a 3×3 window excluding empty cells |
+| Density repair | **Implemented** | "fix the overlaps" offered beside the warning; the commonest cause is two objects on one spot |
+| Knockdown for textured fabrics | **Software verified** | see §6 |
 
 ### §8 Machine export
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| DST record codec | **Software verified** | Bit table, extents, ST and CO confirmed against **7 third-party files** (3.4k–22.9k stitches); penetration-exact re-encode |
-| Independent reader verification | **Software verified** | `independent-check.py` vs **pyembroidery**, 6 fixtures, orientation asserted (not discovered) |
-| Dimensions and orientation preserved | **Software verified** | incl. an off-centre asymmetric fixture so `+X != -X` and `+Y != -Y` |
+| DST record codec | **Software verified** | bit table confirmed against **7 third-party files**; penetration-exact re-encode |
+| Independent reader verification | **Software verified** | `independent-check.py` vs pyembroidery, 6 fixtures, orientation ASSERTED not discovered |
+| Melco EXP | **Software verified** | same 6 fixtures; agrees with the DST needle for needle |
+| Janome JEF | **Software verified** | same; colours snapped to Janome's 78-thread table, and the export says so |
+| PES / VP3 / others | **Missing** | Recorded, not dropped |
+| Dimensions and orientation preserved | **Software verified** | incl. an off-centre asymmetric fixture |
 | Sewing sequence preserved | **Software verified** | penetration order compared element-wise |
-| Trims / colour changes encoded | **Software verified** | trim = ≥3 jump records; asserted in the written byte stream |
-| Appropriate termination | **Software verified** | pyembroidery reports `END` on every fixture |
-| Thread information sidecar | **Software verified** | `.col` and `.edr` byte-identical to pyembroidery's writers and read back with it; plus an HTML run sheet and a 1:1 placement template |
-| Other formats (PES/EXP/JEF) | **Missing** | Deliberate: DST covers the BAI |
+| Trims / colour changes encoded | **Software verified** | asserted in the written byte stream, in all three formats |
+| Thread information sidecar | **Software verified** | `.col` and `.edr` read back with pyembroidery; plus run sheet and 1:1 template |
 
 ### §9 Interface
 
-Workspace, canvas with inch rulers, object list, property panel, thread
-colour, playback, export: **Implemented**. Sewing-sequence view (distinct
-from the object list), thread chart with codes, drawing tools, transforms:
-**Missing**.
+Workspace, canvas with inch rulers, sewing-sequence view, property panel,
+thread colour and code, playback, export, drawing tools, transforms, shape
+operations, arrange, presets, alphabets: **Implemented**. A thread chart
+browsable by brand code: **Missing** (codes are typed, not picked).
 
----
+### §10 Milestones
+
+| Milestone | State |
+| --- | --- |
+| 1 — a complete working path | **Software complete; the gate is unmet.** It closes on a PHYSICAL calibration sewout, not on a passing suite. See the last section. |
+| 2 — core professional digitizing | **Complete.** The last gap, manual satin-angle guides, closed 2026-11-13. |
+| 3 — production readiness | **Complete.** Puff, patches, stitch-level inspection and repair, density diagnostics, hoop checks, persistence and export reliability. |
+| 4 — advanced capability | **Complete except where recorded Missing above**: user-drawn motifs, gradient/feathered/embossed fills, fringe, freestanding lace, and formats beyond DST/EXP/JEF. |
 
 ## Fixed this session (committee findings)
 
@@ -248,29 +287,73 @@ StoneCut regardless of integration timing.
 
 ---
 
-## Next three implementation tasks
+## What is still open
 
-1. **Commit a golden corpus and wire it into `npm test`.** `fixtures/` is
-   gitignored, so nothing detects a silent change in generated output between
-   runs. Commit the six `.dst` files plus hashes; fail the build on any
-   unexplained diff. Add at least two third-party DSTs to the repo so
-   `verify:dst` runs without depending on `~/Downloads`.
-2. **Rail-pair satin.** Replace the centreline-plus-width primitive with
-   `railA` / `railB` plus ordered angle guides, keeping centreline+width as a
-   convenience constructor. This is what real satin lettering needs and it is
-   the largest remaining engine gap. Test: a variable-width column holds its
-   rails; the existing corner and curvature tests keep passing.
-3. **Travel routing that follows the boundary.** Today travel is
-   straight-line-inside or jump. Walking around an obstacle along an inset of
-   the region would cut the trim count substantially — the biggest cycle-time
-   driver after stitch count. Test: a donut fill produces no trim where a
-   boundary-following route exists.
+Recorded, not dropped:
 
-Still open and recorded, not dropped: no undo/redo anywhere; no drawing or
-node-editing tools (objects come only from SVG import); no lettering; no
-appliqué and no representable STOP distinct from a colour change; trims are
-not drawn differently from jumps on canvas; and all of spec §2 StoneCut
-integration beyond the worker's revision guard.
+1. **All of spec §2 — StoneCut integration.** Still blocked on the same two
+   prerequisites: a real version gate in StoneCut's two loaders, and the
+   engine behind a Worker before it enters a 5,987-line component. The
+   subdomain amendment covers shipping, not integration.
+2. **A committed golden corpus.** `fixtures/` is gitignored, so nothing
+   detects a silent change in generated output between runs. Commit the six
+   designs plus hashes and fail the build on an unexplained diff.
+3. **Trims are not drawn differently from jumps** on the canvas. The
+   inspection view shows both as the same dashed line, which is the one place
+   a reader cannot tell a thread cut from a travel.
+4. **A browsable thread chart.** Brand codes are typed, not picked from a
+   list, so a typo reaches the run sheet.
+5. **Two fills side by side still cut** rather than routing a travel through
+   one of them. The tool for it today is the entry/exit markers; a
+   boundary-following router is real work and is not done.
+6. **Missing by design, for now:** user-drawn motifs, gradient / feathered /
+   embossed fills, fringe, freestanding lace, PES and other formats.
+
+### Verification as it stands
+
+- **725 engine assertions**, all passing, run by `npm test` and again by the
+  deploy script on the droplet before any build is swapped in.
+- **6 fixtures × 3 machine formats** (DST, EXP, JEF) read back with
+  **pyembroidery** — a separate implementation by other authors — and checked
+  for needle count, every needle position, orientation (asserted, never
+  discovered), colour changes, and that each format AGREES WITH THE DST
+  written from the same plan.
+- **A byte-level machine-safety gate** asserting on the decoded records: the
+  approach is needle-up; every colour change is followed by a jump; no
+  zero-displacement jump records; jump runs are 1 or ≥ 3, never an ambiguous
+  2; no sewn stitch over 10 mm or under 0.1 mm; every mid-design trim is tied
+  off AND tied in; the file is 512 + 3n + 1 with an EOF marker; `ST` counts
+  every record; `AX`/`AY` are zero.
+- **7 third-party DST files** still verify exactly.
+
+### Faults found by the suite or the preview since the last update
+
+Worth recording because each passed everything that existed before it:
+
+- **`docSignature` was a hand-written list of fields**, so every setting added
+  after it was written changed the document without changing its signature:
+  the bar lean, angle guides, appliqué, puff, knockdown, entry and exit all
+  moved their controls and regenerated nothing. The canvas kept showing the
+  old stitches, which reads exactly like a setting that does nothing. It is
+  now taken from the save format, with a test over all 53 saveable settings.
+- **Transforms did not carry entry/exit points**, so moving an object left
+  its start and end markers behind.
+- **Echo fill cut the thread between every ring** — 39 trims for 13 rings on a
+  40 mm square — because an offset ring starts wherever the offsetter put its
+  first vertex. Found by looking at the preview, not by a test.
+- **EXP and JEF were both written upside down**: `planToMoves` already flips
+  the document's +Y-down to the machine's +Y-up and both writers flipped
+  again. It round-tripped through our own reader perfectly.
+- **JEF's colour-change record carries no movement** — readers discard it — so
+  every stitch after the first colour change was offset by however far the
+  next block began. 39 mm on one fixture, in a file that opens and looks
+  plausible.
+- **Cross-stitch tested only the cell CENTRE** for insideness, so a cross near
+  the edge put half its thread outside the outline.
+- **A performance assertion was machine-dependent** ("under 5 ms") and blocked
+  a deploy on the droplet. Rewritten to measure a machine-independent
+  property — and it then failed honestly, exposing that the signature was
+  still materialising the geometry it was about to discard.
 
 ## The gate nobody can skip
 
